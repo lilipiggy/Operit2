@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -10,7 +10,6 @@ use operit_model::FunctionType::FunctionType;
 use operit_model::MemorySearchConfig::MemorySearchConfig;
 use operit_model::ModelConfigData::{ProviderProfile, ResolvedModelConfig};
 use operit_model::PromptFunctionType::PromptFunctionType;
-use operit_link::{CoreHandoffRequest, CoreHandoffSegment};
 
 /// Future returned by provider runtime continuation boundaries.
 pub type ProviderRuntimeSupportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -51,13 +50,6 @@ pub struct ProviderCharacterPromptContext {
 
 /// Supplies runtime-owned data and plugin operations to provider code.
 pub trait ProviderRuntimeSupport: Send + Sync {
-    /// Executes one route-owned Core handoff at an EnhanceAI boundary.
-    #[allow(non_snake_case)]
-    fn handoffCoreAtBoundary<'a>(
-        &'a self,
-        request: CoreHandoffRequest,
-    ) -> ProviderRuntimeSupportFuture<'a, Result<CoreHandoffSegment, String>>;
-
     /// Returns the root directory used by provider runtime data.
     fn dataDir(&self) -> Result<PathBuf, String>;
 

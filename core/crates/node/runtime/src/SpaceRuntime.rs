@@ -1,7 +1,7 @@
 use operit_link::{
     CoreCallRequest, CoreCallResponse, CoreEvent, CoreEventKind, CoreEventStream, CoreLinkError,
-    CoreHandoffRequest, CoreHandoffResponse, CoreStreamAttachment, CoreStreamSource, CoreValue,
-    CoreWatchRequest, CORE_STREAM_POOL_OBJECT_ID,
+    CoreStreamAttachment, CoreStreamSource, CoreValue, CoreWatchRequest,
+    CORE_STREAM_POOL_OBJECT_ID,
 };
 use operit_runtime::core::chat::ChatRuntimeHolder::ChatRuntimeHolder;
 use operit_runtime::core::chat::ChatRuntimeSlot::ChatRuntimeSlot;
@@ -36,21 +36,9 @@ impl SpaceStreamPool {
             .sources
             .lock()
             .expect("Space stream pool mutex poisoned");
-        if let Some(existing) = sources.get(&attachment.streamId) {
-            if !Arc::ptr_eq(existing, &attachment.source) {
-                existing.attachNextSegment(attachment.source);
-            }
-        } else {
+        if !sources.contains_key(&attachment.streamId) {
             sources.insert(attachment.streamId, attachment.source);
         }
-    }
-
-    /// Removes one source after the corresponding Link watch closes.
-    fn remove(&self, streamId: &str) {
-        self.sources
-            .lock()
-            .expect("Space stream pool mutex poisoned")
-            .remove(streamId);
     }
 }
 
@@ -63,40 +51,16 @@ impl SpaceRuntime {
         }
     }
 
-    /// Continues one handoff on the local main runtime and captures its stream source.
-    pub async fn handoffAtBoundaryLocal(
-        &self,
-        request: CoreHandoffRequest,
-    ) -> Result<CoreHandoffResponse, CoreLinkError> {
-        let (value, attachments) = operit_link::withCoreStreamCapture({
-            let holder = self.chatRuntimeHolder.clone();
-            let continuation = request.continuation;
-            async move {
-                let mut holder = holder.lock().await;
-                let stream = holder
-                    .getCore(ChatRuntimeSlot::MAIN)
-                    .continueCoreHandoffValue(continuation)
-                    .await
-                    .map_err(CoreLinkError::internal)?;
-                operit_link::toCoreValue(stream)
-                    .map_err(|error| CoreLinkError::internal(error.to_string()))
-            }
-        })
-        .await;
-        self.adoptAttachments(attachments);
-        let value = value?;
-        let stream = operit_link::fromCoreValue(value)
-            .map_err(|error| CoreLinkError::internal(error.to_string()))?;
-        Ok(CoreHandoffResponse { stream })
-    }
-
     /// Executes one annotation-addressed Space call on the main runtime slot.
     pub async fn call(&self, request: CoreCallRequest) -> CoreCallResponse {
         let requestId = request.requestId.clone();
-        let Some(route) = crate::generated_space_call_route(&request) else {
+        let Some(_route) = crate::generated_space_call_route(&request) else {
             return CoreCallResponse::err(
                 requestId,
-                CoreLinkError::new("SPACE_ROUTE_NOT_FOUND", "Space call route is not registered"),
+                CoreLinkError::new(
+                    "SPACE_ROUTE_NOT_FOUND",
+                    "Space call route is not registered",
+                ),
             );
         };
         let (result, attachments) = operit_link::withCoreStreamCapture({
@@ -116,7 +80,10 @@ impl SpaceRuntime {
     }
 
     /// Reads one annotation-addressed Space watch snapshot on the main slot.
-    pub async fn watchSnapshot(&self, request: CoreWatchRequest) -> Result<CoreEvent, CoreLinkError> {
+    pub async fn watchSnapshot(
+        &self,
+        request: CoreWatchRequest,
+    ) -> Result<CoreEvent, CoreLinkError> {
         let Some(_route) = crate::generated_space_watch_route(&request) else {
             return Err(CoreLinkError::new(
                 "SPACE_ROUTE_NOT_FOUND",
@@ -131,7 +98,7 @@ impl SpaceRuntime {
             async move {
                 let mut holder = holder.lock().await;
                 let core = holder.getCore(ChatRuntimeSlot::MAIN);
-                crate::generated_space_watch_snapshot_on_chat_core(core, &request)
+                crate::generated_space_watch_snapshot_on_chat_core(core, &request).await
             }
         })
         .await;
@@ -158,7 +125,8 @@ impl SpaceRuntime {
         };
         let mut holder = self.chatRuntimeHolder.lock().await;
         let core = holder.getCore(ChatRuntimeSlot::MAIN);
-        crate::generated_space_watch_on_chat_core(core, request)
+        crate::generated_space_watch_on_chat_core(core, request, self.streamAttachmentAdopter())
+            .await
     }
 
     /// Adopts captured stream sources into the Space-owned pool.
@@ -168,15 +136,34 @@ impl SpaceRuntime {
         }
     }
 
+    /// Creates an adopter for stream sources emitted by live Space watch values.
+    #[allow(non_snake_case)]
+    fn streamAttachmentAdopter(&self) -> Arc<dyn Fn(Vec<CoreStreamAttachment>) + Send + Sync> {
+        let streamPool = self.streamPool.clone();
+        Arc::new(move |attachments| {
+            for attachment in attachments {
+                streamPool.adopt(attachment);
+            }
+        })
+    }
+
     /// Opens an embedded response stream referenced by the fixed Link pool object id.
-    fn openEmbeddedStream(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
+    fn openEmbeddedStream(
+        &self,
+        request: CoreWatchRequest,
+    ) -> Result<CoreEventStream, CoreLinkError> {
         if request.propertyName != "openCoreStream" {
             return Err(CoreLinkError::watchNotFound(&request.registryKey()));
         }
         let mut args = match request.args.clone() {
             CoreValue::Map(value) => value,
             CoreValue::Null => BTreeMap::new(),
-            _ => return Err(CoreLinkError::new("INVALID_ARGS", "stream pool arguments must be a map")),
+            _ => {
+                return Err(CoreLinkError::new(
+                    "INVALID_ARGS",
+                    "stream pool arguments must be a map",
+                ))
+            }
         };
         let streamId: String = decodeArgument(&mut args, "streamId")?;
         let source = self

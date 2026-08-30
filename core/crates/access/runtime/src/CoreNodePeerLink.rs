@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 #[cfg(feature = "test-support")]
 use std::sync::Weak;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -9,12 +9,10 @@ use operit_host_api::HostManager::{defaultHostRuntimeTaskSchedulerHost, defaultH
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_host_api::{HostRuntimeTaskSchedulerHost, HttpRequestData};
 use operit_link::{
-    CoreCallRequest, CoreCallResponse, CoreEvent, CoreEventKind, CoreEventStream,
-    CoreHandoffRequest, CoreHandoffResponse, CoreLinkError, CoreLinkPushSession, CorePushItem,
-    CorePushRequest, CoreWatchRequest,
+    CoreCallRequest, CoreCallResponse, CoreEvent, CoreEventKind, CoreEventStream, CoreLinkError,
+    CoreLinkPushSession, CorePushItem, CorePushRequest, CoreWatchRequest,
 };
 use operit_store::CoreSpaceStore::CoreSpaceStore;
-use operit_store::SyncOperationStore::SyncOperation;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use uuid::Uuid;
@@ -48,15 +46,6 @@ pub struct RoutedCoreRequest<T> {
     pub payload: T,
 }
 
-/// Carries one committed Binding operation directly to its selected CoreNode.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CoreNodeBindingApplyRequest {
-    pub bindingKey: String,
-    pub nodeId: String,
-    pub generation: i64,
-    pub operation: SyncOperation,
-}
-
 /// Exposes local and routed Core operations to Link Access without fixing a transport direction.
 #[async_trait(?Send)]
 pub trait CoreNodeLinkClient: operit_link::CoreLinkClient {
@@ -71,14 +60,6 @@ pub trait CoreNodeLinkClient: operit_link::CoreLinkClient {
         previousNodeId: String,
         request: RoutedCoreRequest<CoreCallRequest>,
     ) -> CoreCallResponse;
-
-    /// Executes a routed EnhanceAI continuation handoff.
-    #[allow(non_snake_case)]
-    async fn routedHandoff(
-        &mut self,
-        previousNodeId: String,
-        request: RoutedCoreRequest<CoreHandoffRequest>,
-    ) -> Result<CoreHandoffResponse, CoreLinkError>;
 
     /// Reads a routed watch snapshot received from one directly paired CoreNode.
     #[allow(non_snake_case)]
@@ -95,14 +76,6 @@ pub trait CoreNodeLinkClient: operit_link::CoreLinkClient {
         previousNodeId: String,
         request: RoutedCoreRequest<CoreWatchRequest>,
     ) -> Result<CoreEventStream, CoreLinkError>;
-
-    /// Applies or forwards one committed Binding operation.
-    #[allow(non_snake_case)]
-    async fn routedBindingApply(
-        &mut self,
-        previousNodeId: String,
-        request: RoutedCoreRequest<CoreNodeBindingApplyRequest>,
-    ) -> Result<(), CoreLinkError>;
 
     /// Opens a routed push stream received from one directly paired CoreNode.
     #[allow(non_snake_case)]
@@ -141,14 +114,6 @@ pub trait CoreNodeTransportClient: Send + Sync {
         request: RoutedCoreRequest<CoreCallRequest>,
     ) -> CoreCallResponse;
 
-    /// Executes a routed EnhanceAI continuation handoff from one adjacent CoreNode.
-    #[allow(non_snake_case)]
-    async fn routedHandoff(
-        &self,
-        previousNodeId: String,
-        request: RoutedCoreRequest<CoreHandoffRequest>,
-    ) -> Result<CoreHandoffResponse, CoreLinkError>;
-
     /// Reads a routed watch snapshot from one adjacent CoreNode.
     #[allow(non_snake_case)]
     async fn routedWatchSnapshot(
@@ -164,14 +129,6 @@ pub trait CoreNodeTransportClient: Send + Sync {
         previousNodeId: String,
         request: RoutedCoreRequest<CoreWatchRequest>,
     ) -> Result<CoreEventStream, CoreLinkError>;
-
-    /// Applies one routed committed Binding operation.
-    #[allow(non_snake_case)]
-    async fn routedBindingApply(
-        &self,
-        previousNodeId: String,
-        request: RoutedCoreRequest<CoreNodeBindingApplyRequest>,
-    ) -> Result<(), CoreLinkError>;
 
     /// Opens a routed push stream from one adjacent CoreNode.
     #[allow(non_snake_case)]
@@ -217,8 +174,6 @@ pub enum PeerFramePayload {
 #[serde(tag = "type", content = "body")]
 pub enum PeerRequest {
     Call(RoutedCoreRequest<CoreCallRequest>),
-    Handoff(RoutedCoreRequest<CoreHandoffRequest>),
-    BindingApply(RoutedCoreRequest<CoreNodeBindingApplyRequest>),
     WatchSnapshot(RoutedCoreRequest<CoreWatchRequest>),
     WatchOpen(PeerWatchOpenRequest),
     WatchClose(PeerWatchCloseRequest),
@@ -232,7 +187,6 @@ pub enum PeerRequest {
 #[serde(tag = "type", content = "body")]
 pub enum PeerResponse {
     Call(CoreCallResponse),
-    Handoff(Result<CoreHandoffResponse, CoreLinkError>),
     WatchSnapshot(Result<CoreEvent, CoreLinkError>),
     Operation(Result<(), CoreLinkError>),
 }
@@ -487,40 +441,6 @@ impl PeerLinkClient {
         }
     }
 
-    /// Executes one EnhanceAI continuation handoff through the adjacent CoreNode.
-    #[allow(non_snake_case)]
-    pub async fn routedHandoff(
-        &self,
-        request: RoutedCoreRequest<CoreHandoffRequest>,
-    ) -> Result<CoreHandoffResponse, CoreLinkError> {
-        match self.connection.request(PeerRequest::Handoff(request)).await? {
-            PeerResponse::Handoff(result) => result,
-            _ => Err(CoreLinkError::new(
-                "PEER_PROTOCOL_ERROR",
-                "Peer Link returned the wrong response",
-            )),
-        }
-    }
-
-    /// Applies one committed Binding operation through the adjacent CoreNode.
-    #[allow(non_snake_case)]
-    pub async fn routedBindingApply(
-        &self,
-        request: RoutedCoreRequest<CoreNodeBindingApplyRequest>,
-    ) -> Result<(), CoreLinkError> {
-        match self
-            .connection
-            .request(PeerRequest::BindingApply(request))
-            .await?
-        {
-            PeerResponse::Operation(result) => result,
-            _ => Err(CoreLinkError::new(
-                "PEER_PROTOCOL_ERROR",
-                "Peer Link returned the wrong response",
-            )),
-        }
-    }
-
     /// Reads one routed watch snapshot through the adjacent CoreNode.
     #[allow(non_snake_case)]
     pub async fn routedWatchSnapshot(
@@ -547,6 +467,9 @@ impl PeerLinkClient {
         request: RoutedCoreRequest<CoreWatchRequest>,
     ) -> Result<CoreEventStream, CoreLinkError> {
         let subscriptionId = format!("peer-watch-{}", Uuid::new_v4().simple());
+        let requestId = request.payload.requestId.0.clone();
+        let targetObjectId = request.payload.targetObjectId;
+        let propertyName = request.payload.propertyName.clone();
         let (sender, receiver) = mpsc::unbounded_channel();
         self.connection
             .outgoingWatches
@@ -578,8 +501,32 @@ impl PeerLinkClient {
                 return Err(error);
             }
         }
+        operit_util::AppLogger::AppLogger::i(
+            "PeerWatchTrace",
+            &format!(
+                "outgoing_watch_opened local={} peer={} subscription={} requestId={} target={} property={}",
+                self.connection.localNodeId,
+                self.connection.peerNodeId,
+                subscriptionId,
+                requestId,
+                targetObjectId,
+                propertyName
+            ),
+        );
         let connection = self.connection.clone();
         Ok(CoreEventStream::new(receiver).withOnClose(move || {
+            operit_util::AppLogger::AppLogger::i(
+                "PeerWatchTrace",
+                &format!(
+                    "outgoing_watch_drop local={} peer={} subscription={} requestId={} target={} property={}",
+                    connection.localNodeId,
+                    connection.peerNodeId,
+                    subscriptionId,
+                    requestId,
+                    targetObjectId,
+                    propertyName
+                ),
+            );
             let _ = connection.removeOutgoingWatch(&subscriptionId);
             let connection = connection.clone();
             let _ = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
@@ -801,16 +748,6 @@ impl PeerConnection {
             PeerRequest::Call(request) => {
                 PeerResponse::Call(self.core.routedCall(self.peerNodeId.clone(), request).await)
             }
-            PeerRequest::Handoff(request) => PeerResponse::Handoff(
-                self.core
-                    .routedHandoff(self.peerNodeId.clone(), request)
-                    .await,
-            ),
-            PeerRequest::BindingApply(request) => PeerResponse::Operation(
-                self.core
-                    .routedBindingApply(self.peerNodeId.clone(), request)
-                    .await,
-            ),
             PeerRequest::WatchSnapshot(request) => PeerResponse::WatchSnapshot(
                 self.core
                     .routedWatchSnapshot(self.peerNodeId.clone(), request)
@@ -870,13 +807,37 @@ impl PeerConnection {
                         loop {
                             let event = tokio::select! {
                                 biased;
-                                _ = &mut cancelReceiver => break,
+                                _ = &mut cancelReceiver => {
+                                    operit_util::AppLogger::AppLogger::i(
+                                        "PeerWatchTrace",
+                                        &format!(
+                                            "incoming_watch_cancelled local={} peer={} subscription={} requestId={} property={}",
+                                            connection.localNodeId,
+                                            connection.peerNodeId,
+                                            taskSubscriptionId,
+                                            watchRequestId,
+                                            watchProperty
+                                        ),
+                                    );
+                                    break
+                                },
                                 event = stream.recv() => event,
                             };
                             let Some(event) = event else {
                                 let error = CoreLinkError::new(
                                     "PEER_WATCH_SOURCE_CLOSED",
                                     "Routed watch source closed before a completion event",
+                                );
+                                operit_util::AppLogger::AppLogger::w(
+                                    "PeerWatchTrace",
+                                    &format!(
+                                        "incoming_watch_source_closed local={} peer={} subscription={} requestId={} property={}",
+                                        connection.localNodeId,
+                                        connection.peerNodeId,
+                                        taskSubscriptionId,
+                                        watchRequestId,
+                                        watchProperty
+                                    ),
                                 );
                                 let closeResult = connection
                                     .sender
@@ -925,7 +886,7 @@ impl PeerConnection {
                                 operit_util::AppLogger::AppLogger::e(
                                     "PeerWatchTrace",
                                     &format!(
-                                        "incoming_watch_event_send_failed local={} peer={} subscription={} requestId={} property={} error={}",
+                                        "peer_watch_send_failed local={} peer={} subscription={} requestId={} property={} error={}",
                                         connection.localNodeId,
                                         connection.peerNodeId,
                                         taskSubscriptionId,
@@ -957,6 +918,13 @@ impl PeerConnection {
         &self,
         request: PeerWatchCloseRequest,
     ) -> Result<(), CoreLinkError> {
+        operit_util::AppLogger::AppLogger::i(
+            "PeerWatchTrace",
+            &format!(
+                "incoming_watch_close_request local={} peer={} subscription={}",
+                self.localNodeId, self.peerNodeId, request.subscriptionId
+            ),
+        );
         let sender = self
             .incomingWatches
             .lock()
@@ -1108,6 +1076,13 @@ impl PeerConnection {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        operit_util::AppLogger::AppLogger::w(
+            "PeerWatchTrace",
+            &format!(
+                "peer_connection_close local={} peer={} channel={} reason={}",
+                self.localNodeId, self.peerNodeId, self.channelId, reason
+            ),
+        );
         self.sender.close();
         let pending = std::mem::take(
             &mut *self
@@ -1446,6 +1421,11 @@ fn failOutboundPeerFrameBatch(state: &Arc<OutboundPeerFrameBatchState>, error: S
     );
 }
 
+/// Returns whether one HTTP Peer carrier chunk should be logged.
+fn shouldLogPeerCarrierChunk(count: u64) -> bool {
+    count <= 5 || count % 256 == 0
+}
+
 /// Drains queued Peer frames into ordered bounded HTTP batches.
 async fn runOutboundPeerFrameBatchSender(
     state: Arc<OutboundPeerFrameBatchState>,
@@ -1492,7 +1472,9 @@ pub async fn openOutboundPeerLink(
     topologyStore: CoreSpaceStore,
 ) -> Result<PeerLinkClient, String> {
     match session.transport {
-        LinkTransportPreference::Http => openOutboundPeerLinkHttp(session, core, topologyStore).await,
+        LinkTransportPreference::Http => {
+            openOutboundPeerLinkHttp(session, core, topologyStore).await
+        }
         LinkTransportPreference::WebSocket => {
             openOutboundPeerLinkWebSocket(session, core, topologyStore).await
         }
@@ -1565,6 +1547,17 @@ async fn openOutboundPeerLinkHttp(
     let closedSignal = openedSender.clone();
     let chunkFrameQueueSender = frameQueueSender.clone();
     let closedFrameQueueSender = frameQueueSender.clone();
+    let openedLocalNodeId = localNodeId.clone();
+    let openedPeerNodeId = peerNodeId.clone();
+    let openedChannelId = channelId.clone();
+    let chunkLocalNodeId = localNodeId.clone();
+    let chunkPeerNodeId = peerNodeId.clone();
+    let chunkChannelId = channelId.clone();
+    let chunkCount = Arc::new(AtomicU64::new(0));
+    let chunkCountForLog = chunkCount.clone();
+    let closedLocalNodeId = localNodeId.clone();
+    let closedPeerNodeId = peerNodeId.clone();
+    let closedChannelId = channelId.clone();
     let openResult = defaultHttpHost().openHttpByteStream(
         streamId,
         HttpRequestData {
@@ -1587,6 +1580,13 @@ async fn openOutboundPeerLinkHttp(
             proxyPort: 0,
         },
         Arc::new(move || {
+            operit_util::AppLogger::AppLogger::i(
+                "PeerCarrierTrace",
+                &format!(
+                    "http_stream_opened local={} peer={} channel={}",
+                    openedLocalNodeId, openedPeerNodeId, openedChannelId
+                ),
+            );
             if let Some(sender) = openedSignal
                 .lock()
                 .expect("Peer Link open signal lock poisoned")
@@ -1598,6 +1598,20 @@ async fn openOutboundPeerLinkHttp(
         Arc::new(move |chunk| {
             let frames = decodePeerFrameChunks(&chunkBuffer, chunk)
                 .expect("Peer Link frame stream must decode");
+            let chunkIndex = chunkCountForLog.fetch_add(1, Ordering::Relaxed) + 1;
+            if shouldLogPeerCarrierChunk(chunkIndex) || frames.len() > 1 {
+                operit_util::AppLogger::AppLogger::i(
+                    "PeerCarrierTrace",
+                    &format!(
+                        "http_stream_chunk local={} peer={} channel={} chunk={} frames={}",
+                        chunkLocalNodeId,
+                        chunkPeerNodeId,
+                        chunkChannelId,
+                        chunkIndex,
+                        frames.len()
+                    ),
+                );
+            }
             let sender = chunkFrameQueueSender
                 .lock()
                 .expect("Peer Link frame queue lock poisoned");
@@ -1619,6 +1633,13 @@ async fn openOutboundPeerLinkHttp(
                 Ok(()) => "Peer Link stream closed".to_string(),
                 Err(error) => error,
             };
+            operit_util::AppLogger::AppLogger::w(
+                "PeerCarrierTrace",
+                &format!(
+                    "http_stream_closed local={} peer={} channel={} reason={}",
+                    closedLocalNodeId, closedPeerNodeId, closedChannelId, reason
+                ),
+            );
             if let Some(sender) = closedSignal
                 .lock()
                 .expect("Peer Link close signal lock poisoned")
@@ -1670,11 +1691,9 @@ async fn openOutboundPeerLinkWebSocket(
     let peerNodeId = session.coreDeviceId.clone();
     let channelId = format!("peer-channel-{}", Uuid::new_v4().simple());
     let websocket = RemoteWsConnection::open(&session, "peer").await?;
-    websocket.sendPayload(RemoteWsPayload::PeerChannelOpen(
-        PeerChannelOpenEnvelope {
-            channelId: channelId.clone(),
-        },
-    ))?;
+    websocket.sendPayload(RemoteWsPayload::PeerChannelOpen(PeerChannelOpenEnvelope {
+        channelId: channelId.clone(),
+    }))?;
     match websocket.nextResponse().await? {
         RemoteWsResponse::PeerOpened(openedChannelId) if openedChannelId == channelId => {}
         RemoteWsResponse::Error(error) => return Err(error.to_string()),
@@ -1710,7 +1729,8 @@ async fn openOutboundPeerLinkWebSocket(
                         };
                         match response {
                             RemoteWsResponse::PeerFrame(frame) => {
-                                if let Err(error) = frameDispatchConnection.receiveFrame(frame).await
+                                if let Err(error) =
+                                    frameDispatchConnection.receiveFrame(frame).await
                                 {
                                     frameDispatchConnection
                                         .close(format!("Peer Link frame dispatch failed: {error}"));
@@ -1749,11 +1769,10 @@ impl PeerFrameSender for OutboundPeerWebSocketSender {
         if self.closed.load(Ordering::Acquire) {
             return Err("Outbound Peer WebSocket is closed".to_string());
         }
-        self.connection
-            .sendPayload(RemoteWsPayload::PeerFrame {
-                channelId: self.channelId.clone(),
-                frame,
-            })
+        self.connection.sendPayload(RemoteWsPayload::PeerFrame {
+            channelId: self.channelId.clone(),
+            frame,
+        })
     }
 
     /// Closes the Peer WebSocket carrier exactly once.

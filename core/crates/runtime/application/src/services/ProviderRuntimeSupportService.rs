@@ -13,10 +13,8 @@ use operit_plugin_sdk::toolpkg::ToolPkgHooks::{
 use operit_providers::runtime_support::{
     ProviderCharacterPromptContext, ProviderFunctionModelBinding, ProviderMessageTiming,
     ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
-    ProviderRuntimeSupportFuture,
-    ProviderToolPkgAiProviderRegistration,
+    ProviderRuntimeSupportFuture, ProviderToolPkgAiProviderRegistration,
 };
-use operit_link::{CoreHandoffRequest, CoreHandoffSegment};
 use operit_tools::tools::skill_runtime::SkillRepository::SkillRepository;
 use operit_tools::tools::AIToolHandler::AIToolHandler;
 
@@ -43,16 +41,6 @@ struct RuntimeProviderSupport {
 }
 
 impl ProviderRuntimeSupport for RuntimeProviderSupport {
-    /// Executes one route-owned Core handoff through the tool runtime boundary.
-    #[allow(non_snake_case)]
-    fn handoffCoreAtBoundary<'a>(
-        &'a self,
-        request: CoreHandoffRequest,
-    ) -> ProviderRuntimeSupportFuture<'a, Result<CoreHandoffSegment, String>> {
-        let runtimeSupport = self.tool_handler.runtimeSupport();
-        Box::pin(async move { runtimeSupport.handoffCoreAtBoundary(request).await })
-    }
-
     /// Returns the root directory used by runtime data.
     fn dataDir(&self) -> Result<PathBuf, String> {
         Ok(ApiPreferences::data_dir())

@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use std::sync::{Arc, Mutex};
 
-
 use crate::core::chat::AIMessageManager::{
     logMessageTiming, messageTimingNow, AIMessageManager, BuildUserMessageContentRequest,
     SendMessageRequest as AIMessageSendRequest, StableContextWindowRequest,
@@ -34,6 +33,7 @@ use operit_model::InputProcessingState::InputProcessingState;
 use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::{AssistantMarkupStreamState, MessagePartCodec};
 use operit_model::PromptFunctionType::PromptFunctionType;
+use operit_model::PromptTurn::PromptTurn;
 use operit_providers::chat::llmprovider::AIService::SharedAiResponseStream;
 use operit_providers::chat::EnhancedAIService::{
     EnhancedAIService, SendMessageCallbacks, SendMessageOptions,
@@ -46,12 +46,9 @@ use operit_util::stream::RevisableTextStream::{
 };
 use operit_util::stream::Stream::Stream;
 use operit_util::stream::TextStreamRevisionTracker::TextStreamRevisionTracker;
-use operit_util::MarkdownRenderStream::{MarkdownRenderEventStream, MarkdownStreamEvent};
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, MESSAGE_STORE_CHAIN, RECEIVE_CHAIN, SEND_CHAIN};
-
-/// Minimum interval between persisted streaming snapshots.
-pub const STREAM_PERSIST_INTERVAL_MS: i64 = 1000;
+use operit_util::MarkdownRenderStream::{MarkdownRenderEventStream, MarkdownStreamEvent};
 
 /// Maximum text length used when preparing automatic speech previews.
 pub const AUTO_READ_PREVIEW_MAX: usize = 48;
@@ -61,22 +58,8 @@ pub fn coreResponseStreamSource(
     stream: SharedAiResponseStream,
     streamKey: String,
 ) -> Arc<CoreStreamSource> {
-    coreResponseStreamSourceWithCompletion(stream, streamKey, None)
-}
-
-/// Creates a response source that can add structured metadata to its terminal event.
-pub fn coreResponseStreamSourceWithCompletion(
-    stream: SharedAiResponseStream,
-    streamKey: String,
-    completionMapper: Option<Arc<dyn Fn(CoreValue) -> CoreValue + Send + Sync>>,
-) -> Arc<CoreStreamSource> {
     Arc::new(CoreStreamSource::new(move |request| {
-        openCoreResponseStream(
-            stream.clone(),
-            streamKey.clone(),
-            completionMapper.clone(),
-            request,
-        )
+        openCoreResponseStream(stream.clone(), streamKey.clone(), request)
     }))
 }
 
@@ -84,19 +67,30 @@ pub fn coreResponseStreamSourceWithCompletion(
 fn openCoreResponseStream(
     stream: SharedAiResponseStream,
     streamKey: String,
-    completionMapper: Option<Arc<dyn Fn(CoreValue) -> CoreValue + Send + Sync>>,
     request: CoreWatchRequest,
 ) -> Result<CoreEventStream, CoreLinkError> {
     let (sender, receiver) = CoreEventStream::channel();
     let initialContent = stream.initial_render_content();
     let mut orderedStream = stream;
+    AppLogger::i(
+        "CoreStreamTrace",
+        &format!(
+            "response.open requestId={} target={} property={} streamKey={} initialChars={}",
+            request.requestId.0,
+            request.targetObjectId,
+            request.propertyName,
+            streamKey,
+            initialContent.chars().count()
+        ),
+    );
     defaultHostRuntimeTaskSchedulerHost()
         .scheduleHostRuntimeAsyncTask(
             "core-runtime-text-markdown",
             Box::new(move || {
                 Box::pin(async move {
                     let mut markdownStream = MarkdownRenderEventStream::new(streamKey.clone());
-                    for event in markdownStream.beginSnapshot(&initialContent) {
+                    let snapshotEvents = markdownStream.beginSnapshot(&initialContent);
+                    for event in snapshotEvents {
                         sendCoreTextEvent(
                             &sender,
                             &request.requestId,
@@ -111,7 +105,8 @@ fn openCoreResponseStream(
                     let mut itemCollector = |item: ResponseStreamItem| match item {
                         ResponseStreamItem::Chunk(chunk) => {
                             let _ = textRevisions.append(&chunk);
-                            for event in markdownStream.pushChunk(&chunk) {
+                            let events = markdownStream.pushChunk(&chunk);
+                            for event in events {
                                 sendCoreTextEvent(
                                     &sender,
                                     &request.requestId,
@@ -127,6 +122,13 @@ fn openCoreResponseStream(
                             let markdownEvent = match event.event_type {
                                 operit_util::stream::RevisableTextStream::TextStreamEventType::Savepoint => {
                                     textRevisions.savepoint(&event.id);
+                                    AppLogger::i(
+                                        "CoreStreamTrace",
+                                        &format!(
+                                            "response.revision.savepoint streamKey={} id={}",
+                                            streamKey, event.id
+                                        ),
+                                    );
                                     MarkdownStreamEvent::savepoint(streamKey.clone(), event.id)
                                 }
                                 operit_util::stream::RevisableTextStream::TextStreamEventType::Rollback => {
@@ -134,6 +136,13 @@ fn openCoreResponseStream(
                                         "markdown rollback must reference an active savepoint",
                                     );
                                     markdownStream.restoreContent(content);
+                                    AppLogger::i(
+                                        "CoreStreamTrace",
+                                        &format!(
+                                            "response.revision.rollback streamKey={} id={}",
+                                            streamKey, event.id
+                                        ),
+                                    );
                                     MarkdownStreamEvent::rollback(streamKey.clone(), event.id)
                                 }
                             };
@@ -151,10 +160,10 @@ fn openCoreResponseStream(
                     orderedStream.collect_ordered(&mut itemCollector).await;
                     let completionValue = operit_link::toCoreValue(markdownStream.completed())
                         .expect("MarkdownStreamEvent must serialize");
-                    let completionValue = completionMapper
-                        .as_ref()
-                        .map(|mapper| mapper(completionValue.clone()))
-                        .unwrap_or(completionValue);
+                    AppLogger::i(
+                        "CoreStreamTrace",
+                        &format!("response.completed streamKey={}", streamKey),
+                    );
                     sendCoreTextEvent(
                         &sender,
                         &request.requestId,
@@ -179,13 +188,24 @@ fn sendCoreTextEvent(
     kind: CoreEventKind,
     value: CoreValue,
 ) {
-    let _ = sender.send(CoreEvent {
-        requestId: Some(requestId.clone()),
-        targetObjectId,
-        propertyName: propertyName.to_string(),
-        kind,
-        value,
-    });
+    if sender
+        .send(CoreEvent {
+            requestId: Some(requestId.clone()),
+            targetObjectId,
+            propertyName: propertyName.to_string(),
+            kind,
+            value,
+        })
+        .is_err()
+    {
+        AppLogger::e(
+            "CoreStreamTrace",
+            &format!(
+                "response.event.receiver_closed requestId={} target={} property={}",
+                requestId.0, targetObjectId, propertyName
+            ),
+        );
+    }
 }
 
 /// Builds the localized host notice for a timed-out ToolPkg pre-send hook.
@@ -280,6 +300,7 @@ pub struct SendUserMessageProcessingRequest<'a> {
     pub chatId: String,
     pub messageText: String,
     pub chatHistory: Vec<ChatMessage>,
+    pub promptHistoryOverride: Option<Vec<PromptTurn>>,
     pub workspacePath: Option<String>,
     pub promptFunctionType: PromptFunctionType,
     pub roleCardId: String,
@@ -299,8 +320,7 @@ pub struct SendUserMessageProcessingRequest<'a> {
     pub proxySenderNameOverride: Option<String>,
     pub suppressUserMessageInHistory: bool,
     pub isAutoContinuation: bool,
-    pub assistantMessageTimestamp: Option<i64>,
-    pub executionGeneration: Option<i64>,
+    pub isResume: bool,
     pub turnOptions: ChatTurnOptions,
 }
 
@@ -868,36 +888,6 @@ impl MessageProcessingDelegate {
         aiMessage
     }
 
-    /// Claims the next streaming persistence interval before allocating a snapshot.
-    #[allow(non_snake_case)]
-    fn claimStreamingPersistenceSnapshot(
-        turnOptions: &ChatTurnOptions,
-        lastStreamingPersistAt: &Arc<Mutex<i64>>,
-    ) -> bool {
-        if !turnOptions.persistTurn {
-            return false;
-        }
-        let now = messageTimingNow().startedAtMs as i64;
-        let mut lastPersistAt = lastStreamingPersistAt
-            .lock()
-            .expect("streaming persist timestamp mutex poisoned");
-        if now - *lastPersistAt < STREAM_PERSIST_INTERVAL_MS {
-            return false;
-        }
-        *lastPersistAt = now;
-        true
-    }
-
-    /// Persists one already-claimed streaming response snapshot for a chat.
-    #[allow(non_snake_case)]
-    fn persistStreamingSnapshot(
-        chatHistoryDelegate: &mut ChatHistoryDelegate,
-        chatId: &str,
-        aiMessage: &ChatMessage,
-    ) {
-        chatHistoryDelegate.persistStreamingMessage(aiMessage.clone(), chatId.to_string());
-    }
-
     /// Reads the latest cancellation snapshot for a chat's active turn.
     #[allow(non_snake_case)]
     pub fn readCurrentTurnCancellationSnapshot(
@@ -1072,38 +1062,6 @@ impl MessageProcessingDelegate {
     > {
         let chatId = request.chatId.clone();
         let originalMessageText = request.messageText.trim().to_string();
-        let continuationAssistantMessage = match request.assistantMessageTimestamp {
-            Some(timestamp) => {
-                let message = request
-                    .chatHistory
-                    .iter()
-                    .find(|message| message.timestamp == timestamp)
-                    .cloned()
-                    .ok_or_else(|| {
-                        operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed(
-                            format!(
-                                "response continuation assistant message does not exist: {timestamp}"
-                            ),
-                        )
-                    })?;
-                if message.sender != "ai" {
-                    return Err(
-                        operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed(
-                            format!(
-                                "response continuation timestamp is not an assistant message: {timestamp}"
-                            ),
-                        ),
-                    );
-                }
-                Some(message)
-            }
-            None => None,
-        };
-        let continuationContentPrefix = match continuationAssistantMessage.as_ref() {
-            Some(message) => message.assistantProtocolMarkup(),
-            None => String::new(),
-        };
-        let isResponseExecutionContinuation = continuationAssistantMessage.is_some();
         AppLogger::i(
             "CoreSend",
             &format!(
@@ -1297,15 +1255,13 @@ impl MessageProcessingDelegate {
             "CoreSend",
             &format!("response stream create start chatId={}", chatId),
         );
-        let assistantMessageTimestamp = continuationAssistantMessage
-            .as_ref()
-            .map(|message| message.timestamp)
-            .unwrap_or_else(ChatMessageTimestampAllocator::next);
+        let assistantMessageTimestamp = ChatMessageTimestampAllocator::next();
         let completionStream = match AIMessageManager::sendMessage(AIMessageSendRequest {
             enhancedAiService: request.enhancedAiService,
             chatId: Some(chatId.clone()),
             messageContent: requestMessageContent,
             chatHistory: request.chatHistory,
+            promptHistoryOverride: request.promptHistoryOverride.clone(),
             workspacePath: request.workspacePath.clone(),
             promptFunctionType: request.promptFunctionType.clone(),
             enableThinking: request.enableThinking,
@@ -1328,9 +1284,7 @@ impl MessageProcessingDelegate {
                 nonFatalErrorEventFlow: self.nonFatalErrorEventFlow.clone(),
             })),
             onToolInvocation: None,
-            assistantMessageTimestamp: Some(assistantMessageTimestamp),
-            executionGeneration: request.executionGeneration.unwrap_or(0),
-            segmentIndex: 0,
+            resume: request.isResume,
         })
         .await
         {
@@ -1373,7 +1327,7 @@ impl MessageProcessingDelegate {
             }
         };
         let sharedResponseStream = completionStream.clone();
-        sharedResponseStream.set_initial_content(continuationContentPrefix.clone());
+        sharedResponseStream.set_initial_content(String::new());
         self.withRuntime(Some(chatId.clone()), |runtime| {
             runtime.responseStream = Some(sharedResponseStream.clone());
         });
@@ -1382,20 +1336,17 @@ impl MessageProcessingDelegate {
             .getLastProviderModel()
             .unwrap_or_default();
         let (initialProvider, initialModelName) = split_provider_model(&initialProviderModel);
-        let mut aiMessage = match continuationAssistantMessage {
-            Some(message) => message,
-            None => ChatMessage {
-                sender: "ai".to_string(),
-                timestamp: assistantMessageTimestamp,
-                roleName: currentRoleName.clone(),
-                provider: initialProvider,
-                modelName: initialModelName,
-                inputTokens: 0,
-                outputTokens: 0,
-                cachedInputTokens: 0,
-                displayMode: ChatMessageDisplayMode::NORMAL,
-                ..ChatMessage::new("ai".to_string())
-            },
+        let mut aiMessage = ChatMessage {
+            sender: "ai".to_string(),
+            timestamp: assistantMessageTimestamp,
+            roleName: currentRoleName.clone(),
+            provider: initialProvider,
+            modelName: initialModelName,
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedInputTokens: 0,
+            displayMode: ChatMessageDisplayMode::NORMAL,
+            ..ChatMessage::new("ai".to_string())
         };
         let streamKey = format!("chat-message-stream:{}", aiMessage.timestamp);
         let segmentSource = coreResponseStreamSource(sharedResponseStream.clone(), streamKey);
@@ -1406,20 +1357,15 @@ impl MessageProcessingDelegate {
         AppLogger::i(
             "ResponseExecutionTrace",
             &format!(
-                "response_segment_started chatId={} timestamp={} continuation={} initialChars={}",
-                chatId,
-                aiMessage.timestamp,
-                isResponseExecutionContinuation,
-                continuationContentPrefix.chars().count()
+                "response_started chatId={} timestamp={}",
+                chatId, aiMessage.timestamp,
             ),
         );
         let workerChatId = chatId.clone();
         let workerTurnOptions = request.turnOptions.clone();
         let workerAiMessage = Arc::new(Mutex::new(aiMessage.clone()));
         let workerResponseStream = sharedResponseStream.clone();
-        let workerRevisionTracker = Arc::new(Mutex::new(TextStreamRevisionTracker::new(
-            &continuationContentPrefix,
-        )));
+        let workerRevisionTracker = Arc::new(Mutex::new(TextStreamRevisionTracker::new("")));
         let workerPartStream = Arc::new(Mutex::new(AssistantMarkupStreamState::new()));
         let workerService = request.enhancedAiService.clone();
         let workerChatHistoryDelegate =
@@ -1440,7 +1386,6 @@ impl MessageProcessingDelegate {
             });
         let workerWorkspaceToolHookSession = Arc::new(Mutex::new(workspaceToolHookSession.clone()));
         let workerWorkspaceToolHookHandler = Arc::new(Mutex::new(workspaceToolHookHandler.clone()));
-        let workerStreamingSnapshotPersistAt = Arc::new(Mutex::new(0i64));
         if userMessageAdded {
             userMessage.sentAt = workerRequestSentAt;
             request
@@ -1462,13 +1407,8 @@ impl MessageProcessingDelegate {
         }
         let workerFirstResponseElapsed = Arc::new(Mutex::new(None::<i64>));
         let chunkChatId = workerChatId.clone();
-        let chunkTurnOptions = workerTurnOptions.clone();
         let chunkFirstResponseElapsed = workerFirstResponseElapsed.clone();
-        let chunkAiMessage = workerAiMessage.clone();
-        let chunkChatHistoryDelegate = workerChatHistoryDelegate.clone();
         let chunkRevisionTracker = workerRevisionTracker.clone();
-        let chunkPartStream = workerPartStream.clone();
-        let chunkStreamingSnapshotPersistAt = workerStreamingSnapshotPersistAt.clone();
         let completionChatId = workerChatId.clone();
         let completionTurnOptions = workerTurnOptions.clone();
         let completionAiMessage = workerAiMessage.clone();
@@ -1480,7 +1420,6 @@ impl MessageProcessingDelegate {
         let completionWorkspaceToolHookHandler = workerWorkspaceToolHookHandler.clone();
         let completionFirstResponseElapsed = workerFirstResponseElapsed.clone();
         let completionResponseStream = workerResponseStream.clone();
-        let completionExecutionGeneration = request.executionGeneration;
         let mut responseItems = workerResponseStream.clone();
         defaultHostRuntimeTaskSchedulerHost()
             .scheduleHostRuntimeAsyncTask(
@@ -1529,47 +1468,10 @@ impl MessageProcessingDelegate {
                                     );
                                 }
                                 drop(firstResponseElapsed);
-                                let contentSnapshot = {
-                                    let mut tracker = chunkRevisionTracker
-                                        .lock()
-                                        .expect("revision tracker mutex poisoned");
-                                    let _ = tracker.append(&chunk);
-                                    let shouldPersist = MessageProcessingDelegate::claimStreamingPersistenceSnapshot(
-                                        &chunkTurnOptions,
-                                        &chunkStreamingSnapshotPersistAt,
-                                    );
-                                    if shouldPersist {
-                                        Some(tracker.current_content().to_owned())
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some(content) = contentSnapshot {
-                                    let workerAiMessage = {
-                                        let parts = {
-                                            let mut partStream = chunkPartStream
-                                                .lock()
-                                                .expect("assistant message-part stream mutex poisoned");
-                                            partStream.resetToSnapshot(&content).expect(
-                                                "streaming assistant snapshot must parse into message parts",
-                                            );
-                                            partStream.parts().to_vec()
-                                        };
-                                        let mut workerAiMessage = chunkAiMessage
-                                            .lock()
-                                            .expect("worker AI message mutex poisoned");
-                                        workerAiMessage.parts = parts;
-                                        workerAiMessage.clone()
-                                    };
-                                    let mut workerChatHistoryDelegate = chunkChatHistoryDelegate
-                                        .lock()
-                                        .expect("worker chat history mutex poisoned");
-                                    MessageProcessingDelegate::persistStreamingSnapshot(
-                                        &mut workerChatHistoryDelegate,
-                                        &chunkChatId,
-                                        &workerAiMessage,
-                                    );
-                                }
+                                chunkRevisionTracker
+                                    .lock()
+                                    .expect("revision tracker mutex poisoned")
+                                    .append(&chunk);
                             })
                             .await;
                         AppLogger::i(
@@ -1660,11 +1562,6 @@ impl MessageProcessingDelegate {
                             workerAiMessage.outputTokens += tokenSnapshot.outputTokens;
                             workerAiMessage.cachedInputTokens += tokenSnapshot.cachedInputTokens;
                             workerAiMessage.parts = parts;
-                            if let Some(executionGeneration) = completionExecutionGeneration {
-                                workerAiMessage.completedExecutionGeneration = workerAiMessage
-                                    .completedExecutionGeneration
-                                    .max(executionGeneration);
-                            }
                             MessageProcessingDelegate::withTurnMetrics(
                                 ChatMessage {
                                     completedAt: completedElapsed,
@@ -1795,6 +1692,48 @@ impl MessageProcessingDelegate {
                             }
                         }
                         drop(workerChatHistoryDelegate);
+                        if let Some(routeChange) = workerService.takePendingRouteChange() {
+                            ChainLogger::info(
+                                SEND_CHAIN,
+                                "send.route_change.request",
+                                &[
+                                    ("chatId", completionChatId.clone()),
+                                    ("targetNodeId", routeChange.targetNodeId.clone()),
+                                ],
+                            );
+                            if let Err(error) = workerService
+                                .requestCoreRouteChange(
+                                    completionChatId.clone(),
+                                    routeChange.targetNodeId,
+                                )
+                                .await
+                            {
+                                let message = format!("route change failed: {error}");
+                                ChainLogger::error(
+                                    SEND_CHAIN,
+                                    "send.route_change.error",
+                                    &[
+                                        ("chatId", completionChatId.clone()),
+                                        ("error", message.clone()),
+                                    ],
+                                );
+                                completionMessageProcessingDelegate
+                                    .lock()
+                                    .expect(
+                                        "worker message processing delegate mutex poisoned",
+                                    )
+                                    .finishChatExecution(
+                                        completionChatId.clone(),
+                                        InputProcessingState::Error { message },
+                                    );
+                                return;
+                            }
+                            ChainLogger::info(
+                                SEND_CHAIN,
+                                "send.route_change.completed",
+                                &[("chatId", completionChatId.clone())],
+                            );
+                        }
                         completionMessageProcessingDelegate
                             .lock()
                             .expect("worker message processing delegate mutex poisoned")
@@ -1835,6 +1774,7 @@ impl MessageProcessingDelegate {
                 chatId: request.chatId,
                 messageText: request.requestMessageContent,
                 chatHistory: request.requestHistory,
+                promptHistoryOverride: None,
                 workspacePath: request.workspacePath,
                 promptFunctionType: request.promptFunctionType,
                 roleCardId: request.roleCardId,
@@ -1854,8 +1794,7 @@ impl MessageProcessingDelegate {
                 proxySenderNameOverride: None,
                 suppressUserMessageInHistory: true,
                 isAutoContinuation: false,
-                assistantMessageTimestamp: None,
-                executionGeneration: None,
+                isResume: false,
                 turnOptions: ChatTurnOptions {
                     persistTurn: false,
                     ..ChatTurnOptions::default()

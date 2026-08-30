@@ -6,8 +6,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
-import '../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../interactions/MessagePressShield.dart';
 import 'EnhancedCodeBlock.dart';
@@ -21,6 +19,9 @@ import 'StreamMarkdownRendererState.dart';
 import '../../features/chat/components/part/CustomXmlRenderer.dart';
 
 part 'CanvasMarkdownNodeRenderer.dart';
+
+typedef MarkdownContentSplitter =
+    Future<List<core_proxy.MarkdownStreamEvent>> Function(String content);
 
 class StreamMarkdownRenderer extends StatefulWidget {
   const StreamMarkdownRenderer({
@@ -39,6 +40,8 @@ class StreamMarkdownRenderer extends StatefulWidget {
     this.allowExpandedThinkingFullHeight = false,
     this.selectionRoot = true,
     this.onContentReady,
+    this.onStreamDone,
+    required this.splitMarkdownContent,
   });
 
   final String content;
@@ -55,6 +58,8 @@ class StreamMarkdownRenderer extends StatefulWidget {
   final bool allowExpandedThinkingFullHeight;
   final bool selectionRoot;
   final VoidCallback? onContentReady;
+  final VoidCallback? onStreamDone;
+  final MarkdownContentSplitter splitMarkdownContent;
 
   @override
   State<StreamMarkdownRenderer> createState() => _StreamMarkdownRendererState();
@@ -70,14 +75,16 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
   late StreamMarkdownRendererState _rendererState;
   final Set<String> _scheduledVisibleNodeKeys = <String>{};
   bool _streamDone = false;
+  bool _streamDoneNotified = false;
   int _startGeneration = 0;
+  int _streamEventCount = 0;
 
   @override
   void initState() {
     super.initState();
     _rendererId = _computeRendererId();
     _rendererState = widget.state ?? StreamMarkdownRendererState();
-    _startCurrentContent();
+    _startCurrentContent(reason: 'init');
   }
 
   @override
@@ -96,8 +103,25 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
         stateChanged ||
         streamChanged ||
         staticContentChanged) {
+      final reasons = <String>[
+        if (nextRendererId != _rendererId) 'rendererId',
+        if (stateChanged) 'state',
+        if (streamChanged) 'stream',
+        if (staticContentChanged) 'staticContent',
+      ].join(',');
+      if (_shouldLogMarkdownLifecycle(widget.contentStream, reasons)) {
+        _logRendererTrace(
+          'restart_request reason=$reasons '
+          'oldRendererId=$_rendererId newRendererId=$nextRendererId '
+          'oldStream=${_streamTraceId(oldWidget.contentStream)} '
+          'newStream=${_streamTraceId(widget.contentStream)} '
+          'chars=${_rendererState.collectedContent.length} '
+          'nodes=${_rendererState.renderNodes.length} '
+          'done=$_streamDone',
+        );
+      }
       _rendererId = nextRendererId;
-      _startCurrentContent();
+      _startCurrentContent(reason: reasons);
     } else if (oldWidget.onContentReady != widget.onContentReady &&
         widget.contentStream == null &&
         _rendererState.streamParsingCompletedSuccessfully) {
@@ -117,18 +141,28 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
     return 'static-renderer-${widget.content.hashCode}';
   }
 
-  void _startCurrentContent() {
+  /// Starts rendering the current static content or live content stream.
+  void _startCurrentContent({required String reason}) {
     final generation = ++_startGeneration;
     _subscription?.cancel();
     _renderTimer?.cancel();
     _renderTimer = null;
     _scheduledVisibleNodeKeys.clear();
+    _streamEventCount = 0;
+    _streamDoneNotified = false;
 
     final stream = widget.contentStream;
+    final shouldTrace = _shouldLogMarkdownLifecycle(stream, reason);
     if (stream == null &&
         _rendererState.streamParsingCompletedSuccessfully &&
         _rendererState.collectedContent.toString() == widget.content &&
         _rendererState.renderNodes.isNotEmpty) {
+      if (shouldTrace) {
+        _logRendererTrace(
+          'static_reuse reason=$reason rendererId=$_rendererId '
+          'chars=${widget.content.length} nodes=${_rendererState.renderNodes.length}',
+        );
+      }
       _rendererState.xmlNodeStreams.clear();
       _rendererState.xmlMarkdownEventStreams.clear();
       _streamDone = true;
@@ -136,11 +170,26 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
       return;
     }
 
+    if (shouldTrace) {
+      _logRendererTrace(
+        'reset reason=$reason rendererId=$_rendererId '
+        'stream=${_streamTraceId(stream)} '
+        'previousChars=${_rendererState.collectedContent.length} '
+        'previousNodes=${_rendererState.renderNodes.length} '
+        'wasDone=$_streamDone',
+      );
+    }
     _streamDone = stream == null;
     _rendererState.reset();
     if (stream == null) {
       final cachedNodes = _staticMarkdownNodeCache.get(widget.content);
       if (cachedNodes != null) {
+        if (shouldTrace) {
+          _logRendererTrace(
+            'static_cache_hit rendererId=$_rendererId '
+            'chars=${widget.content.length} nodes=${cachedNodes.length}',
+          );
+        }
         _streamDone = true;
         _rendererState.collectedContent.write(widget.content);
         _rendererState.streamParsingCompletedSuccessfully = true;
@@ -164,9 +213,7 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
   }
 
   Future<void> _loadStaticContent(String content, int generation) async {
-    final events = await const GeneratedCoreProxyClients(
-      ProxyCoreRuntimeBridge(),
-    ).chatRuntimeHolderMain.splitMarkdownContent(content: content);
+    final events = await widget.splitMarkdownContent(content);
     if (!mounted || generation != _startGeneration) {
       return;
     }
@@ -203,8 +250,20 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
   }
 
   void _subscribe(Stream<Object> stream) {
+    _logRendererTrace(
+      'subscribe rendererId=$_rendererId stream=${_streamTraceId(stream)}',
+    );
     _subscription = stream.listen(
       (event) {
+        _streamEventCount += 1;
+        if (_shouldLogRenderStreamEvent(_streamEventCount)) {
+          _logRendererTrace(
+            'event rendererId=$_rendererId stream=${_streamTraceId(stream)} '
+            'count=$_streamEventCount type=${event.runtimeType} '
+            'chars=${_rendererState.collectedContent.length} '
+            'nodes=${_rendererState.renderNodes.length}',
+          );
+        }
         _applyMarkdownEvent(event);
         _renderTimer ??= Timer(_streamRenderInterval, _flushRenderNodes);
       },
@@ -214,12 +273,47 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
         _rendererState.streamParsingCompletedSuccessfully = true;
         _renderTimer?.cancel();
         _renderTimer = null;
+        _logRendererTrace(
+          'done rendererId=$_rendererId stream=${_streamTraceId(stream)} '
+          'events=$_streamEventCount '
+          'chars=${_rendererState.collectedContent.length} '
+          'nodes=${_rendererState.renderNodes.length}',
+        );
         _flushRenderNodes();
+        _notifyStreamDone();
       },
       onError: (Object error, StackTrace stackTrace) {
         _rendererState.streamParsingCompletedSuccessfully = false;
+        _logRendererTrace(
+          'error rendererId=$_rendererId stream=${_streamTraceId(stream)} '
+          'events=$_streamEventCount error=$error',
+        );
       },
     );
+  }
+
+  /// Reports that the live Markdown stream has reached its terminal event.
+  void _notifyStreamDone() {
+    if (_streamDoneNotified) {
+      return;
+    }
+    _streamDoneNotified = true;
+    widget.onStreamDone?.call();
+  }
+
+  /// Returns a stable short label for one Dart stream object in logs.
+  String _streamTraceId(Stream<Object>? stream) {
+    return stream == null ? 'none' : identityHashCode(stream).toString();
+  }
+
+  /// Returns whether one render stream event should be logged.
+  bool _shouldLogRenderStreamEvent(int count) {
+    return count <= 5 || count % 256 == 0;
+  }
+
+  /// Emits one Markdown renderer lifecycle log entry.
+  void _logRendererTrace(String message) {
+    debugPrint('ChatRenderTrace markdown.$message');
   }
 
   void _flushRenderNodes() {
@@ -258,12 +352,34 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
 
   void _applyMarkdownEvent(Object event) {
     final normalized = _NormalizedMarkdownEvent.from(event);
+    final traceEvent = _shouldLogMarkdownEventDetail(
+      normalized,
+      _streamEventCount,
+    );
+    if (traceEvent) {
+      _logRendererTrace(
+        'apply.begin rendererId=$_rendererId '
+        'stream=${_streamTraceId(widget.contentStream)} '
+        'count=$_streamEventCount ${normalized.traceSummary()} '
+        'beforeChars=${_rendererState.collectedContent.length} '
+        'beforeNodes=${_rendererState.renderNodes.length} done=$_streamDone',
+      );
+    }
     final parentBlockId = normalized.parentBlockId;
     if (parentBlockId != null) {
       _rendererState.eventBuilder.appendXmlMarkdownEvent(
         parentBlockId: parentBlockId,
         event: normalized.asLocalEvent(),
       );
+      if (traceEvent) {
+        _logRendererTrace(
+          'apply.end rendererId=$_rendererId '
+          'stream=${_streamTraceId(widget.contentStream)} '
+          'count=$_streamEventCount ${normalized.traceSummary()} '
+          'afterChars=${_rendererState.collectedContent.length} '
+          'afterNodes=${_rendererState.renderNodes.length} done=$_streamDone',
+        );
+      }
       return;
     }
     switch (normalized.type) {
@@ -331,6 +447,7 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
         _rendererState.eventBuilder.complete();
         _streamDone = true;
         _rendererState.streamParsingCompletedSuccessfully = true;
+        _notifyStreamDone();
         break;
       case 'savepoint':
         final id = normalized.id;
@@ -348,6 +465,15 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
         break;
       default:
         throw StateError('Unknown markdown event type ${normalized.type}');
+    }
+    if (traceEvent) {
+      _logRendererTrace(
+        'apply.end rendererId=$_rendererId '
+        'stream=${_streamTraceId(widget.contentStream)} '
+        'count=$_streamEventCount ${normalized.traceSummary()} '
+        'afterChars=${_rendererState.collectedContent.length} '
+        'afterNodes=${_rendererState.renderNodes.length} done=$_streamDone',
+      );
     }
   }
 
@@ -396,11 +522,33 @@ class _StreamMarkdownRendererState extends State<StreamMarkdownRenderer> {
       showThinkingProcess: widget.showThinkingProcess,
       initialThinkingExpanded: widget.initialThinkingExpanded,
       allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+      splitMarkdownContent: widget.splitMarkdownContent,
     );
     if (widget.isStreaming || !widget.selectionRoot) {
       return content;
     }
     return SelectionArea(child: content);
+  }
+}
+
+/// Returns whether a lifecycle transition is useful enough to print.
+bool _shouldLogMarkdownLifecycle(Stream<Object>? stream, String reason) {
+  return stream != null || reason != 'init';
+}
+
+/// Returns whether a normalized Markdown event should print detailed state.
+bool _shouldLogMarkdownEventDetail(
+  _NormalizedMarkdownEvent event,
+  int eventCount,
+) {
+  switch (event.type) {
+    case 'reset':
+    case 'completed':
+    case 'savepoint':
+    case 'rollback':
+      return true;
+    default:
+      return eventCount > 0 && (eventCount <= 5 || eventCount % 256 == 0);
   }
 }
 
@@ -487,6 +635,15 @@ class _NormalizedMarkdownEvent {
     );
   }
 
+  /// Returns a compact protocol-level description for render diagnostics.
+  String traceSummary() {
+    return 'eventType=$type valueLen=${value?.length ?? 0} '
+        'id=${id ?? 'none'} blockId=${blockId ?? 'none'} '
+        'inlineId=${inlineId ?? 'none'} '
+        'parentBlockId=${parentBlockId ?? 'none'} '
+        'nodeType=${nodeType ?? 'none'} headerLevel=${headerLevel ?? 'none'}';
+  }
+
   final String type;
   final String? id;
   final String? value;
@@ -555,6 +712,7 @@ class _MarkdownNodeColumn extends StatefulWidget {
     required this.showThinkingProcess,
     required this.initialThinkingExpanded,
     required this.allowExpandedThinkingFullHeight,
+    required this.splitMarkdownContent,
     this.nodeAnimationStates,
     this.onLinkClick,
   });
@@ -569,6 +727,7 @@ class _MarkdownNodeColumn extends StatefulWidget {
   final bool showThinkingProcess;
   final bool initialThinkingExpanded;
   final bool allowExpandedThinkingFullHeight;
+  final MarkdownContentSplitter splitMarkdownContent;
   final Map<String, bool>? nodeAnimationStates;
   final void Function(String url)? onLinkClick;
 
@@ -638,6 +797,7 @@ class _MarkdownNodeColumnState extends State<_MarkdownNodeColumn> {
         showThinkingProcess: widget.showThinkingProcess,
         initialThinkingExpanded: widget.initialThinkingExpanded,
         allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+        splitMarkdownContent: widget.splitMarkdownContent,
       );
     }
 
@@ -660,6 +820,7 @@ class _MarkdownNodeColumnState extends State<_MarkdownNodeColumn> {
         backgroundColor: widget.backgroundColor,
         isLastNode: index == lastRenderableIndex,
         onLinkClick: widget.onLinkClick,
+        splitMarkdownContent: widget.splitMarkdownContent,
       );
     }
 

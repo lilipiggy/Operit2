@@ -22,6 +22,7 @@ class StructuredMessagePartRenderer extends StatefulWidget {
     this.onReady,
     this.initialThinkingExpanded = false,
     this.allowExpandedThinkingFullHeight = false,
+    this.splitMarkdownContent,
   });
 
   final List<core_proxy.MessagePart> parts;
@@ -33,6 +34,7 @@ class StructuredMessagePartRenderer extends StatefulWidget {
   final VoidCallback? onReady;
   final bool initialThinkingExpanded;
   final bool allowExpandedThinkingFullHeight;
+  final MarkdownContentSplitter? splitMarkdownContent;
 
   /// Creates readiness-tracking state for static Markdown parts.
   @override
@@ -99,6 +101,7 @@ class _StructuredMessagePartRendererState
           rendererId: '${widget.rendererId ?? 'message'}-${part.partId}',
           onLinkClick: widget.onLinkClick,
           onContentReady: () => _markPartReady(part.partId),
+          splitMarkdownContent: widget.splitMarkdownContent!,
         );
       case core_proxy.MessagePartKind.thinking:
       case core_proxy.MessagePartKind.toolCall:
@@ -117,6 +120,7 @@ class _StructuredMessagePartRendererState
       showThinkingProcess: widget.showThinkingProcess,
       initialThinkingExpanded: widget.initialThinkingExpanded,
       allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+      splitMarkdownContent: widget.splitMarkdownContent!,
     );
   }
 
@@ -176,6 +180,7 @@ class StreamingStructuredMessageRenderer extends StatefulWidget {
     this.onLinkClick,
     this.initialThinkingExpanded = false,
     this.allowExpandedThinkingFullHeight = false,
+    this.splitMarkdownContent,
   });
 
   final List<core_proxy.MessagePart> parts;
@@ -190,6 +195,7 @@ class StreamingStructuredMessageRenderer extends StatefulWidget {
   final void Function(String url)? onLinkClick;
   final bool initialThinkingExpanded;
   final bool allowExpandedThinkingFullHeight;
+  final MarkdownContentSplitter? splitMarkdownContent;
 
   /// Creates state that owns the live-to-structured visual handoff.
   @override
@@ -200,12 +206,23 @@ class StreamingStructuredMessageRenderer extends StatefulWidget {
 class _StreamingStructuredMessageRendererState
     extends State<StreamingStructuredMessageRenderer> {
   Stream<Object>? _retainedContentStream;
+  bool _retainedContentStreamDone = false;
+  bool _structuredPartsReady = false;
 
   /// Captures the initial live stream for uninterrupted rendering.
   @override
   void initState() {
     super.initState();
     _retainedContentStream = widget.contentStream;
+    _retainedContentStreamDone = widget.contentStream == null;
+    _structuredPartsReady = _retainedContentStream == null;
+    if (widget.contentStream != null || widget.isStreaming) {
+      _logStructuredRenderTrace(
+        'init rendererId=${widget.rendererId ?? '<auto>'} '
+        'stream=${_streamTraceId(widget.contentStream)} '
+        'parts=${widget.parts.length} streaming=${widget.isStreaming}',
+      );
+    }
   }
 
   /// Tracks new generation streams while retaining a completed stream for handoff.
@@ -213,8 +230,49 @@ class _StreamingStructuredMessageRendererState
   void didUpdateWidget(covariant StreamingStructuredMessageRenderer oldWidget) {
     super.didUpdateWidget(oldWidget);
     final nextStream = widget.contentStream;
-    if (nextStream != null && !identical(nextStream, _retainedContentStream)) {
+    final streamChanged = oldWidget.contentStream != nextStream;
+    final partsChanged = !_sameMessagePartsForTrace(
+      oldWidget.parts,
+      widget.parts,
+    );
+    if (partsChanged) {
+      _structuredPartsReady = _retainedContentStream == null;
+    }
+    final shouldTrace =
+        oldWidget.contentStream != null ||
+        nextStream != null ||
+        _retainedContentStream != null ||
+        oldWidget.isStreaming ||
+        widget.isStreaming;
+    if (streamChanged ||
+        partsChanged ||
+        oldWidget.isStreaming != widget.isStreaming) {
+      if (shouldTrace) {
+        _logStructuredRenderTrace(
+          'update rendererId=${widget.rendererId ?? '<auto>'} '
+          'oldStream=${_streamTraceId(oldWidget.contentStream)} '
+          'newStream=${_streamTraceId(nextStream)} '
+          'retained=${_streamTraceId(_retainedContentStream)} '
+          'oldParts=${oldWidget.parts.length} newParts=${widget.parts.length} '
+          'oldStreaming=${oldWidget.isStreaming} newStreaming=${widget.isStreaming}',
+        );
+      }
+    }
+    // Keep the active subscription stable while Flow replaces only the Dart wrapper.
+    if (nextStream != null && _retainedContentStream == null) {
       _retainedContentStream = nextStream;
+      _retainedContentStreamDone = false;
+      _structuredPartsReady = false;
+      _logStructuredRenderTrace(
+        'retain rendererId=${widget.rendererId ?? '<auto>'} '
+        'stream=${_streamTraceId(nextStream)}',
+      );
+    } else if (nextStream != null && _retainedContentStream != nextStream) {
+      _logStructuredRenderTrace(
+        'retain_existing rendererId=${widget.rendererId ?? '<auto>'} '
+        'retained=${_streamTraceId(_retainedContentStream)} '
+        'newStream=${_streamTraceId(nextStream)}',
+      );
     }
   }
 
@@ -222,37 +280,150 @@ class _StreamingStructuredMessageRendererState
   @override
   Widget build(BuildContext context) {
     final retainedStream = _retainedContentStream;
-    if (retainedStream != null) {
-      return KeyedSubtree(
-        key: const ValueKey<String>('live-markdown'),
-        child: StreamMarkdownRenderer(
-          content: '',
-          contentStream: retainedStream,
-          isStreaming: widget.isStreaming,
-          textColor: widget.textColor,
-          backgroundColor: widget.backgroundColor,
-          nodeGrouper: widget.nodeGrouper,
-          state: widget.streamState,
-          onLinkClick: widget.onLinkClick,
-          rendererId: widget.rendererId,
-          showThinkingProcess: widget.showThinkingProcess,
-          initialThinkingExpanded: widget.initialThinkingExpanded,
-          allowExpandedThinkingFullHeight:
-              widget.allowExpandedThinkingFullHeight,
+    final structuredParts = _buildStructuredParts(
+      onReady: retainedStream == null ? null : _markStructuredPartsReady,
+    );
+    if (retainedStream == null) {
+      return structuredParts;
+    }
+    final liveMarkdown = _buildLiveMarkdown(retainedStream);
+    final stackChildren = <Widget>[liveMarkdown];
+    if (widget.contentStream == null && widget.parts.isNotEmpty) {
+      stackChildren.add(
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Offstage(offstage: true, child: structuredParts),
+          ),
         ),
       );
     }
-    return StructuredMessagePartRenderer(
-      parts: widget.parts,
-      textColor: widget.textColor,
-      backgroundColor: widget.backgroundColor,
-      showThinkingProcess: widget.showThinkingProcess,
-      rendererId: widget.rendererId,
-      onLinkClick: widget.onLinkClick,
-      initialThinkingExpanded: widget.initialThinkingExpanded,
-      allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+    return Stack(children: stackChildren);
+  }
+
+  /// Builds the retained live Markdown renderer for a physical content stream.
+  Widget _buildLiveMarkdown(Stream<Object> stream) {
+    return KeyedSubtree(
+      key: const ValueKey<String>('live-markdown'),
+      child: StreamMarkdownRenderer(
+        content: '',
+        contentStream: stream,
+        isStreaming: widget.isStreaming || !_retainedContentStreamDone,
+        textColor: widget.textColor,
+        backgroundColor: widget.backgroundColor,
+        nodeGrouper: widget.nodeGrouper,
+        state: widget.streamState,
+        onLinkClick: widget.onLinkClick,
+        onStreamDone: _markRetainedContentStreamDone,
+        rendererId: widget.rendererId,
+        showThinkingProcess: widget.showThinkingProcess,
+        initialThinkingExpanded: widget.initialThinkingExpanded,
+        allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+        splitMarkdownContent: widget.splitMarkdownContent!,
+      ),
     );
   }
+
+  /// Builds the persisted message-part renderer used after stream completion.
+  Widget _buildStructuredParts({VoidCallback? onReady}) {
+    return KeyedSubtree(
+      key: const ValueKey<String>('structured-parts'),
+      child: StructuredMessagePartRenderer(
+        parts: widget.parts,
+        textColor: widget.textColor,
+        backgroundColor: widget.backgroundColor,
+        showThinkingProcess: widget.showThinkingProcess,
+        rendererId: widget.rendererId,
+        onLinkClick: widget.onLinkClick,
+        onReady: onReady,
+        initialThinkingExpanded: widget.initialThinkingExpanded,
+        allowExpandedThinkingFullHeight: widget.allowExpandedThinkingFullHeight,
+        splitMarkdownContent: widget.splitMarkdownContent,
+      ),
+    );
+  }
+
+  /// Marks the retained live stream as complete.
+  void _markRetainedContentStreamDone() {
+    if (_retainedContentStreamDone) {
+      return;
+    }
+    _retainedContentStreamDone = true;
+    _logStructuredRenderTrace(
+      'stream_done rendererId=${widget.rendererId ?? '<auto>'} '
+      'stream=${_streamTraceId(_retainedContentStream)} '
+      'parts=${widget.parts.length}',
+    );
+    _releaseRetainedContentStreamIfReady();
+  }
+
+  /// Marks the structured message parts as painted.
+  void _markStructuredPartsReady() {
+    if (widget.parts.isEmpty) {
+      return;
+    }
+    if (_structuredPartsReady) {
+      return;
+    }
+    _structuredPartsReady = true;
+    _logStructuredRenderTrace(
+      'parts_ready rendererId=${widget.rendererId ?? '<auto>'} '
+      'stream=${_streamTraceId(_retainedContentStream)} '
+      'parts=${widget.parts.length}',
+    );
+    _releaseRetainedContentStreamIfReady();
+  }
+
+  /// Releases the retained stream after both handoff sides are ready.
+  void _releaseRetainedContentStreamIfReady() {
+    if (!mounted ||
+        _retainedContentStream == null ||
+        !_retainedContentStreamDone ||
+        !_structuredPartsReady) {
+      return;
+    }
+    _logStructuredRenderTrace(
+      'release rendererId=${widget.rendererId ?? '<auto>'} '
+      'stream=${_streamTraceId(_retainedContentStream)} '
+      'parts=${widget.parts.length}',
+    );
+    setState(() {
+      _retainedContentStream = null;
+    });
+  }
+}
+
+/// Returns a short identity label for one retained live stream.
+String _streamTraceId(Stream<Object>? stream) {
+  return stream == null ? 'none' : identityHashCode(stream).toString();
+}
+
+/// Emits one structured message renderer lifecycle log entry.
+void _logStructuredRenderTrace(String message) {
+  debugPrint('ChatRenderTrace structured.$message');
+}
+
+/// Compares message part fields that affect structured rendering.
+bool _sameMessagePartsForTrace(
+  List<core_proxy.MessagePart> previous,
+  List<core_proxy.MessagePart> next,
+) {
+  if (previous.length != next.length) {
+    return false;
+  }
+  for (var index = 0; index < previous.length; index += 1) {
+    final left = previous[index];
+    final right = next[index];
+    if (left.partId != right.partId ||
+        left.sequence != right.sequence ||
+        left.kind != right.kind ||
+        left.content != right.content ||
+        left.toolCallId != right.toolCallId ||
+        left.toolName != right.toolName ||
+        !mapEquals(left.attributes, right.attributes)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// Returns the static Markdown content keyed by semantic part id.

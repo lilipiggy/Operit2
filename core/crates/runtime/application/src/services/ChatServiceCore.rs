@@ -10,16 +10,18 @@ use crate::plugins::toolpkg::ToolPkgXmlRenderBridge::ToolPkgXmlRenderBridge;
 use crate::services::core::ChatHistoryDelegate::{ChatHistoryDelegate, ChatSelectionMode};
 use crate::services::core::MessageCoordinationDelegate::MessageCoordinationDelegate;
 use crate::services::core::MessageProcessingDelegate::{
-    coreResponseStreamSourceWithCompletion, ChatExecutionState, MessageProcessingDelegate,
+    ChatExecutionState, MessageProcessingDelegate, SendUserMessageProcessingRequest,
 };
 use crate::services::core::TokenStatisticsDelegate::TokenStatisticsDelegate;
 use crate::ui::features::chat::webview::workspace::WorkspaceBackupManager::{
     WorkspaceBackupManager, WorkspaceFileChange,
 };
 use crate::ui::features::chat::webview::workspace::WorkspaceUtils;
-use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
+use operit_host_api::FileSystemHost;
 use operit_host_api::TimeUtils::currentTimeMillis;
-use operit_host_api::{FileSystemHost, HostRuntimeTaskSchedulerHost};
+use operit_link::{
+    CoreEvent, CoreEventKind, CoreEventStream, CoreStream, CoreStreamSource, CoreValue,
+};
 use operit_model::AttachmentInfo::AttachmentInfo;
 use operit_model::ChatHistory::ChatHistory;
 use operit_model::ChatHistoryListItem::ChatHistoryListItem;
@@ -32,12 +34,11 @@ use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::MessagePartCodec;
 use operit_model::PendingQueueMessageItem::PendingQueueMessageItem;
 use operit_model::PromptFunctionType::PromptFunctionType;
-use operit_providers::chat::EnhancedAIService::{
-    CoreHandoffContinuation, EnhancedAIService,
-};
-use operit_link::{CoreHandoffCompletion, CoreStream, CoreValue};
+use operit_providers::chat::EnhancedAIService::EnhancedAIService;
 use operit_store::repository::ChatHistoryManager::ChatImportResult;
-use operit_store::PreferencesDataStore::{combine2, combine3, MutableStateFlow, StateFlow};
+use operit_store::PreferencesDataStore::{
+    combine2, combine3, mutableStateFlow, MutableStateFlow, StateFlow,
+};
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::tools::skill_runtime::SkillRepository::SkillRepository;
 use operit_tools::tools::AIToolHandler::AIToolHandler;
@@ -493,45 +494,93 @@ impl ChatServiceCore {
         );
     }
 
-    /// Starts one target-Core EnhanceAI continuation and exposes its response segment.
-    #[operit_route_macros::operit_core_internal]
-    pub async fn continueCoreHandoff(
-        &mut self,
-        continuation: CoreHandoffContinuation,
-    ) -> Result<CoreStream<MarkdownStreamEvent>, String> {
-        let enhancedAiService = self
-            .enhancedAiService
-            .as_mut()
-            .ok_or_else(|| "ChatServiceCore requires an EnhancedAIService for handoff".to_string())?;
-        let responseStream = enhancedAiService
-            .continueAtBoundary(continuation)
-            .await
-            .map_err(|error| error.to_string())?;
-        let sharedState = enhancedAiService.shared_state.clone();
-        let source = coreResponseStreamSourceWithCompletion(
-            responseStream,
-            "core-handoff".to_string(),
-            Some(Arc::new(move |markdown| {
-                let segments = sharedState
-                    .lock()
-                    .expect("EnhancedAIService shared_state mutex poisoned")
-                    .handoffSegments
-                    .clone();
-                operit_link::toCoreValue(CoreHandoffCompletion { markdown, segments })
-                    .expect("CoreHandoffCompletion must serialize")
-            })),
-        );
-        Ok(CoreStream::fromSource(source))
+    /// Resumes an AI round on the CoreNode that already owns the chat Binding.
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn resume(&mut self, chatId: String) -> Result<(), String> {
+        let chat = self
+            .chatHistoryDelegate
+            .chatHistoriesFlow()
+            .value()
+            .into_iter()
+            .find(|chat| chat.id == chatId)
+            .ok_or_else(|| format!("resume chat not found chatId={chatId}"))?;
+        let roleCardName = chat
+            .characterCardName
+            .as_ref()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("resume chat has no role card binding chatId={chatId}"))?;
+        let roleCard = self
+            .chatHistoryDelegate
+            .characterCardManager
+            .findCharacterCardByName(&roleCardName)
+            .map_err(|error| format!("resume role card lookup failed chatId={chatId}: {error}"))?
+            .ok_or_else(|| {
+                format!("resume role card not found chatId={chatId} name={roleCardName}")
+            })?;
+        let Some(service) = self.enhancedAiService.as_mut() else {
+            return Err(format!(
+                "resume EnhancedAIService is not initialized chatId={chatId}"
+            ));
+        };
+        let Some(delegate) = self.messageCoordinationDelegate.as_mut() else {
+            return Err(format!(
+                "resume MessageCoordinationDelegate is not initialized chatId={chatId}"
+            ));
+        };
+        self.chatHistoryDelegate.switchChat(chatId.clone(), false);
+        delegate.chatHistoryDelegate = self.chatHistoryDelegate.clone_for_core();
+        delegate.messageProcessingDelegate = self.messageProcessingDelegate.clone_for_core();
+        let runtimeChatHistory = self
+            .chatHistoryDelegate
+            .getRuntimeChatHistory(chatId.clone());
+        delegate
+            .sendMessageInternal(
+                service,
+                PromptFunctionType::CHAT,
+                false,
+                true,
+                true,
+                Some(roleCard.id),
+                Some(chatId.clone()),
+                String::new(),
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                chat.characterGroupId.is_some(),
+                None,
+                true,
+                Some(runtimeChatHistory),
+                ChatTurnOptions::default(),
+            )
+            .await;
+        self.chatHistoryDelegate = delegate.chatHistoryDelegate.clone_for_core();
+        self.messageProcessingDelegate = delegate.messageProcessingDelegate.clone_for_core();
+        Ok(())
     }
 
-    /// Continues one handoff from the protocol-owned serialized continuation value.
-    pub async fn continueCoreHandoffValue(
-        &mut self,
-        continuation: CoreValue,
-    ) -> Result<CoreStream<MarkdownStreamEvent>, String> {
-        let continuation: CoreHandoffContinuation = operit_link::fromCoreValue(continuation)
-            .map_err(|error| format!("invalid handoff state: {error}"))?;
-        self.continueCoreHandoff(continuation).await
+    /// Marks the source chat as paused while route synchronization is in progress.
+    #[operit_route_macros::before_change_route]
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn beforeChangeRoute(&mut self, chatId: String) -> Result<(), String> {
+        AppLogger::i(
+            "ChatServiceCore",
+            &format!("route change paused chatId={chatId}"),
+        );
+        Ok(())
+    }
+
+    /// Resumes the target chat after route synchronization has completed.
+    #[operit_route_macros::after_change_route]
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn afterChangeRoute(&mut self, chatId: String) -> Result<(), String> {
+        AppLogger::i(
+            "ChatServiceCore",
+            &format!("route change reached target chatId={chatId}"),
+        );
+        self.__operit_core_local_resume(chatId).await
     }
 
     /// Cancels message generation for a specific chat id.
@@ -753,35 +802,38 @@ impl ChatServiceCore {
         deleted
     }
 
-    /// Deletes one message from the current chat by visible message index.
-    pub fn deleteMessage(&mut self, index: usize) {
-        self.chatHistoryDelegate.deleteMessage(index);
+    /// Deletes one message from an explicit chat by message timestamp.
+    #[allow(non_snake_case)]
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn deleteMessage(&mut self, chatId: String, messageTimestamp: i64) {
+        self.chatHistoryDelegate
+            .deleteMessageInChatByTimestamp(chatId, messageTimestamp);
     }
 
-    /// Deletes multiple messages from the current chat by visible message indices.
+    /// Deletes multiple messages from an explicit chat by message timestamps.
     #[allow(non_snake_case)]
-    pub fn deleteMessages(&mut self, indices: Vec<usize>) -> bool {
-        let Some(chatId) = self.chatHistoryDelegate.currentChatIdFlow.value() else {
-            return false;
-        };
-        let mut timestamps = Vec::new();
-        let currentMessages = self.chatHistoryDelegate.chatHistory.clone();
-        for index in indices {
-            let Some(message) = currentMessages.get(index) else {
-                return false;
-            };
-            timestamps.push(message.timestamp);
-        }
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn deleteMessages(&mut self, chatId: String, messageTimestamps: Vec<i64>) -> bool {
         self.chatHistoryDelegate
-            .deleteMessagesByTimestamps(chatId, timestamps);
-        true
+            .deleteMessagesInChatByTimestamps(chatId, messageTimestamps)
     }
 
     /// Replaces the content of one message and refreshes the stable context window.
     #[allow(non_snake_case)]
-    pub async fn updateMessage(&mut self, index: usize, editedContent: String) -> bool {
-        let currentMessages = self.chatHistoryDelegate.chatHistory.clone();
-        let Some(message) = currentMessages.get(index).cloned() else {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn updateMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+        editedContent: String,
+    ) -> bool {
+        let currentMessages = self
+            .chatHistoryDelegate
+            .chatMessagesSnapshotForChat(chatId.clone());
+        let Some(message) = currentMessages
+            .into_iter()
+            .find(|message| message.timestamp == messageTimestamp)
+        else {
             return false;
         };
         let editedParts = match message.sender.as_str() {
@@ -813,7 +865,7 @@ impl ChatServiceCore {
             ..message
         };
         self.chatHistoryDelegate
-            .addMessageToChat(editedMessage, None);
+            .addMessageToChat(editedMessage, Some(chatId.clone()));
         if let (Some(service), Some(delegate)) = (
             self.enhancedAiService.as_mut(),
             self.messageCoordinationDelegate.as_mut(),
@@ -822,7 +874,7 @@ impl ChatServiceCore {
             delegate
                 .refreshStableContextWindow(
                     service,
-                    self.chatHistoryDelegate.currentChatIdFlow.value(),
+                    Some(chatId.clone()),
                     None,
                     Some(PromptFunctionType::CHAT),
                     false,
@@ -836,10 +888,12 @@ impl ChatServiceCore {
         true
     }
 
-    /// Deletes the selected message and every following message in the current chat.
+    /// Deletes the selected message and every following message in an explicit chat.
     #[allow(non_snake_case)]
-    pub fn deleteMessagesFrom(&mut self, index: usize) -> bool {
-        self.chatHistoryDelegate.deleteMessagesFrom(index)
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn deleteMessagesFrom(&mut self, chatId: String, messageTimestamp: i64) -> bool {
+        self.chatHistoryDelegate
+            .deleteMessagesFromTimestamp(chatId, messageTimestamp)
     }
 
     /// Deletes one alternate response variant from a message timestamp.
@@ -1067,11 +1121,16 @@ impl ChatServiceCore {
             .renameWorkspaceAndChat(chatId, newWorkspace, newTitle);
     }
 
-    /// Shows file changes that would be applied when rewinding to a message index.
+    /// Shows file changes that would be applied when rewinding before one message timestamp.
     #[allow(non_snake_case)]
-    pub fn previewWorkspaceChangesForMessage(&mut self, index: usize) -> Vec<WorkspaceFileChange> {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn previewWorkspaceChangesForMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+    ) -> Vec<WorkspaceFileChange> {
         let Some((chatId, workspacePath, rewindTimestamp)) =
-            self.resolveWorkspaceRewindTarget(index)
+            self.resolveWorkspaceRewindTarget(chatId, messageTimestamp)
         else {
             return Vec::new();
         };
@@ -1079,11 +1138,22 @@ impl ChatServiceCore {
             .previewChangesForRewind(workspacePath, rewindTimestamp, Some(chatId))
     }
 
-    /// Restores the bound workspace to the snapshot before a message index.
+    /// Restores the bound workspace to the snapshot before one message timestamp.
     #[allow(non_snake_case)]
-    pub fn rewindWorkspaceForMessage(&mut self, index: usize) -> bool {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn rewindWorkspaceForMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+    ) -> bool {
+        self.rewindWorkspaceForMessageTimestamp(chatId, messageTimestamp)
+    }
+
+    /// Restores the bound workspace before one timestamp without crossing route again.
+    #[allow(non_snake_case)]
+    fn rewindWorkspaceForMessageTimestamp(&mut self, chatId: String, messageTimestamp: i64) -> bool {
         let Some((chatId, workspacePath, rewindTimestamp)) =
-            self.resolveWorkspaceRewindTarget(index)
+            self.resolveWorkspaceRewindTarget(chatId, messageTimestamp)
         else {
             return false;
         };
@@ -1095,39 +1165,60 @@ impl ChatServiceCore {
         true
     }
 
-    /// Rolls the current chat back to a prior message index.
+    /// Rolls an explicit chat back to a prior message timestamp.
     #[allow(non_snake_case)]
-    pub fn rollbackToMessage(&mut self, index: usize) -> Option<String> {
-        let currentMessages = self.chatHistoryDelegate.chatHistory.clone();
-        let Some(targetMessage) = currentMessages.get(index).cloned() else {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn rollbackToMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+    ) -> Option<String> {
+        let currentMessages = self
+            .chatHistoryDelegate
+            .chatMessagesSnapshotForChat(chatId.clone());
+        let Some(targetMessage) = currentMessages
+            .into_iter()
+            .find(|message| message.timestamp == messageTimestamp)
+        else {
             return None;
         };
         if targetMessage.sender != "user" {
             return None;
         }
-        self.rewindWorkspaceForMessage(index);
+        self.rewindWorkspaceForMessageTimestamp(chatId.clone(), messageTimestamp);
         self.chatHistoryDelegate
-            .truncateChatHistory(Some(targetMessage.timestamp));
+            .truncateChatHistoryForChat(chatId, Some(messageTimestamp));
         Some(stripXmlLikeTags(&targetMessage.displayText()))
     }
 
     /// Rewinds a user message and sends edited content as a new turn.
     #[allow(non_snake_case)]
-    pub async fn rewindAndResendMessage(&mut self, index: usize, editedContent: String) -> bool {
-        let currentMessages = self.chatHistoryDelegate.chatHistory.clone();
-        let Some(targetMessage) = currentMessages.get(index).cloned() else {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn rewindAndResendMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+        editedContent: String,
+    ) -> bool {
+        let currentMessages = self
+            .chatHistoryDelegate
+            .chatMessagesSnapshotForChat(chatId.clone());
+        let Some(targetMessage) = currentMessages
+            .into_iter()
+            .find(|message| message.timestamp == messageTimestamp)
+        else {
             return false;
         };
         if targetMessage.sender != "user" {
             return false;
         }
-        self.rewindWorkspaceForMessage(index);
+        self.rewindWorkspaceForMessageTimestamp(chatId.clone(), messageTimestamp);
         self.chatHistoryDelegate
-            .truncateChatHistory(Some(targetMessage.timestamp));
+            .truncateChatHistoryForChat(chatId.clone(), Some(messageTimestamp));
         self.sendUserMessage(
             PromptFunctionType::CHAT,
             None,
-            None,
+            Some(chatId),
             editedContent,
             None,
             None,
@@ -1142,7 +1233,12 @@ impl ChatServiceCore {
 
     /// Regenerates one AI message in place while preserving the surrounding chat history.
     #[allow(non_snake_case)]
-    pub async fn regenerateSingleAiMessage(&mut self, index: usize) -> Result<(), String> {
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn regenerateSingleAiMessage(
+        &mut self,
+        chatId: String,
+        messageTimestamp: i64,
+    ) -> Result<(), String> {
         let Some(service) = self.enhancedAiService.as_mut() else {
             return Err("EnhancedAIService is not initialized".to_string());
         };
@@ -1151,7 +1247,9 @@ impl ChatServiceCore {
         };
         delegate.chatHistoryDelegate = self.chatHistoryDelegate.clone_for_core();
         delegate.messageProcessingDelegate = self.messageProcessingDelegate.clone_for_core();
-        delegate.regenerateSingleAiMessage(service, index).await?;
+        delegate
+            .regenerateSingleAiMessage(service, chatId, messageTimestamp)
+            .await?;
         self.chatHistoryDelegate = delegate.chatHistoryDelegate.clone_for_core();
         self.messageProcessingDelegate = delegate.messageProcessingDelegate.clone_for_core();
         self.syncTokenStatisticsForCurrentChat();
@@ -1159,14 +1257,20 @@ impl ChatServiceCore {
     }
 
     #[allow(non_snake_case)]
-    fn resolveWorkspaceRewindTarget(&self, index: usize) -> Option<(String, String, i64)> {
-        let chatId = self.chatHistoryDelegate.currentChatIdFlow.value()?;
-        let currentMessages = self.chatHistoryDelegate.chatHistory.clone();
-        if index >= currentMessages.len() {
-            return None;
-        }
-        let rewindTimestamp = if index > 0 {
-            currentMessages[index - 1].timestamp
+    /// Resolves the workspace rewind boundary for one explicit message timestamp.
+    fn resolveWorkspaceRewindTarget(
+        &self,
+        chatId: String,
+        messageTimestamp: i64,
+    ) -> Option<(String, String, i64)> {
+        let currentMessages = self
+            .chatHistoryDelegate
+            .chatMessagesSnapshotForChat(chatId.clone());
+        let targetIndex = currentMessages
+            .iter()
+            .position(|message| message.timestamp == messageTimestamp)?;
+        let rewindTimestamp = if targetIndex > 0 {
+            currentMessages[targetIndex - 1].timestamp
         } else {
             0
         };
@@ -1625,8 +1729,8 @@ impl ChatServiceCore {
     }
 
     /// Returns the in-memory messages for the current chat.
-    pub fn chatHistory(&self) -> &Vec<ChatMessage> {
-        &self.chatHistoryDelegate.chatHistory
+    pub fn chatHistory(&self) -> Vec<ChatMessage> {
+        self.chatHistoryDelegate.currentChatMessagesSnapshot()
     }
 
     /// Returns the state flow of the currently selected chat id.
@@ -1655,14 +1759,89 @@ impl ChatServiceCore {
     /// Returns messages from the Core selected by Binding for one explicit chat.
     #[allow(non_snake_case)]
     #[operit_route_macros::operit_core_route(binding = chatId)]
-    pub fn chatMessagesFlow(&self, chatId: String) -> StateFlow<Vec<ChatMessage>> {
+    pub async fn chatMessagesFlow(&self, chatId: String) -> StateFlow<Vec<ChatMessage>> {
+        self.localChatMessagesFlow(chatId)
+    }
+
+    /// Builds a routed diagnostic chat message flow with one embedded response stream.
+    #[allow(non_snake_case)]
+    #[operit_route_macros::operit_core_route(binding = chatId)]
+    pub async fn routeProbeChatMessagesFlow(
+        &self,
+        chatId: String,
+        streamText: String,
+    ) -> StateFlow<Vec<ChatMessage>> {
+        let streamKey = format!("route-probe:{chatId}");
+        let streamId = format!("route-probe-stream:{chatId}");
+        let source = Arc::new(CoreStreamSource::new({
+            let streamKey = streamKey.clone();
+            move |request| {
+                let (sender, receiver) = CoreEventStream::channel();
+                let streamKey = streamKey.clone();
+                let chunkOne = format!("{streamText} / chunk-one");
+                let chunkTwo = " / chunk-two".to_string();
+                let mut markdownStream = MarkdownRenderEventStream::new(streamKey.clone());
+                for event in markdownStream.beginSnapshot("") {
+                    sender
+                        .send(CoreEvent {
+                            requestId: Some(request.requestId.clone()),
+                            targetObjectId: request.targetObjectId,
+                            propertyName: request.propertyName.clone(),
+                            kind: CoreEventKind::Changed,
+                            value: operit_link::toCoreValue(event)
+                                .expect("MarkdownStreamEvent must serialize"),
+                        })
+                        .expect("route probe stream receiver must be open");
+                }
+                for chunk in [chunkOne, chunkTwo] {
+                    for event in markdownStream.pushChunk(&chunk) {
+                        sender
+                            .send(CoreEvent {
+                                requestId: Some(request.requestId.clone()),
+                                targetObjectId: request.targetObjectId,
+                                propertyName: request.propertyName.clone(),
+                                kind: CoreEventKind::Changed,
+                                value: operit_link::toCoreValue(event)
+                                    .expect("MarkdownStreamEvent must serialize"),
+                            })
+                            .expect("route probe stream receiver must be open");
+                    }
+                }
+                sender
+                    .send(CoreEvent {
+                        requestId: Some(request.requestId.clone()),
+                        targetObjectId: request.targetObjectId,
+                        propertyName: request.propertyName,
+                        kind: CoreEventKind::Completed,
+                        value: operit_link::toCoreValue(markdownStream.completed())
+                            .expect("MarkdownStreamEvent must serialize"),
+                    })
+                    .expect("route probe stream receiver must be open");
+                Ok(receiver)
+            }
+        }));
+        let mut message = ChatMessage::new("ai".to_string());
+        message.contentStream = Some(CoreStream::fromSourceWithId(streamId, source));
+        let flow = mutableStateFlow(vec![message]).asStateFlow();
+        flow
+    }
+
+    /// Returns messages from this local Core for one explicit chat.
+    #[allow(non_snake_case)]
+    pub fn localChatMessagesFlow(&self, chatId: String) -> StateFlow<Vec<ChatMessage>> {
         self.chatHistoryDelegate.chatMessageFlowForChat(chatId)
     }
 
     /// Returns runtime state from the Core selected by Binding for one explicit chat.
     #[allow(non_snake_case)]
     #[operit_route_macros::operit_core_route(binding = chatId)]
-    pub fn chatStateFlow(&self, chatId: String) -> StateFlow<ChatState> {
+    pub async fn chatStateFlow(&self, chatId: String) -> StateFlow<ChatState> {
+        self.localChatStateFlow(chatId)
+    }
+
+    /// Returns runtime state from this local Core for one explicit chat.
+    #[allow(non_snake_case)]
+    pub fn localChatStateFlow(&self, chatId: String) -> StateFlow<ChatState> {
         let selectedChatId = chatId;
         let displayWindowStateFlow = self
             .chatHistoryDelegate

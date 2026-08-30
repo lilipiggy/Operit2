@@ -309,6 +309,7 @@ impl MessageCoordinationDelegate {
             promptFunctionType,
             false,
             false,
+            false,
             roleCardIdOverride,
             chatIdOverride,
             messageText,
@@ -321,8 +322,6 @@ impl MessageCoordinationDelegate {
             None,
             false,
             None,
-            None,
-            None,
             turnOptions,
         )
         .await;
@@ -333,25 +332,27 @@ impl MessageCoordinationDelegate {
     pub async fn regenerateSingleAiMessage(
         &mut self,
         enhancedAiService: &mut EnhancedAIService,
-        index: usize,
+        chatId: String,
+        messageTimestamp: i64,
     ) -> Result<(), String> {
-        let chatId = self
-            .chatHistoryDelegate
-            .currentChatIdFlow
-            .value()
-            .ok_or_else(|| "No active conversation".to_string())?;
         if self.messageProcessingDelegate.isChatLoading(chatId.clone()) {
             return Err("Chat is busy".to_string());
         }
-        let currentHistory = self.chatHistoryDelegate.chatHistory.clone();
+        let currentHistory = self
+            .chatHistoryDelegate
+            .chatMessagesSnapshotForChat(chatId.clone());
+        let targetIndex = currentHistory
+            .iter()
+            .position(|message| message.timestamp == messageTimestamp)
+            .ok_or_else(|| format!("Message timestamp not found: {messageTimestamp}"))?;
         let targetMessage = currentHistory
-            .get(index)
+            .get(targetIndex)
             .cloned()
-            .ok_or_else(|| "Invalid message index".to_string())?;
+            .expect("target message index must resolve from timestamp position");
         if targetMessage.sender != "ai" {
             return Err("Only AI message allowed".to_string());
         }
-        let prefixHistory = currentHistory[..index].to_vec();
+        let prefixHistory = currentHistory[..targetIndex].to_vec();
         let (requestHistory, requestMessageContent) =
             if prefixHistory.last().map(|message| message.sender.as_str()) == Some("user") {
                 (
@@ -444,6 +445,7 @@ impl MessageCoordinationDelegate {
         promptFunctionType: PromptFunctionType,
         isContinuation: bool,
         isAutoContinuation: bool,
+        isResume: bool,
         roleCardIdOverride: Option<String>,
         chatIdOverride: Option<String>,
         messageText: String,
@@ -455,8 +457,6 @@ impl MessageCoordinationDelegate {
         isGroupOrchestrationTurn: bool,
         groupParticipantNamesText: Option<String>,
         suppressUserMessageInHistory: bool,
-        assistantMessageTimestamp: Option<i64>,
-        executionGeneration: Option<i64>,
         chatHistoryOverride: Option<Vec<ChatMessage>>,
         turnOptions: ChatTurnOptions,
     ) {
@@ -563,6 +563,7 @@ impl MessageCoordinationDelegate {
                 chatId: chatId.clone(),
                 messageText,
                 chatHistory: runtimeChatHistory,
+                promptHistoryOverride: None,
                 workspacePath,
                 promptFunctionType,
                 roleCardId,
@@ -582,8 +583,7 @@ impl MessageCoordinationDelegate {
                 proxySenderNameOverride,
                 suppressUserMessageInHistory: suppressUserMessageInHistory || isContinuation,
                 isAutoContinuation,
-                assistantMessageTimestamp,
-                executionGeneration,
+                isResume,
                 turnOptions: turnOptions.clone(),
             })
             .await;
@@ -938,6 +938,7 @@ impl MessageCoordinationDelegate {
                     promptFunctionType.clone(),
                     !isFirstMemberOfFirstRound,
                     false,
+                    false,
                     Some(member.characterCardId),
                     Some(chatId.clone()),
                     memberMessage,
@@ -949,8 +950,6 @@ impl MessageCoordinationDelegate {
                     true,
                     Some(groupParticipantNamesText.clone()),
                     true,
-                    None,
-                    None,
                     None,
                     turnOptions.clone(),
                 )
@@ -1601,6 +1600,7 @@ impl MessageCoordinationDelegate {
                         continuationPromptType,
                         true,
                         true,
+                        false,
                         roleCardIdOverride,
                         Some(currentChatId),
                         String::new(),
@@ -1612,8 +1612,6 @@ impl MessageCoordinationDelegate {
                         isGroupOrchestrationTurn,
                         groupParticipantNamesText,
                         false,
-                        None,
-                        None,
                         None,
                         ChatTurnOptions::default(),
                     )
