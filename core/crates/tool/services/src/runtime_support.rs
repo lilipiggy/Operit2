@@ -219,6 +219,104 @@ pub struct RuntimeCoreNodeRouteState {
     pub nodes: Vec<RuntimeCoreNodeStatus>,
 }
 
+/// Outcome of resolving one user-facing device reference against a route snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(non_snake_case)]
+pub enum CoreNodeReferenceMatch<'a> {
+    /// Exactly one space member matched the reference.
+    Resolved(&'a RuntimeCoreNodeStatus),
+    /// No member matched the reference at all.
+    Unknown,
+    /// More than one member matched; callers must never guess a target.
+    Ambiguous(Vec<&'a RuntimeCoreNodeStatus>),
+}
+
+impl RuntimeCoreNodeRouteState {
+    /// Resolves one device reference to a single space member.
+    ///
+    /// An exact node id wins first. A device or user name may then match
+    /// exactly, then case-insensitively. A node id prefix is accepted last and
+    /// only when it is unique. Every stage that matches several members is
+    /// reported as ambiguous instead of picking one.
+    #[allow(non_snake_case)]
+    pub fn resolveNodeReference<'a>(&'a self, reference: &str) -> CoreNodeReferenceMatch<'a> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return CoreNodeReferenceMatch::Unknown;
+        }
+        if let Some(node) = self.nodes.iter().find(|node| node.nodeId == reference) {
+            return CoreNodeReferenceMatch::Resolved(node);
+        }
+        for nameMatch in [
+            RuntimeCoreNodeNameMatch::Exact,
+            RuntimeCoreNodeNameMatch::AsciiCaseInsensitive,
+        ] {
+            let matches = self
+                .nodes
+                .iter()
+                .filter(|node| nameMatch.matches(node, reference))
+                .collect::<Vec<_>>();
+            match matches.len() {
+                0 => continue,
+                1 => return CoreNodeReferenceMatch::Resolved(matches[0]),
+                _ => return CoreNodeReferenceMatch::Ambiguous(matches),
+            }
+        }
+        let prefix = reference.to_ascii_lowercase();
+        let matches = self
+            .nodes
+            .iter()
+            .filter(|node| node.nodeId.to_ascii_lowercase().starts_with(&prefix))
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => CoreNodeReferenceMatch::Unknown,
+            1 => CoreNodeReferenceMatch::Resolved(matches[0]),
+            _ => CoreNodeReferenceMatch::Ambiguous(matches),
+        }
+    }
+}
+
+/// Selects how one matching stage compares member names.
+#[derive(Clone, Copy)]
+enum RuntimeCoreNodeNameMatch {
+    Exact,
+    AsciiCaseInsensitive,
+}
+
+impl RuntimeCoreNodeNameMatch {
+    /// Reports whether one member's display or user name matches the reference.
+    fn matches(self, node: &RuntimeCoreNodeStatus, reference: &str) -> bool {
+        [node.displayName.as_str(), node.userName.as_str()]
+            .into_iter()
+            .filter(|name| !name.trim().is_empty())
+            .any(|name| match self {
+                Self::Exact => name == reference,
+                Self::AsciiCaseInsensitive => name.eq_ignore_ascii_case(reference),
+            })
+    }
+}
+
+/// Formats one member as a user-facing label that always carries its node id.
+#[allow(non_snake_case)]
+pub fn coreNodeReferenceLabel(node: &RuntimeCoreNodeStatus) -> String {
+    let name = node.displayName.trim();
+    if name.is_empty() || name == node.nodeId {
+        node.nodeId.clone()
+    } else {
+        format!("{name} ({})", node.nodeId)
+    }
+}
+
+/// Formats matched members as a copyable candidate list for tool errors.
+#[allow(non_snake_case)]
+pub fn formatCoreNodeReferenceCandidates(candidates: &[&RuntimeCoreNodeStatus]) -> String {
+    candidates
+        .iter()
+        .map(|node| coreNodeReferenceLabel(node))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Supplies live Core routing state without coupling tools to the transport implementation.
 pub trait CoreNodeToolRuntime: Send + Sync {
     /// Returns one consistent snapshot of current device reachability.
@@ -449,5 +547,127 @@ impl ToolRuntimeDependencies {
     /// Clones the JavaScript execution provider for this tool runtime.
     pub fn shared_js_execution_provider(&self) -> Arc<dyn JsExecutionProvider> {
         self.js_execution_provider.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(nodeId: &str, displayName: &str, userName: &str, reachable: bool) -> RuntimeCoreNodeStatus {
+        RuntimeCoreNodeStatus {
+            nodeId: nodeId.to_string(),
+            displayName: displayName.to_string(),
+            userName: userName.to_string(),
+            platform: "android".to_string(),
+            model: "M2007J1SC".to_string(),
+            reachable,
+            relayHops: None,
+            relayPath: None,
+        }
+    }
+
+    fn state(nodes: Vec<RuntimeCoreNodeStatus>) -> RuntimeCoreNodeRouteState {
+        RuntimeCoreNodeRouteState {
+            currentNodeId: nodes.first().map(|node| node.nodeId.clone()).unwrap_or_default(),
+            nodes,
+        }
+    }
+
+    fn resolvedNodeId(matchResult: CoreNodeReferenceMatch<'_>) -> String {
+        match matchResult {
+            CoreNodeReferenceMatch::Resolved(node) => node.nodeId.clone(),
+            other => panic!("expected a resolved node, got {other:?}"),
+        }
+    }
+
+    /// An exact node id wins even when another member is named like it.
+    #[test]
+    fn exactNodeIdOutranksNamesAndPrefixes() {
+        let state = state(vec![
+            status("core-1-cas", "cas", "harmoon", true),
+            status("core-2-device", "core-1-cas", "harmoon", true),
+        ]);
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("core-1-cas")), "core-1-cas");
+    }
+
+    /// Device and user names resolve exactly, then case-insensitively.
+    #[test]
+    fn deviceAndUserNamesResolveThroughEveryExactStage() {
+        let state = state(vec![
+            status("core-1-cas", "cas", "harmoon", true),
+            status("core-2-elish", "Elish", "lin", true),
+        ]);
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("cas")), "core-1-cas");
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("elish")), "core-2-elish");
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("  cas  ")), "core-1-cas");
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("lin")), "core-2-elish");
+    }
+
+    /// A unique node id prefix resolves, including the timestamp-only form.
+    #[test]
+    fn uniqueNodeIdPrefixesResolve() {
+        let state = state(vec![
+            status("core-1791589326795-13765763d4b74d4ab76648f26ee874be", "cas", "harmoon", true),
+            status("core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0", "elish", "lin", true),
+        ]);
+        assert_eq!(
+            resolvedNodeId(state.resolveNodeReference("core-1791589326795")),
+            "core-1791589326795-13765763d4b74d4ab76648f26ee874be"
+        );
+        assert_eq!(
+            resolvedNodeId(state.resolveNodeReference("CORE-17915894")),
+            "core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0"
+        );
+    }
+
+    /// Repeated names and prefixes never pick a target by accident, while an
+    /// exactly spelled name still outranks its case-insensitive neighbours.
+    #[test]
+    fn ambiguousReferencesReportEveryCandidate() {
+        let state = state(vec![
+            status("core-1", "cas", "harmoon", true),
+            status("core-2", "cas", "harmoon", true),
+            status("core-3", "Mac", "lin", true),
+            status("core-4", "mac", "lin", true),
+        ]);
+        for reference in ["cas", "harmoon", "MAC", "core-"] {
+            match state.resolveNodeReference(reference) {
+                CoreNodeReferenceMatch::Ambiguous(candidates) => {
+                    assert!(candidates.len() >= 2, "{reference}");
+                }
+                other => panic!("ambiguous reference {reference} resolved as {other:?}"),
+            }
+        }
+        assert_eq!(resolvedNodeId(state.resolveNodeReference("mac")), "core-4");
+        match state.resolveNodeReference("cas") {
+            CoreNodeReferenceMatch::Ambiguous(candidates) => {
+                assert_eq!(
+                    formatCoreNodeReferenceCandidates(&candidates),
+                    "cas (core-1), cas (core-2)"
+                );
+            }
+            other => panic!("expected candidates, got {other:?}"),
+        }
+    }
+
+    /// Unknown, empty, and name-less members stay unresolved instead of guessing.
+    #[test]
+    fn unknownAndEmptyReferencesStayUnknown() {
+        let state = state(vec![
+            status("core-1", "cas", "", true),
+            status("core-2", "", "", true),
+        ]);
+        for reference in ["", "   ", "linux", "core-9"] {
+            assert_eq!(state.resolveNodeReference(reference), CoreNodeReferenceMatch::Unknown, "{reference}");
+        }
+    }
+
+    /// Labels always carry the stable node id for copyable error messages.
+    #[test]
+    fn referenceLabelsFallBackToTheNodeId() {
+        assert_eq!(coreNodeReferenceLabel(&status("core-1", "cas", "", true)), "cas (core-1)");
+        assert_eq!(coreNodeReferenceLabel(&status("core-1", "", "", true)), "core-1");
+        assert_eq!(coreNodeReferenceLabel(&status("core-1", "core-1", "", true)), "core-1");
     }
 }

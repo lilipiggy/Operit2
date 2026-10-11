@@ -219,7 +219,7 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
             invoke: {
                 let runtimeSupport = coreNodeRuntimeSupport.clone();
                 Arc::new(move |tool| {
-                    let targetNodeId = tool
+                    let targetReference = tool
                         .parameters
                         .iter()
                         .find(|parameter| parameter.name == "node_id")
@@ -234,9 +234,12 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                         Ok(state) => state,
                         Err(error) => return toolErrorResult(tool, error),
                     };
-                    if let Some(error) = switchCoreTargetError(&state, &targetNodeId) {
-                        return toolErrorResult(tool, error);
-                    }
+                    // The marker must carry the canonical node id so an accepted
+                    // device name or id prefix cannot move the Binding elsewhere.
+                    let targetNodeId = match resolveSwitchCoreTarget(&state, &targetReference) {
+                        Ok(node) => node.nodeId.clone(),
+                        Err(error) => return toolErrorResult(tool, error),
+                    };
                     ToolResult {
                         toolName: tool.name.clone(),
                         success: true,
@@ -1652,36 +1655,50 @@ fn toolErrorResult(tool: &AITool, error: String) -> ToolResult {
 
 /// Validates one switch_core target against the live route state so an invalid
 /// target fails the tool call instead of the asynchronous Binding move.
-fn switchCoreTargetError(
-    state: &crate::runtime_support::RuntimeCoreNodeRouteState,
-    targetNodeId: &str,
-) -> Option<String> {
-    let Some(node) = state.nodes.iter().find(|node| node.nodeId == targetNodeId) else {
-        return Some(format!(
-            "switch_core target is not a member of the current device space: {targetNodeId}"
-        ));
+///
+/// The caller receives the resolved member so the emitted marker always carries
+/// the canonical node id, never the alias that was typed.
+#[allow(non_snake_case)]
+fn resolveSwitchCoreTarget<'a>(
+    state: &'a crate::runtime_support::RuntimeCoreNodeRouteState,
+    targetReference: &str,
+) -> Result<&'a crate::runtime_support::RuntimeCoreNodeStatus, String> {
+    use crate::runtime_support::{
+        CoreNodeReferenceMatch, coreNodeReferenceLabel, formatCoreNodeReferenceCandidates,
     };
-    if !node.reachable {
-        return Some(format!(
-            "switch_core target is not currently reachable: {targetNodeId}"
-        ));
+    match state.resolveNodeReference(targetReference) {
+        CoreNodeReferenceMatch::Resolved(node) => {
+            if !node.reachable {
+                return Err(format!(
+                    "switch_core target is not currently reachable: {}",
+                    coreNodeReferenceLabel(node)
+                ));
+            }
+            Ok(node)
+        }
+        CoreNodeReferenceMatch::Unknown => Err(format!(
+            "switch_core target is not a member of the current device space: {targetReference}"
+        )),
+        CoreNodeReferenceMatch::Ambiguous(candidates) => Err(format!(
+            "switch_core target is ambiguous: {targetReference}; candidates: {}",
+            formatCoreNodeReferenceCandidates(&candidates)
+        )),
     }
-    None
 }
 
 #[cfg(test)]
 mod switch_core_tests {
     use super::*;
 
-    fn routeState(nodes: Vec<(&str, bool)>) -> crate::runtime_support::RuntimeCoreNodeRouteState {
+    fn routeState(nodes: Vec<(&str, &str, &str, bool)>) -> crate::runtime_support::RuntimeCoreNodeRouteState {
         operit_tools::runtime_support::RuntimeCoreNodeRouteState {
             currentNodeId: "local".to_string(),
             nodes: nodes
                 .into_iter()
-                .map(|(nodeId, reachable)| crate::runtime_support::RuntimeCoreNodeStatus {
+                .map(|(nodeId, displayName, userName, reachable)| crate::runtime_support::RuntimeCoreNodeStatus {
                     nodeId: nodeId.to_string(),
-                    displayName: nodeId.to_string(),
-                    userName: "tester".to_string(),
+                    displayName: displayName.to_string(),
+                    userName: userName.to_string(),
                     platform: "linux".to_string(),
                     model: String::new(),
                     reachable,
@@ -1694,20 +1711,58 @@ mod switch_core_tests {
 
     #[test]
     fn switch_core_accepts_reachable_members_including_direct_peers() {
-        let state = routeState(vec![("local", true), ("direct-peer", true), ("relayed", true)]);
-        assert_eq!(switchCoreTargetError(&state, "direct-peer"), None);
-        assert_eq!(switchCoreTargetError(&state, "local"), None);
+        let state = routeState(vec![
+            ("local", "local", "tester", true),
+            ("direct-peer", "direct-peer", "tester", true),
+            ("relayed", "relayed", "tester", true),
+        ]);
+        assert_eq!(resolveSwitchCoreTarget(&state, "direct-peer").unwrap().nodeId, "direct-peer");
+        assert_eq!(resolveSwitchCoreTarget(&state, "local").unwrap().nodeId, "local");
     }
 
     #[test]
     fn switch_core_rejects_unknown_and_unreachable_targets() {
-        let state = routeState(vec![("local", true), ("offline", false)]);
-        assert!(switchCoreTargetError(&state, "stranger")
-            .expect("unknown target must be rejected")
+        let state = routeState(vec![
+            ("local", "local", "tester", true),
+            ("core-1791589326795-13765763d4b74d4ab76648f26ee874be", "offline-cas", "tester", false),
+        ]);
+        assert!(resolveSwitchCoreTarget(&state, "stranger")
+            .expect_err("unknown target must be rejected")
             .contains("not a member"));
-        assert!(switchCoreTargetError(&state, "offline")
-            .expect("unreachable target must be rejected")
-            .contains("not currently reachable"));
+        let unreachable = resolveSwitchCoreTarget(&state, "offline-cas")
+            .expect_err("unreachable target must be rejected");
+        assert!(unreachable.contains("not currently reachable"));
+        assert!(unreachable.contains("core-1791589326795"), "canonical id must be reported: {unreachable}");
+    }
+
+    /// Device names, user names, and unique id prefixes resolve to the canonical id.
+    #[test]
+    fn switch_core_resolves_device_references_to_canonical_ids() {
+        let cas = "core-1791589326795-13765763d4b74d4ab76648f26ee874be";
+        let elish = "core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0";
+        let state = routeState(vec![
+            ("local", "local", "tester", true),
+            (cas, "cas", "harmoon", true),
+            (elish, "Elish", "lin", true),
+        ]);
+        for reference in ["cas", "harmoon", "core-1791589326795"] {
+            assert_eq!(resolveSwitchCoreTarget(&state, reference).unwrap().nodeId, cas, "{reference}");
+        }
+        assert_eq!(resolveSwitchCoreTarget(&state, "elish").unwrap().nodeId, elish);
+        assert_eq!(resolveSwitchCoreTarget(&state, "lin").unwrap().nodeId, elish);
+    }
+
+    /// Repeated names must fail with candidates instead of guessing a device.
+    #[test]
+    fn switch_core_reports_ambiguous_references() {
+        let state = routeState(vec![
+            ("core-1", "cas", "harmoon", true),
+            ("core-2", "cas", "harmoon", true),
+        ]);
+        let error = resolveSwitchCoreTarget(&state, "cas").expect_err("ambiguous name must be rejected");
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(error.contains("cas (core-1)"), "{error}");
+        assert!(error.contains("cas (core-2)"), "{error}");
     }
 }
 

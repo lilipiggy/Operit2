@@ -144,6 +144,11 @@ impl AsyncToolExecutor for EdgePortToolExecutor {
         Box::pin(async move {
             let result = match prepare(tool, self.io) {
                 Ok((node, request, _)) => {
+                    let routeState = self.runtime.coreNodeRouteState().ok();
+                    let node = match canonicalEdgeNodeReference(routeState.as_ref(), &node) {
+                        Ok(canonicalNode) => canonicalNode,
+                        Err(error) => return vec![failure(tool, error)],
+                    };
                     match self.runtime.executeEdgeTool(node.clone(), request).await {
                         Ok(data) => {
                             if serde_json::to_vec(&data)
@@ -169,6 +174,31 @@ impl AsyncToolExecutor for EdgePortToolExecutor {
             };
             vec![result]
         })
+    }
+}
+
+/// Canonicalizes one Edge node reference through the live route snapshot.
+///
+/// A unique name or id prefix becomes the canonical node id. An ambiguous
+/// reference fails instead of guessing. Without a snapshot, or for a reference
+/// the snapshot cannot see, the raw value keeps the previous pass-through: the
+/// router still owns membership, policy, and reachability errors for it.
+#[allow(non_snake_case)]
+fn canonicalEdgeNodeReference(
+    routeState: Option<&crate::runtime_support::RuntimeCoreNodeRouteState>,
+    node: &str,
+) -> Result<String, String> {
+    use crate::runtime_support::{CoreNodeReferenceMatch, formatCoreNodeReferenceCandidates};
+    let Some(state) = routeState else {
+        return Ok(node.to_string());
+    };
+    match state.resolveNodeReference(node) {
+        CoreNodeReferenceMatch::Resolved(resolved) => Ok(resolved.nodeId.clone()),
+        CoreNodeReferenceMatch::Unknown => Ok(node.to_string()),
+        CoreNodeReferenceMatch::Ambiguous(candidates) => Err(format!(
+            "Edge node reference is ambiguous: {node}; candidates: {}",
+            formatCoreNodeReferenceCandidates(&candidates)
+        )),
     }
 }
 
@@ -291,5 +321,56 @@ mod tests {
         t.parameters[2].value = "{}".into();
         t.parameters[0].value = "".into();
         assert!(prepare(&t, false).is_err());
+    }
+
+    fn routeState(nodes: Vec<(&str, &str)>) -> crate::runtime_support::RuntimeCoreNodeRouteState {
+        crate::runtime_support::RuntimeCoreNodeRouteState {
+            currentNodeId: "local".to_string(),
+            nodes: nodes
+                .into_iter()
+                .map(|(nodeId, displayName)| crate::runtime_support::RuntimeCoreNodeStatus {
+                    nodeId: nodeId.to_string(),
+                    displayName: displayName.to_string(),
+                    userName: String::new(),
+                    platform: "esp32".to_string(),
+                    model: String::new(),
+                    reachable: true,
+                    relayHops: None,
+                    relayPath: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn edge_node_names_and_prefixes_resolve_to_canonical_ids() {
+        let state = routeState(vec![
+            ("core-1791589326795-13765763d4b74d4ab76648f26ee874be", "cas"),
+            ("core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0", "edge-board"),
+        ]);
+        assert_eq!(
+            canonicalEdgeNodeReference(Some(&state), "edge-board").unwrap(),
+            "core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0"
+        );
+        assert_eq!(
+            canonicalEdgeNodeReference(Some(&state), "core-17915894").unwrap(),
+            "core-1791589400000-58f0d4ee0efc47f59a1f1b4d514b7af0"
+        );
+    }
+
+    #[test]
+    fn unseen_edge_references_keep_the_router_pass_through() {
+        let state = routeState(vec![("core-1", "cas")]);
+        assert_eq!(canonicalEdgeNodeReference(Some(&state), "core-remote-edge").unwrap(), "core-remote-edge");
+        assert_eq!(canonicalEdgeNodeReference(None, "edge-two").unwrap(), "edge-two");
+    }
+
+    #[test]
+    fn ambiguous_edge_names_fail_with_candidates() {
+        let state = routeState(vec![("core-1", "board"), ("core-2", "board")]);
+        let error = canonicalEdgeNodeReference(Some(&state), "board").unwrap_err();
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(error.contains("board (core-1)"), "{error}");
+        assert!(error.contains("board (core-2)"), "{error}");
     }
 }

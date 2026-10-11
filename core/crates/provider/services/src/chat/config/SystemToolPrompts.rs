@@ -904,16 +904,16 @@ fn basic_tools_en() -> SystemToolPromptCategory {
             ),
             tool(
                 "list_core_nodes",
-                "List the current device and every device in the current device space, including each device name, platform, model, ID, and current reachability.",
+                "List the current device and every device in the current device space, including each device name, platform, model, ID, and current reachability. Every listed device name or ID is a valid switch_core target.",
                 vec![],
             ),
             tool(
                 "switch_core",
-                "Emit a target-device marker for another currently reachable device. This tool does not switch the runtime itself. Fails when the target is not a reachable device-space member.",
+                "Emit a target-device marker for another currently reachable device. This tool does not switch the runtime itself. Fails when the target is not a reachable device-space member. Accepts a device name, a user name, a unique ID prefix, or the exact ID from list_core_nodes.",
                 vec![param(
                     "node_id",
                     "string",
-                    "exact target device ID",
+                    "target device: a name or exact ID from list_core_nodes, or a unique ID prefix",
                     true,
                     None,
                 )],
@@ -944,13 +944,13 @@ fn basic_tools_cn() -> SystemToolPromptCategory {
             ),
             tool(
                 "list_core_nodes",
-                "列出当前设备和当前设备空间内的全部设备，包括每台设备的名称、平台、型号、ID 和当前是否可达。",
+                "列出当前设备和当前设备空间内的全部设备，包括每台设备的名称、平台、型号、ID 和当前是否可达。列表中的设备名称或 ID 均可作为 switch_core 的目标。",
                 vec![],
             ),
             tool(
                 "switch_core",
-                "为当前设备空间内另一台当前可达的设备输出目标标记；此工具本身不会切换运行时。目标不是可达的空间成员时会返回失败。",
-                vec![param("node_id", "string", "目标设备的精确 ID", true, None)],
+                "为当前设备空间内另一台当前可达的设备输出目标标记；此工具本身不会切换运行时。目标不是可达的空间成员时会返回失败。接受设备名、用户名、唯一 ID 前缀或 list_core_nodes 返回的完整 ID。",
+                vec![param("node_id", "string", "目标设备：list_core_nodes 返回的设备名或完整 ID，或唯一 ID 前缀", true, None)],
             ),
         ],
     )
