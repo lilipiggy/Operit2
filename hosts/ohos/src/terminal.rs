@@ -219,6 +219,25 @@ impl OhosTerminalHost {
 }
 
 impl TerminalHost for OhosTerminalHost {
+    /// Resolves QEMU Linux guest paths separately from native OpenHarmony paths.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        match self.backendForTerminal(terminal, terminalType)? {
+            OhosTerminalBackend::QemuVroot => {
+                operit_host_api::TerminalWorkingDirectory::resolveLinuxGuestDirectory(
+                    workingDir,
+                    resolveHostDirectory,
+                )
+            }
+            OhosTerminalBackend::NativeShell => resolveHostDirectory(workingDir),
+        }
+    }
+
     /// Returns OpenHarmony native-shell and QEMU-vroot terminal capabilities.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {
@@ -321,9 +340,18 @@ impl TerminalHost for OhosTerminalHost {
 
     /// Creates or returns a named QEMU-vroot Alpine session used by tools and plugins.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
-        let backend = OhosTerminalBackend::QemuVroot;
+        self.createOrGetTypedSession(sessionName, SHELL_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses the requested interpreter in the configured QEMU-vroot backend.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        let backend = self.backendForTerminal(QEMU_VROOT_TERMINAL, terminalType)?;
         self.prepareBackend(backend)?;
-        let session = self.vrootShell.createOrGetSession(sessionName)?;
+        let session = self.vrootShell.createOrGetTypedSession(sessionName, terminalType)?;
         self.recordSession(&session.sessionId, backend)?;
         Ok(mapSessionInfo(session, backend))
     }

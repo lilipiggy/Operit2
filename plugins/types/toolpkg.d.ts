@@ -39,6 +39,11 @@ export namespace ToolPkg {
   export type HookEventNameVariant7 = "navigation_entry_action";
 
   /**
+   * Carries the manifest-extension hook discriminator.
+   */
+  export type HookEventNameVariant20 = "manifest_extension";
+
+  /**
    * Enumerates values to which an asynchronous generic hook may resolve.
    */
   export type HookReturnVariant3Output = JsonValue | void;
@@ -578,7 +583,7 @@ export namespace ToolPkg {
   /**
    * Enumerates every hook event that a ToolPkg plugin may register.
    */
-  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | HostEventName;
+  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | ChatMessageMenuItemEventName | ChatRuntimeEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | CoreCommandEventName | HostEventName | HookEventNameVariant20 | EdgeEventName;
 
   /**
    * Accepts a JSON result, no result, or asynchronous completion from a generic hook.
@@ -720,6 +725,31 @@ export namespace ToolPkg {
   export type ChatMessageEventName = "message_persisted";
 
   /**
+   * Names the click event dispatched for a chat message context-menu item.
+   */
+  export type ChatMessageMenuItemEventName = "chat_message_menu_item_click";
+
+  /**
+   * Identifies a sender supported by chat message context-menu items.
+   */
+  export type ChatMessageSender = "user" | "ai";
+
+  /**
+   * Names chat runtime state-change notifications.
+   */
+  export type ChatRuntimeEventName = "state_changed";
+
+  /**
+   * Identifies a host chat runtime slot.
+   */
+  export type ChatRuntimeSlotName = "main" | "floating";
+
+  /**
+   * Identifies one observable chat runtime processing state.
+   */
+  export type ChatRuntimeStateName = "idle" | "processing" | "connecting" | "receiving" | "executing_tool" | "tool_progress" | "processing_tool_result" | "summarizing" | "executing_plan" | "completed" | "error";
+
+  /**
    * Controls chat input handling and optionally supplies replacement text or metadata.
    */
   export interface ChatInputHookObjectResult extends JsonObject {
@@ -784,6 +814,11 @@ export namespace ToolPkg {
    * Names the stages used to prepare and generate a conversation summary.
    */
   export type SummaryGenerateEventName = "before_prepare_summary_prompt" | "before_send_to_model" | "after_generate_summary";
+
+  /**
+   * Names the event dispatched for a registered Core command.
+   */
+  export type CoreCommandEventName = "core_command";
 
   /**
    * Identifies the role and purpose of one prompt-history turn.
@@ -1136,6 +1171,28 @@ export namespace ToolPkg {
   }
 
   /**
+   * Carries arguments supplied to a registered Core command.
+   */
+  export interface CoreCommandEventPayload {
+    /**
+     * Identifies the command registration selected by the host.
+     */
+    commandId: string;
+    /**
+     * Contains the command name entered by the user.
+     */
+    commandName: string;
+    /**
+     * Contains parsed command arguments without the command name.
+     */
+    args: string[];
+    /**
+     * Reports whether the caller requested structured JSON output.
+     */
+    json: boolean;
+  }
+
+  /**
    * Enumerates immediate and asynchronous results accepted from a tool lifecycle hook.
    */
   export interface ToolLifecycleHookObjectResult {
@@ -1190,6 +1247,29 @@ export namespace ToolPkg {
   export type SummaryGenerateHookReturn = string | SummaryHookObjectResult | null | void | Promise<SummaryGenerateHookReturnVariant5Output>;
 
   /**
+   * Contains text and structured output returned by a Core command handler.
+   */
+  export interface CoreCommandResult {
+    /**
+     * Contains text displayed as standard output.
+     */
+    stdout?: string;
+    /**
+     * Contains text displayed as standard error.
+     */
+    stderr?: string;
+    /**
+     * Contains the structured result used by JSON command invocations.
+     */
+    json?: JsonValue;
+  }
+
+  /**
+   * Accepts a Core command result immediately or asynchronously.
+   */
+  export type CoreCommandHandlerOutput = CoreCommandResult | Promise<CoreCommandResult>;
+
+  /**
    * Callback invoked when an application or activity lifecycle event is dispatched.
    */
   export type AppLifecycleHookHandler = (arg0: AppLifecycleHookEvent) => AppLifecycleHookReturn;
@@ -1218,6 +1298,18 @@ export namespace ToolPkg {
    * Callback invoked after a chat message is persisted.
    */
   export type ChatMessageHookHandler = (arg0: ChatMessageHookEvent) => HookReturn;
+
+  /**
+   * Callback invoked when a chat message context-menu item is selected.
+   * @since ToolPkg API 2.0.0
+   */
+  export type ChatMessageMenuItemHandler = (arg0: ChatMessageMenuItemHookEvent) => ChatMessageMenuItemHookReturn;
+
+  /**
+   * Callback invoked when a chat runtime state changes.
+   * @since ToolPkg API 2.0.0
+   */
+  export type ChatRuntimeHookHandler = (arg0: ChatRuntimeHookEvent) => HookReturn;
 
   /**
    * Callback invoked when a navigation entry action event is dispatched.
@@ -1268,6 +1360,16 @@ export namespace ToolPkg {
    * Callback invoked when a summary generate event is dispatched.
    */
   export type SummaryGenerateHookHandler = (arg0: SummaryGenerateHookEvent) => SummaryGenerateHookReturn;
+
+  /**
+   * Callback invoked when the host executes a registered Core command.
+   */
+  export type CoreCommandHandler = (arg0: CoreCommandHookEvent) => CoreCommandHandlerOutput;
+
+  /**
+   * Callback invoked when a dependent ToolPkg manifest extension is delivered.
+   */
+  export type ManifestExtensionHookHandler = (arg0: ManifestExtensionHookEvent) => HookReturn;
 
   /**
    * Carries a hook discriminator, typed payload, package identity, and dispatch metadata.
@@ -1371,6 +1473,36 @@ export namespace ToolPkg {
      * Identifies the XML tag currently being rendered.
      */
     tagName?: string;
+    /**
+     * Identifies the conversation that owns the rendered XML block.
+     */
+    chatId?: string;
+  }
+
+  /**
+   * Carries data from one manifest extension declared by a dependent ToolPkg.
+   */
+  export interface ManifestExtensionEventPayload {
+    /**
+     * Identifies the manifest extension key selected for dispatch.
+     */
+    extensionKey: string;
+    /**
+     * Identifies the ToolPkg that declared the extension.
+     */
+    sourceToolPkgId: string;
+    /**
+     * Contains the source ToolPkg version.
+     */
+    sourceVersion: string;
+    /**
+     * Contains the selected manifest extension value.
+     */
+    extension: JsonValue;
+    /**
+     * Contains every extension field declared by the source manifest.
+     */
+    manifestExtensions: JsonObject;
   }
 
   /**
@@ -1546,6 +1678,205 @@ export namespace ToolPkg {
   }
 
   /**
+   * Describes a chat message supplied to one context-menu item invocation.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageSnapshot extends JsonObject {
+    /**
+     * Identifies the persisted message by timestamp.
+     */
+    timestamp: number;
+    /**
+     * Identifies the message sender.
+     */
+    sender: string;
+    /**
+     * Provides the display role name associated with the message.
+     */
+    roleName: string;
+    /**
+     * Contains the persisted message content.
+     */
+    content: string;
+    /**
+     * Records when assistant generation completed.
+     */
+    completedAt: number;
+    /**
+     * Identifies the provider used for the message.
+     */
+    provider: string;
+    /**
+     * Identifies the model used for the message.
+     */
+    modelName: string;
+    /**
+     * Stores prompt token usage associated with the message.
+     */
+    inputTokens: number;
+    /**
+     * Stores completion token usage associated with the message.
+     */
+    outputTokens: number;
+    /**
+     * Stores cached prompt token usage associated with the message.
+     */
+    cachedInputTokens: number;
+    /**
+     * Records when the model request was sent.
+     */
+    sentAt: number;
+    /**
+     * Records model output duration in milliseconds.
+     */
+    outputDurationMs: number;
+    /**
+     * Records model wait duration in milliseconds.
+     */
+    waitDurationMs: number;
+    /**
+     * Identifies how the message is displayed by the host.
+     */
+    displayMode: string;
+    /**
+     * Identifies the selected variant index for this timestamp.
+     */
+    selectedVariantIndex: number;
+    /**
+     * Reports the number of variants stored for this timestamp.
+     */
+    variantCount: number;
+    /**
+     * Reports whether the user marked the message as favorite.
+     */
+    isFavorite: boolean;
+  }
+
+  /**
+   * Carries data supplied when a chat message context-menu item is selected.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuItemEventPayload extends JsonObject {
+    /**
+     * Identifies the context-menu action.
+     */
+    action: ChatMessageMenuItemEventName;
+    /**
+     * Identifies the conversation associated with the message.
+     */
+    chatId: string;
+    /**
+     * Identifies the message position in the currently rendered conversation.
+     */
+    messageIndex: number;
+    /**
+     * Identifies the selected context-menu item.
+     */
+    menuItemId: string;
+    /**
+     * Contains the selected message snapshot.
+     */
+    message: ChatMessageSnapshot;
+  }
+
+  /**
+   * Describes dynamic dialog data returned by a context-menu item handler.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuItemDialogResult extends JsonObject {
+    /**
+     * Provides a dialog title that overrides the registered title.
+     */
+    title?: string;
+    /**
+     * Carries mutable screen state.
+     */
+    state?: JsonObject;
+    /**
+     * Carries module metadata consumed by the host renderer.
+     */
+    moduleSpec?: JsonObject;
+  }
+
+  /**
+   * Describes the result returned by a context-menu item handler.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuItemResult extends JsonObject {
+    /**
+     * Supplies dynamic dialog state for the registered dialog surface.
+     */
+    dialog?: ChatMessageMenuItemDialogResult;
+  }
+
+  /**
+   * Accepts an object result or no result from a context-menu item handler.
+   * @since ToolPkg API 2.0.0
+   */
+  export type ChatMessageMenuItemReturnValue = ChatMessageMenuItemResult | null | void;
+
+  /**
+   * Accepts an immediate or asynchronous result from a context-menu item handler.
+   * @since ToolPkg API 2.0.0
+   */
+  export type ChatMessageMenuItemHookReturn = ChatMessageMenuItemReturnValue | Promise<ChatMessageMenuItemReturnValue>;
+
+  /**
+   * Carries chat runtime data supplied when a runtime state changes.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatRuntimeEventPayload extends JsonObject {
+    /**
+     * Identifies the conversation whose state changed.
+     */
+    chatId: string;
+    /**
+     * Identifies the runtime slot that owns the chat.
+     */
+    slot: ChatRuntimeSlotName;
+    /**
+     * Identifies the current observable processing state.
+     */
+    state: ChatRuntimeStateName;
+    /**
+     * Provides optional display text from the processing state.
+     */
+    message?: string;
+    /**
+     * Identifies the tool named by the processing state.
+     */
+    toolName?: string;
+    /**
+     * Reports tool execution progress when available.
+     */
+    progress?: number;
+    /**
+     * Reports whether the runtime is actively processing work.
+     */
+    isActive: boolean;
+    /**
+     * Lists chat identifiers with active work.
+     */
+    activeChatIds: string[];
+    /**
+     * Reports tool invocations made in the current turn.
+     */
+    currentTurnToolInvocationCount: number;
+    /**
+     * Reports known active conversation count.
+     */
+    activeConversationCount: number;
+    /**
+     * Reports tool invocations accumulated by the current session.
+     */
+    currentSessionToolCount: number;
+    /**
+     * Records the event timestamp in epoch milliseconds.
+     */
+    timestamp: number;
+  }
+
+  /**
    * Carries navigation entry action data supplied when the event is dispatched.
    */
   export interface NavigationEntryActionEventPayload extends JsonObject {
@@ -1614,6 +1945,20 @@ export namespace ToolPkg {
   }
 
   /**
+   * Combines shared dispatch metadata with a chat message context-menu event.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuItemHookEvent extends HookEventBase<ChatMessageMenuItemEventName, ChatMessageMenuItemEventPayload> {
+  }
+
+  /**
+   * Combines shared dispatch metadata with a chat runtime state-change event.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatRuntimeHookEvent extends HookEventBase<ChatRuntimeEventName, ChatRuntimeEventPayload> {
+  }
+
+  /**
    * Combines shared dispatch metadata with the typed payload for a navigation entry action hook.
    */
   export interface NavigationEntryActionHookEvent extends HookEventBase<NavigationEntryActionHookEventBaseType1, NavigationEntryActionEventPayload> {
@@ -1671,6 +2016,12 @@ export namespace ToolPkg {
    * Combines shared dispatch metadata with the typed payload for a summary generate hook.
    */
   export interface SummaryGenerateHookEvent extends HookEventBase<SummaryGenerateEventName, SummaryGenerateEventPayload> {
+  }
+
+  /**
+   * Combines shared dispatch metadata with Core command arguments.
+   */
+  export interface CoreCommandHookEvent extends HookEventBase<CoreCommandEventName, CoreCommandEventPayload> {
   }
 
   /**
@@ -2048,6 +2399,43 @@ export namespace ToolPkg {
   }
 
   /**
+   * Combines shared dispatch metadata with one manifest extension payload.
+   */
+  export interface ManifestExtensionHookEvent extends HookEventBase<HookEventNameVariant20, ManifestExtensionEventPayload> {
+  }
+
+  /**
+   * Identifies a host-owned chat composer extension location.
+   */
+  export type ChatComposerSlotName = "above_input";
+
+  /**
+   * Describes a Compose DSL screen contributed to a chat composer slot.
+   */
+  export interface ChatComposerSlotRegistration {
+    /**
+     * Uniquely identifies this slot contribution within the package.
+     */
+    id: string;
+    /**
+     * Selects the host-owned location that renders this contribution.
+     */
+    slot: ChatComposerSlotName;
+    /**
+     * Contains the Compose DSL screen rendered by the host.
+     */
+    screen: ComposeDslScreen;
+    /**
+     * Controls relative placement among contributions to the same slot.
+     */
+    order?: number;
+    /**
+     * Controls whether the host retains the screen while its chat remains open.
+     */
+    keepAlive?: boolean;
+  }
+
+  /**
    * Enumerates supported navigation surface values.
    */
   export type NavigationSurface = "toolbox" | "main_sidebar_plugins" | "app_bar";
@@ -2236,6 +2624,71 @@ export namespace ToolPkg {
      * Provides the callback invoked for this chat message hook registration.
      */
     function: ChatMessageHookHandler;
+  }
+
+  /**
+   * Describes the dialog surface registered by a chat message context-menu item.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuDialogRegistration {
+    /**
+     * Identifies the Compose DSL screen resource rendered in the dialog.
+     */
+    screen: string;
+    /**
+     * Provides the dialog title.
+     */
+    title: LocalizedText;
+  }
+
+  /**
+   * Adds an item to the chat message long-press menu.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatMessageMenuItemRegistration {
+    /**
+     * Uniquely identifies this context-menu item registration within the package.
+     */
+    id: string;
+    /**
+     * Provides primary text displayed by the host UI.
+     */
+    title: LocalizedText;
+    /**
+     * Provides the icon name displayed by the host UI.
+     */
+    icon?: string;
+    /**
+     * Controls relative placement in the host menu.
+     */
+    order?: number;
+    /**
+     * Limits this item to selected message senders.
+     */
+    senders?: ChatMessageSender[];
+    /**
+     * Provides the callback invoked when this item is selected.
+     */
+    function: ChatMessageMenuItemHandler;
+    /**
+     * Configures a Compose DSL dialog surface opened from this item.
+     */
+    dialog?: ChatMessageMenuDialogRegistration;
+  }
+
+  /**
+   * Registers chat runtime state notifications.
+   * @since ToolPkg API 2.0.0
+   */
+  export interface ChatRuntimeHookRegistration {
+    /**
+     * Uniquely identifies this chat runtime hook registration within the package.
+     */
+    id: string;
+    /**
+     * Provides the callback invoked when the chat runtime state changes.
+     */
+    function: ChatRuntimeHookHandler;
   }
 
   /**
@@ -2968,6 +3421,36 @@ export namespace ToolPkg {
   }
 
   /**
+   * Describes a slash command implemented by a ToolPkg callback.
+   */
+  export interface CoreCommandRegistration {
+    /**
+     * Uniquely identifies this command registration within the package.
+     */
+    id: string;
+    /**
+     * Selects the slash command name without the leading slash.
+     */
+    name: string;
+    /**
+     * Provides the localized title shown by command discovery surfaces.
+     */
+    title: LocalizedText;
+    /**
+     * Provides the localized command description.
+     */
+    description: LocalizedText;
+    /**
+     * Documents the command usage displayed by command discovery surfaces.
+     */
+    usage: string;
+    /**
+     * Provides the callback invoked when this command is executed.
+     */
+    function: CoreCommandHandler;
+  }
+
+  /**
    * Describes an AI provider and every callback required to operate it.
    */
   export interface AiProviderRegistration {
@@ -3071,6 +3554,20 @@ export namespace ToolPkg {
   }
 
   /**
+   * Registers a handler for a named manifest extension field.
+   */
+  export interface ManifestExtensionRegistration {
+    /**
+     * Identifies the manifest extension key accepted by this handler.
+     */
+    key: string;
+    /**
+     * Provides the callback invoked for matching dependent manifests.
+     */
+    function: ManifestExtensionHookHandler;
+  }
+
+  /**
    * Represents the IPC API exposed on a ToolPkg registry.
    */
   export interface IpcApi {
@@ -3099,6 +3596,34 @@ export namespace ToolPkg {
   }
 
   /**
+   * Supplies the payload and authenticated calling package to a public API handler.
+   */
+  export interface PublicApiEvent<TPayload> {
+    /**
+     * Contains the caller's JSON request.
+     */
+    payload: TPayload;
+    /**
+     * Identifies the calling package, attached by the runtime.
+     */
+    callerPackage: string;
+  }
+
+  /**
+   * Registers one explicitly published function implemented by this package.
+   */
+  export interface PublicApiRegistration<TPayload, TResult> {
+    /**
+     * Identifies the stable public method name.
+     */
+    name: string;
+    /**
+     * Handles a request in the provider's main runtime.
+     */
+    function: (arg0: PublicApiEvent<TPayload>) => Promise<TResult>;
+  }
+
+  /**
    * Provides IPC and registration services for the current ToolPkg package.
    */
   export interface Registry {
@@ -3111,6 +3636,14 @@ export namespace ToolPkg {
      */
     wasm: WasmApi;
     /**
+     * Publishes an exported handler for dependent packages.
+     */
+    registerApi<TPayload, TResult>(definition: PublicApiRegistration<TPayload, TResult>): void;
+    /**
+     * Calls an explicitly published method of a declared prerequisite.
+     */
+    callDependency<TPayload, TResult>(packageName: string, methodName: string, payload: TPayload): Promise<TResult>;
+    /**
      * Registers a Compose DSL screen in the toolbox UI.
      */
     registerToolboxUiModule(definition: ToolboxUiModuleRegistration): void;
@@ -3118,6 +3651,10 @@ export namespace ToolPkg {
      * Registers a routable Compose DSL screen for the current plugin.
      */
     registerUiRoute(definition: UiRouteRegistration): void;
+    /**
+     * Registers a Compose DSL contribution for a host-owned chat composer slot.
+     */
+    registerChatComposerSlot(definition: ChatComposerSlotRegistration): void;
     /**
      * Adds a plugin action to a host navigation surface.
      */
@@ -3154,6 +3691,16 @@ export namespace ToolPkg {
      * Registers a callback for persisted chat message notifications.
      */
     registerChatMessageHook(definition: ChatMessageHookRegistration): void;
+    /**
+     * Registers a context-menu item for chat messages.
+     * @since ToolPkg API 2.0.0
+     */
+    registerChatMessageMenuItem(definition: ChatMessageMenuItemRegistration): void;
+    /**
+     * Registers a callback for chat runtime state changes.
+     * @since ToolPkg API 2.0.0
+     */
+    registerChatRuntimeHook(definition: ChatRuntimeHookRegistration): void;
     /**
      * Registers a typed timer, interval, or broadcast hook.
      */
@@ -3203,18 +3750,36 @@ export namespace ToolPkg {
      */
     registerSummaryGenerateHook(definition: SummaryGenerateHookRegistration): void;
     /**
+     * Registers a slash command handled by the current ToolPkg package.
+     */
+    registerCoreCommand(definition: CoreCommandRegistration): void;
+    /**
      * Registers an AI provider and its required operation callbacks.
      */
     registerAiProvider(definition: AiProviderRegistration): void;
+    /**
+     * Registers a handler for one manifest extension declared by dependent ToolPkg packages.
+     */
+    registerManifestExtension(definition: ManifestExtensionRegistration): void;
     /**
      * Extracts a packaged plugin resource and resolves to its readable path.
      */
     readResource(key: string, outputFileName?: string, internal?: boolean): Promise<string>;
     /**
-     * Returns the configuration directory for the selected plugin.
+     * Extracts a resource owned by another ToolPkg container and resolves to its readable path.
+     */
+    readResourceFromPackage(packageNameOrSubpackageId: string, key: string, outputFileName?: string, internal?: boolean): Promise<string>;
+    /**
+     * Returns the selected plugin configuration directory during registration and runtime execution.
+     * Registration uses the explicitly selected scope before an installation record exists.
      */
     getConfigDir(pluginId?: string): string;
   }
+
+  /**
+   * Device action events, independent of screens or touch input.
+   */
+  export type EdgeEventName = "edge_event";
 
 }
 
@@ -3231,6 +3796,10 @@ declare global {
    */
   function registerToolPkgAppLifecycleHook(definition: ToolPkg.AppLifecycleHookRegistration): void;
   /**
+   * Registers a Compose DSL contribution for a host-owned chat composer slot. The global binding delegates to the active ToolPkg registry.
+   */
+  function registerToolPkgChatComposerSlot(definition: ToolPkg.ChatComposerSlotRegistration): void;
+  /**
    * Registers a callback for chat input changes and submissions. The global binding delegates to the active ToolPkg registry.
    */
   function registerToolPkgChatInputHook(definition: ToolPkg.ChatInputHookRegistration): void;
@@ -3239,9 +3808,23 @@ declare global {
    */
   function registerToolPkgChatMessageHook(definition: ToolPkg.ChatMessageHookRegistration): void;
   /**
+   * Registers a context-menu item for chat messages. The global binding delegates to the active ToolPkg registry.
+   * @since ToolPkg API 2.0.0
+   */
+  function registerToolPkgChatMessageMenuItem(definition: ToolPkg.ChatMessageMenuItemRegistration): void;
+  /**
+   * Registers a callback for chat runtime state changes. The global binding delegates to the active ToolPkg registry.
+   * @since ToolPkg API 2.0.0
+   */
+  function registerToolPkgChatRuntimeHook(definition: ToolPkg.ChatRuntimeHookRegistration): void;
+  /**
    * Registers a callback for chat view lifecycle changes. The global binding delegates to the active ToolPkg registry.
    */
   function registerToolPkgChatViewHook(definition: ToolPkg.ChatViewHookRegistration): void;
+  /**
+   * Registers a slash command handled by the current ToolPkg package. The global binding delegates to the active ToolPkg registry.
+   */
+  function registerToolPkgCoreCommand(definition: ToolPkg.CoreCommandRegistration): void;
   /**
    * Registers a plugin widget on the desktop surface. The global binding delegates to the active ToolPkg registry.
    */
@@ -3262,6 +3845,10 @@ declare global {
    * Registers a callback that supplies chat input menu toggles. The global binding delegates to the active ToolPkg registry.
    */
   function registerToolPkgInputMenuTogglePlugin(definition: ToolPkg.InputMenuTogglePluginRegistration): void;
+  /**
+   * Registers a handler for one dependent ToolPkg manifest extension. The global binding delegates to the active ToolPkg registry.
+   */
+  function registerToolPkgManifestExtension(definition: ToolPkg.ManifestExtensionRegistration): void;
   /**
    * Registers a callback that inspects or transforms messages. The global binding delegates to the active ToolPkg registry.
    */

@@ -17,7 +17,7 @@ use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::HostRuntimeTaskSchedulerHost;
 use operit_model::ActivePrompt::ActivePrompt;
 use operit_model::AttachmentInfo::AttachmentInfo;
-use operit_model::CharacterCard::CharacterCard;
+use operit_model::CharacterCard::{CharacterCard, CharacterCardChatModelBindingMode};
 use operit_model::CharacterGroupCard::{CharacterGroupCard, GroupMemberConfig};
 use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatMessageDisplayMode::ChatMessageDisplayMode;
@@ -28,6 +28,7 @@ use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::MessagePartCodec;
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_providers::chat::config::FunctionalPrompts::FunctionalPrompts;
+use operit_providers::chat::library::MemoryLibrary::MemoryLibrary;
 use operit_providers::chat::llmprovider::AIService::collect_stream_chunks;
 use operit_providers::chat::EnhancedAIService::{EnhancedAIService, SendMessageOptions};
 use operit_util::stream::Stream::Stream;
@@ -127,6 +128,21 @@ impl MessageCoordinationDelegate {
         self.nonFatalErrorCollectorJob = Some("nonFatalErrorCollectorJob".to_string());
     }
 
+    /// Reports whether a chat history entry is bound to a character group.
+    fn isGroupChatSession(&self, chatId: Option<String>) -> bool {
+        let Some(chatId) = chatId else {
+            return false;
+        };
+        self.chatHistoryDelegate
+            .chatHistoriesFlow()
+            .value()
+            .into_iter()
+            .find(|history| history.id == chatId)
+            .and_then(|history| history.characterGroupId)
+            .map(|groupId| !groupId.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Recalculates the stable context window size for a chat and prompt mode.
     pub async fn recalculateStableWindowSize(
         &mut self,
@@ -138,7 +154,7 @@ impl MessageCoordinationDelegate {
         groupParticipantNamesText: Option<String>,
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
-    ) -> i64 {
+    ) -> Result<i64, String> {
         let currentChat = chatId.as_ref().and_then(|chatId| {
             self.chatHistoryDelegate
                 .chatHistoriesFlow()
@@ -161,7 +177,7 @@ impl MessageCoordinationDelegate {
         };
         let runtime = service
             .createSendMessageRuntime(&runtimeOptions)
-            .expect("stable context window runtime must be created");
+            .map_err(|error| error.to_string())?;
         AIMessageManager::calculateStableContextWindow(StableContextWindowRequest {
             enhancedAiService: service,
             chatId: chatId.clone(),
@@ -169,7 +185,13 @@ impl MessageCoordinationDelegate {
             chatHistory: chatId
                 .map(|id| self.chatHistoryDelegate.getRuntimeChatHistory(id))
                 .unwrap_or_default(),
-            workspacePath: currentChat.clone().and_then(|chat| chat.workspace),
+            workspacePath: currentChat
+                .as_ref()
+                .and_then(|chat| self.chatHistoryDelegate.primaryWorkspacePathForChat(chat)),
+            workspaceFolders: currentChat
+                .iter()
+                .flat_map(|chat| self.chatHistoryDelegate.workspaceFolderPathsForChat(chat))
+                .collect(),
             promptFunctionType,
             roleCardId,
             currentRoleName,
@@ -183,7 +205,7 @@ impl MessageCoordinationDelegate {
             runtime,
         })
         .await
-        .expect("stable context window must be calculated")
+        .map_err(|error| error.to_string())
     }
 
     /// Recalculates and persists the stable context window for a chat.
@@ -199,24 +221,71 @@ impl MessageCoordinationDelegate {
         chatModelIdOverride: Option<String>,
     ) -> Option<i64> {
         let targetChatId = chatId.or_else(|| self.chatHistoryDelegate.currentChatIdFlow.value())?;
+        let currentChat = self
+            .chatHistoryDelegate
+            .chatHistoriesFlow
+            .value()
+            .iter()
+            .find(|history| history.id == targetChatId)
+            .cloned();
+        let effectiveRoleCardId = match roleCardId
+            .clone()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(roleCardId) => roleCardId,
+            None => match self.resolveRoleCardIdForSend(currentChat.as_ref()) {
+                Ok(roleCardId) => roleCardId,
+                Err(error) => {
+                    let message = error.to_string();
+                    ChainLogger::error(
+                        SEND_CHAIN,
+                        "stable_window.role.resolve.error",
+                        &[("chatId", targetChatId.clone()), ("error", message.clone())],
+                    );
+                    self.messageProcessingDelegate
+                        .setInputProcessingStateForChat(
+                            targetChatId.clone(),
+                            InputProcessingState::Error { message },
+                        );
+                    return None;
+                }
+            },
+        };
         let effectivePromptFunctionType =
             promptFunctionType.unwrap_or_else(|| self.currentPromptFunctionType.clone());
         let effectiveChatModelIdOverride =
             chatModelIdOverride.or_else(|| self.currentChatModelIdOverride.clone());
         let effectiveChatProviderIdOverride =
             chatProviderIdOverride.or_else(|| self.currentChatProviderIdOverride.clone());
-        let newWindowSize = self
+        let newWindowSize = match self
             .recalculateStableWindowSize(
                 service,
                 Some(targetChatId.clone()),
-                roleCardId,
+                Some(effectiveRoleCardId),
                 effectivePromptFunctionType,
                 groupOrchestrationMode,
                 groupParticipantNamesText,
                 effectiveChatProviderIdOverride,
                 effectiveChatModelIdOverride,
             )
-            .await;
+            .await
+        {
+            Ok(newWindowSize) => newWindowSize,
+            Err(error) => {
+                ChainLogger::error(
+                    SEND_CHAIN,
+                    "stable_window.recalculate.error",
+                    &[("chatId", targetChatId.clone()), ("error", error.clone())],
+                );
+                self.messageProcessingDelegate
+                    .setInputProcessingStateForChat(
+                        targetChatId.clone(),
+                        InputProcessingState::Error { message: error },
+                    );
+                return None;
+            }
+        };
         let (inputTokens, outputTokens) = self
             .tokenStatisticsDelegate
             .getCumulativeTokenCounts(Some(targetChatId.clone()));
@@ -338,33 +407,44 @@ impl MessageCoordinationDelegate {
         if self.messageProcessingDelegate.isChatLoading(chatId.clone()) {
             return Err("Chat is busy".to_string());
         }
-        let currentHistory = self
+        let targetMessage = self
             .chatHistoryDelegate
-            .chatMessagesSnapshotForChat(chatId.clone());
-        let targetIndex = currentHistory
-            .iter()
-            .position(|message| message.timestamp == messageTimestamp)
+            .chatMessagesSnapshotForChat(chatId.clone())
+            .into_iter()
+            .find(|message| message.timestamp == messageTimestamp)
             .ok_or_else(|| format!("Message timestamp not found: {messageTimestamp}"))?;
-        let targetMessage = currentHistory
-            .get(targetIndex)
-            .cloned()
-            .expect("target message index must resolve from timestamp position");
         if targetMessage.sender != "ai" {
             return Err("Only AI message allowed".to_string());
         }
-        let prefixHistory = currentHistory[..targetIndex].to_vec();
-        let (requestHistory, requestMessageContent) =
-            if prefixHistory.last().map(|message| message.sender.as_str()) == Some("user") {
-                (
-                    prefixHistory[..prefixHistory.len() - 1].to_vec(),
-                    prefixHistory
-                        .last()
-                        .map(ChatMessage::displayText)
-                        .unwrap_or_default(),
+        let runtimeHistory = self
+            .chatHistoryDelegate
+            .getRuntimeChatHistoryUpTo(chatId.clone(), targetMessage.timestamp);
+        let targetRuntimeIndex = runtimeHistory
+            .iter()
+            .position(|message| message.timestamp == targetMessage.timestamp)
+            .ok_or_else(|| format!("Runtime message timestamp not found: {messageTimestamp}"))?;
+        let roleCard = self
+            .characterCardManager
+            .findCharacterCardByName(&targetMessage.roleName)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "Character card not found for regenerated message role: {}",
+                    targetMessage.roleName
                 )
-            } else {
-                (prefixHistory, String::new())
-            };
+            })?;
+        let roleCardId = roleCard.id;
+        let currentRoleName = roleCard.name;
+        let (chatProviderIdOverride, chatModelIdOverride) =
+            self.resolveRegenerationChatModelOverrides(&roleCardId)?;
+        let groupParticipantNamesText = self.buildBoundGroupParticipantNamesText(&chatId)?;
+        let isGroupOrchestrationTurn = groupParticipantNamesText.is_some();
+        let requestHistory = runtimeHistory[..targetRuntimeIndex].to_vec();
+        let requestMessageContent = requestHistory
+            .last()
+            .filter(|message| message.sender == "user")
+            .map(ChatMessage::displayText)
+            .unwrap_or_default();
         let currentChat = self
             .chatHistoryDelegate
             .chatHistoriesFlow
@@ -372,11 +452,99 @@ impl MessageCoordinationDelegate {
             .iter()
             .find(|history| history.id == chatId)
             .cloned();
-        let workspacePath = currentChat.and_then(|chat| chat.workspace);
+        let workspacePath = currentChat
+            .as_ref()
+            .and_then(|chat| self.chatHistoryDelegate.primaryWorkspacePathForChat(chat));
         let enableThinking = ApiPreferences::getInstance()
             .enableThinkingModeFlow()
             .first()
             .expect("enable_thinking_mode preference must be readable");
+        let enableMemoryAutoUpdate = ApiPreferences::getInstance()
+            .enableMemoryAutoUpdateFlow()
+            .first()
+            .expect("enable_memory_auto_update preference must be readable");
+        let (modelProviderId, modelId) = match (
+            chatProviderIdOverride.as_ref(),
+            chatModelIdOverride.as_ref(),
+        ) {
+            (Some(providerId), Some(modelId)) => (providerId, modelId),
+            (None, None) => {
+                let binding = self
+                    .messageProcessingDelegate
+                    .functionalConfigManager
+                    .getModelBindingForFunction(FunctionType::CHAT)
+                    .map_err(|error| error.to_string())?;
+                return self
+                    .regenerateSingleAiMessageWithRequest(
+                        enhancedAiService,
+                        chatId,
+                        targetMessage,
+                        requestMessageContent,
+                        requestHistory,
+                        workspacePath,
+                        roleCardId,
+                        currentRoleName,
+                        enableThinking,
+                        enableMemoryAutoUpdate,
+                        binding.providerId,
+                        binding.modelId,
+                        None,
+                        None,
+                        isGroupOrchestrationTurn,
+                        groupParticipantNamesText,
+                    )
+                    .await;
+            }
+            _ => return Err("chat provider and model override must be set together".to_string()),
+        };
+        self.regenerateSingleAiMessageWithRequest(
+            enhancedAiService,
+            chatId,
+            targetMessage,
+            requestMessageContent,
+            requestHistory,
+            workspacePath,
+            roleCardId,
+            currentRoleName,
+            enableThinking,
+            enableMemoryAutoUpdate,
+            modelProviderId.clone(),
+            modelId.clone(),
+            chatProviderIdOverride,
+            chatModelIdOverride,
+            isGroupOrchestrationTurn,
+            groupParticipantNamesText,
+        )
+        .await
+    }
+
+    /// Runs the prepared regeneration request using its resolved model configuration.
+    async fn regenerateSingleAiMessageWithRequest(
+        &mut self,
+        enhancedAiService: &mut EnhancedAIService,
+        chatId: String,
+        targetMessage: ChatMessage,
+        requestMessageContent: String,
+        requestHistory: Vec<ChatMessage>,
+        workspacePath: Option<String>,
+        roleCardId: String,
+        currentRoleName: String,
+        enableThinking: bool,
+        enableMemoryAutoUpdate: bool,
+        modelProviderId: String,
+        modelId: String,
+        chatProviderIdOverride: Option<String>,
+        chatModelIdOverride: Option<String>,
+        isGroupOrchestrationTurn: bool,
+        groupParticipantNamesText: Option<String>,
+    ) -> Result<(), String> {
+        let chatContextSettings = self
+            .messageProcessingDelegate
+            .modelConfigManager
+            .getResolvedModelConfig(&modelProviderId, &modelId)
+            .map_err(|error| error.to_string())?;
+        let maxTokens = (chatContextSettings.context.maxContextLength * 1024.0)
+            .clamp(0.0, i32::MAX as f32) as i32;
         let mut variantMessage = self
             .messageProcessingDelegate
             .regenerateAiMessageVariant(RegenerateAiMessageVariantRequest {
@@ -388,16 +556,18 @@ impl MessageCoordinationDelegate {
                 requestHistory,
                 workspacePath,
                 promptFunctionType: self.currentPromptFunctionType.clone(),
-                roleCardId: String::new(),
-                currentRoleName: targetMessage.roleName,
+                roleCardId,
+                currentRoleName,
                 attachments: Vec::new(),
                 replyToMessage: None,
                 enableThinking,
-                enableMemoryAutoUpdate: false,
-                maxTokens: 0,
-                tokenUsageThreshold: 0.0,
-                chatProviderIdOverride: None,
-                chatModelIdOverride: None,
+                enableMemoryAutoUpdate,
+                maxTokens,
+                tokenUsageThreshold: chatContextSettings.summary.summaryTokenThreshold as f64,
+                chatProviderIdOverride,
+                chatModelIdOverride,
+                isGroupOrchestrationTurn,
+                groupParticipantNamesText,
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -436,6 +606,75 @@ impl MessageCoordinationDelegate {
             Some(chatId),
         );
         Ok(())
+    }
+
+    /// Resolves the optional fixed provider/model pair for one character card.
+    fn resolveRegenerationChatModelOverrides(
+        &self,
+        roleCardId: &str,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        let roleCard = self
+            .characterCardManager
+            .getCharacterCard(roleCardId)
+            .map_err(|error| error.to_string())?;
+        if CharacterCardChatModelBindingMode::normalize(Some(&roleCard.chatModelBindingMode))
+            != CharacterCardChatModelBindingMode::FIXED_MODEL
+        {
+            return Ok((None, None));
+        }
+        let fixedModelId = roleCard
+            .chatModelId
+            .map(|modelId| modelId.trim().to_string())
+            .filter(|modelId| !modelId.is_empty())
+            .ok_or_else(|| {
+                format!("Fixed chat model is missing for character card: {roleCardId}")
+            })?;
+        let mut candidates = self
+            .messageProcessingDelegate
+            .modelConfigManager
+            .getAllModelSummaries()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|summary| summary.modelId == fixedModelId);
+        let fixedModel = candidates
+            .next()
+            .ok_or_else(|| format!("Fixed chat model is unavailable: {fixedModelId}"))?;
+        if candidates.next().is_some() {
+            return Err(format!("Fixed chat model is ambiguous: {fixedModelId}"));
+        }
+        Ok((Some(fixedModel.providerId), Some(fixedModel.modelId)))
+    }
+
+    /// Builds group participant context from the group bound to one chat.
+    fn buildBoundGroupParticipantNamesText(&self, chatId: &str) -> Result<Option<String>, String> {
+        let groupId = self
+            .chatHistoryDelegate
+            .chatHistoriesFlow()
+            .value()
+            .into_iter()
+            .find(|history| history.id == chatId)
+            .and_then(|history| history.characterGroupId)
+            .filter(|groupId| !groupId.trim().is_empty());
+        let Some(groupId) = groupId else {
+            return Ok(None);
+        };
+        let group = self
+            .characterGroupCardManager
+            .getCharacterGroupCard(&groupId)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Character group not found for chat: {chatId}"))?;
+        let mut memberCardsById = HashMap::new();
+        for member in &group.members {
+            let card = self
+                .characterCardManager
+                .getCharacterCard(&member.characterCardId)
+                .map_err(|error| error.to_string())?;
+            memberCardsById.insert(member.characterCardId.clone(), card);
+        }
+        Ok(Some(self.buildGroupParticipantNamesText(
+            &group.members,
+            &memberCardsById,
+        )))
     }
 
     /// Shared send pipeline used by direct sends, continuations, and orchestration turns.
@@ -519,7 +758,9 @@ impl MessageCoordinationDelegate {
             .iter()
             .find(|history| history.id == chatId)
             .cloned();
-        let workspacePath = currentChat.clone().and_then(|chat| chat.workspace);
+        let workspacePath = currentChat
+            .as_ref()
+            .and_then(|chat| self.chatHistoryDelegate.primaryWorkspacePathForChat(chat));
         let roleCardId = match roleCardIdOverride
             .clone()
             .map(|value| value.trim().to_string())
@@ -555,6 +796,10 @@ impl MessageCoordinationDelegate {
             .enableThinkingModeFlow()
             .first()
             .expect("enable_thinking_mode preference must be readable");
+        let workspaceFolders = currentChat
+            .as_ref()
+            .map(|chat| self.chatHistoryDelegate.workspaceFolderPathsForChat(chat))
+            .unwrap_or_default();
         let result = self
             .messageProcessingDelegate
             .sendUserMessage(SendUserMessageProcessingRequest {
@@ -565,6 +810,7 @@ impl MessageCoordinationDelegate {
                 chatHistory: runtimeChatHistory,
                 promptHistoryOverride: None,
                 workspacePath,
+                workspaceFolders,
                 promptFunctionType,
                 roleCardId,
                 currentRoleName: None,
@@ -573,7 +819,10 @@ impl MessageCoordinationDelegate {
                 attachments,
                 replyToMessage,
                 enableThinking,
-                enableMemoryAutoUpdate: false,
+                enableMemoryAutoUpdate: turnOptions.persistTurn
+                    && proxySenderNameOverride.as_ref().map(|s|s.trim().is_empty()).unwrap_or(true)
+                    && ApiPreferences::getInstance().enableMemoryAutoUpdateFlow().first()
+                        .expect("memory auto-update preference must be readable"),
                 maxTokens: 0,
                 tokenUsageThreshold: 0.0,
                 chatProviderIdOverride,
@@ -649,38 +898,81 @@ impl MessageCoordinationDelegate {
         &self,
         currentChat: Option<&operit_model::ChatHistory::ChatHistory>,
     ) -> Result<String, operit_store::PreferencesDataStore::PreferencesDataStoreError> {
-        if let Some(chat) = currentChat {
-            let hasGroupBinding = chat
-                .characterGroupId
-                .as_ref()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false);
-            if !hasGroupBinding {
-                if let Some(characterCardName) = chat
-                    .characterCardName
-                    .as_ref()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                {
-                    if let Some(card) = self
-                        .characterCardManager
-                        .findCharacterCardByName(&characterCardName)?
-                    {
-                        return Ok(card.id);
-                    }
-                }
-            }
-        }
-        ActivePromptManager::getInstance().resolveActiveCardIdForSend()
+        crate::services::core::ChatMemoryOwnerResolver::resolveRoleCardId(
+            currentChat, &self.characterCardManager,
+        )
     }
 
     /// Triggers a manual memory update for a chat.
-    pub fn handleManualMemoryUpdate(&mut self, _chatId: Option<String>) {
+    pub async fn handleManualMemoryUpdate(
+        &mut self,
+        chatId: Option<String>,
+        enhancedAiService: &mut EnhancedAIService,
+    ) -> Result<(), String> {
         if self.isUpdatingMemory {
-            return;
+            return Err("memory update is already running".to_string());
         }
         self.isUpdatingMemory = true;
+        let result = self
+            .handleManualMemoryUpdateInternal(chatId, enhancedAiService)
+            .await;
         self.isUpdatingMemory = false;
+        result
+    }
+
+    /// Builds a manual memory extraction request from one hydrated chat history.
+    async fn handleManualMemoryUpdateInternal(
+        &self,
+        chatId: Option<String>,
+        enhancedAiService: &mut EnhancedAIService,
+    ) -> Result<(), String> {
+        let chatId = chatId
+            .or_else(|| self.chatHistoryDelegate.currentChatIdFlow.value())
+            .ok_or_else(|| "manual memory update requires a chat".to_string())?;
+        let currentChat = self
+            .chatHistoryDelegate
+            .chatHistoriesFlow
+            .value()
+            .into_iter()
+            .find(|chat| chat.id == chatId);
+        let roleCardId = self
+            .resolveRoleCardIdForSend(currentChat.as_ref())
+            .map_err(|error| error.to_string())?;
+        let history = self
+            .chatHistoryDelegate
+            .getRuntimeChatHistory(chatId)
+            .into_iter()
+            .filter_map(|message| {
+                let content = message.displayText();
+                if content.trim().is_empty() {
+                    None
+                } else if message.sender == "user" {
+                    Some(("user".to_string(), content))
+                } else if message.sender == "ai" {
+                    Some(("assistant".to_string(), content))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let content = history
+            .iter()
+            .rev()
+            .find(|(role, content)| role == "assistant" && !content.trim().is_empty())
+            .map(|(_, content)| content.clone())
+            .ok_or_else(|| "manual memory update requires an assistant reply".to_string())?;
+        let memoryService = enhancedAiService
+            .multi_service_manager
+            .getServiceForFunction(FunctionType::MEMORY)
+            .map_err(|error| error.to_string())?;
+        MemoryLibrary::saveMemoryNow(
+            history,
+            content,
+            memoryService,
+            Some(roleCardId),
+            enhancedAiService.provider_runtime_context.clone(),
+        )
+        .await
     }
 
     #[allow(non_snake_case)]
@@ -782,7 +1074,9 @@ impl MessageCoordinationDelegate {
             .iter()
             .find(|history| history.id == chatId)
             .cloned();
-        let workspacePath = currentChat.clone().and_then(|chat| chat.workspace);
+        let workspacePath = currentChat
+            .as_ref()
+            .and_then(|chat| self.chatHistoryDelegate.primaryWorkspacePathForChat(chat));
         let provisionalTitle = if !self.chatHistoryDelegate.hasUserMessage(chatId.clone()) {
             let title = MessageProcessingDelegate::provisionalConversationTitle(&attachments);
             self.chatHistoryDelegate
@@ -803,7 +1097,9 @@ impl MessageCoordinationDelegate {
                     chatId: chatId.clone(),
                     roleCardId: CharacterCardManager::DEFAULT_CHARACTER_CARD_ID.to_string(),
                 },
-            ) {
+            )
+            .await
+        {
             Ok(content) => content,
             Err(error) => {
                 self.messageProcessingDelegate
@@ -1238,12 +1534,7 @@ impl MessageCoordinationDelegate {
         let currentTokens = self
             .tokenStatisticsDelegate
             .getLastCurrentWindowSize(Some(chatId.clone()));
-        let effectiveContextLength = if chatContextSettings.context.enableMaxContextMode {
-            chatContextSettings.context.maxContextLength
-        } else {
-            chatContextSettings.context.maxContextLength * 0.4
-        };
-        let maxTokens = (effectiveContextLength * 1024.0) as i32;
+        let maxTokens = (chatContextSettings.context.maxContextLength * 1024.0) as i32;
         let shouldSummarize = AIMessageManager::shouldGenerateSummary(
             currentMessages.clone(),
             currentTokens,
@@ -1263,7 +1554,7 @@ impl MessageCoordinationDelegate {
                 self.currentChatModelIdOverride.clone(),
                 None,
                 true,
-                false,
+                true,
                 None,
             )
             .await;
@@ -1279,6 +1570,7 @@ impl MessageCoordinationDelegate {
             return;
         }
         let currentChatId = self.chatHistoryDelegate.currentChatIdFlow.value();
+        let isGroupChat = self.isGroupChatSession(currentChatId.clone());
         self.summarizeHistory(
             enhancedAiService,
             false,
@@ -1287,7 +1579,7 @@ impl MessageCoordinationDelegate {
             None,
             None,
             None,
-            false,
+            isGroupChat,
             false,
             None,
         )
@@ -1304,6 +1596,7 @@ impl MessageCoordinationDelegate {
         groupParticipantNamesText: Option<String>,
     ) {
         self.summaryJob = Some("summaryJob".to_string());
+        let isGroupChat = self.isGroupChatSession(chatId.clone());
         self.summarizeHistory(
             enhancedAiService,
             true,
@@ -1312,7 +1605,7 @@ impl MessageCoordinationDelegate {
             None,
             None,
             roleCardId,
-            false,
+            isGroupChat,
             isGroupOrchestrationTurn,
             groupParticipantNamesText,
         )
@@ -1421,7 +1714,7 @@ impl MessageCoordinationDelegate {
             .setInputProcessingStateForChat(
                 originalChatId.clone(),
                 InputProcessingState::Summarizing {
-                    message: "compressing history".to_string(),
+                    message: "chat_compressing_history".to_string(),
                 },
             );
         let isGroupChat = self
@@ -1496,7 +1789,7 @@ impl MessageCoordinationDelegate {
                 .setInputProcessingStateForChat(
                     currentChatId,
                     InputProcessingState::Summarizing {
-                        message: "compressing history".to_string(),
+                        message: "chat_compressing_history".to_string(),
                     },
                 );
         }

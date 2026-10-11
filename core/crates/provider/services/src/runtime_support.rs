@@ -39,6 +39,14 @@ pub struct ProviderPackageInfo {
     pub description: String,
 }
 
+/// Carries one hydrated chat message to provider-owned background work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderMemoryAutoSaveMessage {
+    pub timestamp: i64,
+    pub sender: String,
+    pub content: String,
+}
+
 /// Describes character prompt data resolved by the runtime.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(non_snake_case)]
@@ -68,6 +76,30 @@ pub trait ProviderRuntimeSupport: Send + Sync {
     /// Loads memory search settings for an owner key.
     fn memorySearchConfig(&self, ownerKey: &str) -> Result<MemorySearchConfig, String>;
 
+    /// Whether USER.md should be excluded from outgoing prompt context.
+    fn disableUserPreferenceDescription(&self) -> Result<bool, String> { Ok(false) }
+
+    /// Resolves the memory owner selected by one character card.
+    fn memoryOwnerKeyForCharacterCard(&self, roleCardId: &str) -> Result<String, String>;
+
+    /// Returns every memory owner currently available to automatic extraction.
+    fn memoryAutoSaveOwnerKeys(&self) -> Result<Vec<String>, String>;
+
+    /// Loads hydrated messages before one trigger timestamp in descending order.
+    fn memoryAutoSaveMessagesBefore(
+        &self,
+        chatId: &str,
+        maxTimestampInclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryAutoSaveMessage>, String>;
+
+    /// Loads hydrated messages addressed by selected timestamps.
+    fn memoryAutoSaveMessagesByTimestamps(
+        &self,
+        chatId: &str,
+        timestamps: &[i64],
+    ) -> Result<Vec<ProviderMemoryAutoSaveMessage>, String>;
+
     /// Resolves character prompt data for a selected role card.
     fn characterPromptContext(
         &self,
@@ -92,6 +124,21 @@ pub trait ProviderRuntimeSupport: Send + Sync {
         providerId: &str,
         modelId: &str,
     ) -> Result<ResolvedModelConfig, String>;
+
+    /// Returns the saved ChatGPT Codex session.
+    fn loadCodexTokens(
+        &self,
+    ) -> Result<crate::chat::llmprovider::CodexOAuth::CodexOAuthTokens, String> {
+        Err("Codex authorization is required".to_string())
+    }
+
+    /// Persists a refreshed ChatGPT Codex session.
+    fn saveCodexTokens(
+        &self,
+        _tokens: crate::chat::llmprovider::CodexOAuth::CodexOAuthTokens,
+    ) -> Result<(), String> {
+        Err("Codex authorization cannot be saved".to_string())
+    }
 
     /// Returns the provider profile for a provider id.
     fn providerProfile(
@@ -119,7 +166,7 @@ pub trait ProviderRuntimeSupport: Send + Sync {
         runtimeContextKey: Option<String>,
         executionKind: Option<String>,
         onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>>;
 
     /// Decodes a tool package hook result.
     fn decodeToolPkgHookResult(&self, raw: Option<String>) -> Option<Value>;

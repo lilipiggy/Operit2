@@ -4,21 +4,25 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
-import 'package:file_selector/file_selector.dart';
+import 'package:operit_folder_access/operit_folder_access.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../core/host/SelectedFileInput.dart';
 import '../../../core/logging/ClientLogger.dart';
 import '../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../core/snapshot/SnapshotImportUploader.dart';
+import '../../../l10n/generated/app_localizations.dart';
+import '../../common/StorageDirectorySelectionError.dart';
 import '../../common/DeviceSpaceDiscoveryPanel.dart';
 import '../../common/OperitLogoMark.dart';
 import '../../common/RuntimeBootstrapScreen.dart';
 import '../../common/components/CommonNetworkErrorView.dart';
 import '../../main/navigation/StartupRouteStrategy.dart';
+import '../../theme/OperitFormStyles.dart';
 
 enum _AiSetupPage {
   intro,
@@ -228,7 +232,6 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
   String? _setupError;
   bool _providerConfirmed = false;
   List<_OnboardingRequirement> _requirements = const <_OnboardingRequirement>[];
-  RuntimeStoragePaths? _storagePaths;
 
   late final AnimationController _introAnimationController;
   late final AnimationController _introExitController;
@@ -415,7 +418,6 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
         return;
       }
       setState(() {
-        _storagePaths = paths;
         _runtimeRootController.text = paths.runtimeRoot;
         _workspaceRootController.text = paths.workspaceRoot;
       });
@@ -445,14 +447,10 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       _setupError = null;
     });
     try {
-      final paths = await RuntimeBootstrapManager.instance
-          .localRuntimeStoragePathsForRoots(runtimeRoot, workspaceRoot);
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _storagePaths = paths;
-      });
+      await RuntimeBootstrapManager.instance.localRuntimeStoragePathsForRoots(
+        runtimeRoot,
+        workspaceRoot,
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -506,7 +504,9 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
         .operit1SnapshotImportProgressFlow()
         .listen(
           (progress) {
-            if (!mounted) {
+            if (!mounted ||
+                !_importingOperit1Snapshot ||
+                progress.stage == 'idle') {
               return;
             }
             setState(() {
@@ -685,36 +685,41 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
     );
   }
 
-  /// Lets the user select the runtime data directory.
-  Future<void> _selectRuntimeRoot() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.trim().isEmpty) {
-      return;
+  /// Selects a new runtime root directory.
+  Future<void> _selectRuntimeRoot() =>
+      _selectStorageRoot(_runtimeRootController);
+
+  /// Selects a new workspace root directory.
+  Future<void> _selectWorkspaceRoot() =>
+      _selectStorageRoot(_workspaceRootController);
+
+  /// Keeps picker failures in the storage UI instead of the unhandled zone.
+  Future<void> _selectStorageRoot(TextEditingController controller) async {
+    try {
+      final path = await OperitFolderAccess.pickDirectory();
+      if (!mounted || path == null || path.trim().isEmpty) {
+        return;
+      }
+      setState(() {
+        controller.text = path.trim();
+        _setupError = null;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _setupError = storageDirectorySelectionErrorMessage(
+          AppLocalizations.of(context)!,
+          error,
+        );
+      });
     }
-    _runtimeRootController.text = path.trim();
-    setState(() {
-      _storagePaths = null;
-      _setupError = null;
-    });
   }
 
-  /// Lets the user select the workspace data directory.
-  Future<void> _selectWorkspaceRoot() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.trim().isEmpty) {
-      return;
-    }
-    _workspaceRootController.text = path.trim();
-    setState(() {
-      _storagePaths = null;
-      _setupError = null;
-    });
-  }
-
-  /// Clears validated paths after either editable path changes.
+  /// Clears storage errors after either editable path changes.
   void _handleStoragePathChanged(String _) {
     setState(() {
-      _storagePaths = null;
       _setupError = null;
     });
   }
@@ -734,8 +739,10 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       _setupError = null;
     });
     try {
-      final paths = await RuntimeBootstrapManager.instance
-          .localRuntimeStoragePathsForRoots(runtimeRoot, workspaceRoot);
+      await RuntimeBootstrapManager.instance.localRuntimeStoragePathsForRoots(
+        runtimeRoot,
+        workspaceRoot,
+      );
       await RuntimeBootstrapManager.instance.confirmLocalRuntimeStorage(
         runtimeRoot,
         workspaceRoot,
@@ -751,7 +758,6 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       }
       setState(() {
         _storageConfirmed = true;
-        _storagePaths = paths;
       });
       if (configured || guideSeen) {
         await widget.onComplete();
@@ -880,6 +886,8 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
           customHeaders: provider.customHeaders,
           requestLimitPerMinute: provider.requestLimitPerMinute,
           maxConcurrentRequests: provider.maxConcurrentRequests,
+          thinkingConfigurations: provider.thinkingConfigurations,
+          thinkingOptionId: provider.thinkingOptionId,
           models: provider.models,
         ),
       );
@@ -987,7 +995,13 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       _readingOperit1Snapshot = true;
       _setupError = null;
       _operit1Snapshot = null;
-      _operit1ImportProgress = null;
+      _operit1ImportProgress = const core_proxy.Operit1SnapshotImportProgress(
+        stage: 'select',
+        title: '选择快照',
+        detail: '请在文件选择器中选择 Operit1 快照。',
+        progress: 0,
+        active: true,
+      );
       _operit1SnapshotSession = null;
       _operit1SnapshotFileName = null;
     });
@@ -995,7 +1009,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       if (previousSession != null) {
         await previousSession.discard();
       }
-      final file = await SnapshotImportFile.pick();
+      final file = await SelectedFileInput.pickSnapshot();
       if (file == null) {
         return;
       }
@@ -1003,8 +1017,48 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
         'snapshot selected name=${file.name} bytes=${file.byteLength}',
         tag: _operit1SnapshotImportLogTag,
       );
-      final session = await SnapshotImportUploader(widget.clients).stage(file);
+      if (!mounted) {
+        await file.close();
+        return;
+      }
+      setState(() {
+        _operit1SnapshotFileName = file.name;
+      });
+      var lastUploadPercent = -1;
+      final session = await SnapshotImportUploader(widget.clients).stage(
+        file,
+        onProgress: (uploadedBytes, totalBytes) {
+          final uploadPercent = totalBytes <= 0
+              ? 0
+              : (uploadedBytes * 100 / totalBytes).floor().clamp(0, 100);
+          if (!mounted || uploadPercent == lastUploadPercent) {
+            return;
+          }
+          lastUploadPercent = uploadPercent;
+          setState(() {
+            _operit1ImportProgress = core_proxy.Operit1SnapshotImportProgress(
+              stage: 'upload',
+              title: '上传快照',
+              detail: '正在读取并上传快照文件（$uploadPercent%）。',
+              progress: uploadPercent / 100,
+              active: true,
+            );
+          });
+        },
+      );
       stagedSession = session;
+      if (mounted) {
+        setState(() {
+          _operit1ImportProgress =
+              const core_proxy.Operit1SnapshotImportProgress(
+                stage: 'inspect',
+                title: '检查快照',
+                detail: '正在检查 Operit1 快照内容，请稍候。',
+                progress: 0,
+                active: true,
+              );
+        });
+      }
       ClientLogger.i(
         'snapshot upload completed bytes=${session.byteLength}; inspection started',
         tag: _operit1SnapshotImportLogTag,
@@ -1044,6 +1098,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
       if (mounted) {
         setState(() {
           _readingOperit1Snapshot = false;
+          _operit1ImportProgress = null;
         });
       }
     }
@@ -1060,6 +1115,13 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
 
     setState(() {
       _importingOperit1Snapshot = true;
+      _operit1ImportProgress = const core_proxy.Operit1SnapshotImportProgress(
+        stage: 'prepare',
+        title: '准备导入',
+        detail: '正在准备迁移 Operit1 快照内容，请稍候。',
+        progress: 0,
+        active: true,
+      );
       _setupError = null;
     });
     try {
@@ -1156,9 +1218,14 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final runtimeRootReady = _runtimeRootController.text.trim().isNotEmpty;
+    final workspaceRootReady = _workspaceRootController.text.trim().isNotEmpty;
     final storageReady =
         !_isStoragePage ||
-        (!_loadingStoragePaths && !_savingStorage && _storagePaths != null);
+        (!_loadingStoragePaths &&
+            !_savingStorage &&
+            runtimeRootReady &&
+            workspaceRootReady);
     final agreementReady = !_isAgreementPage || _agreementWaitSeconds == 0;
     final modeReady = !_isModePage || _selectedStartMode != null;
     final modelReady =
@@ -1292,7 +1359,7 @@ class _AiSetupGuidePageState extends State<_AiSetupGuidePage>
                                     errorText: _setupError,
                                   );
                                 case _AiSetupPage.import:
-                                  return _AiSetupImportPage(
+                                  return OnboardingSnapshotImportPage(
                                     snapshot: _operit1Snapshot,
                                     fileName: _operit1SnapshotFileName,
                                     reading: _readingOperit1Snapshot,
@@ -2073,7 +2140,7 @@ class _AiSetupDeviceSpacePage extends StatelessWidget {
                 icon: Icons.cloud_sync_rounded,
                 eyebrow: '设备空间',
                 title: '加入设备空间',
-                description: '扫描附近设备空间并选择一台设备。完成配对后会先同步模型、配置和数据，再结束引导。',
+                description: '点击添加设备，选择附近的设备并完成配对。管理员批准加入后，才会同步配置和数据。',
               ),
               const SizedBox(height: 22),
               DeviceSpaceDiscoveryPanel(
@@ -2180,7 +2247,7 @@ class _AiSetupAgreementPage extends StatelessWidget {
                       Text('严谨版法律协议', style: headingStyle),
                       const SizedBox(height: 12),
                       Text(
-                        '1. 适用范围与协议版本\n本协议适用于 Operit 官方发布的客户端及其可选在线功能。使用本应用即表示您已阅读并同意当前版本。应用会记录您确认的版本；协议发生实质更新时，将要求重新确认。开源代码许可由仓库根目录 LICENSE 所载 LGPLv3 规定，本协议不排除或缩减适用法律及开源许可证赋予您的权利。',
+                        '1. 适用范围与协议版本\n本协议适用于 Operit 官方发布的客户端及其可选在线功能。使用本应用即表示您已阅读并同意当前版本。应用会记录您确认的版本；协议发生实质更新时，将要求重新确认。开源代码许可由仓库根目录 LICENSE 所载 GNU AGPL-3.0 规定，本协议不排除或缩减适用法律及开源许可证赋予您的权利。',
                         style: bodyStyle,
                       ),
                       const SizedBox(height: 14),
@@ -2322,7 +2389,15 @@ class _AiSetupStoragePage extends StatelessWidget {
               ],
               if (errorText != null) ...<Widget>[
                 const SizedBox(height: 12),
-                CommonNetworkErrorView(errorText: errorText!),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    errorText!,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: colorScheme.error,
+                    ),
+                  ),
+                ),
               ],
             ],
           ),
@@ -2379,8 +2454,10 @@ class _StoragePathField extends StatelessWidget {
   }
 }
 
-class _AiSetupImportPage extends StatelessWidget {
-  const _AiSetupImportPage({
+/// Displays snapshot staging and migration progress in the onboarding flow.
+class OnboardingSnapshotImportPage extends StatelessWidget {
+  const OnboardingSnapshotImportPage({
+    super.key,
     required this.snapshot,
     required this.fileName,
     required this.reading,
@@ -2399,11 +2476,21 @@ class _AiSetupImportPage extends StatelessWidget {
   final String? errorText;
 
   @override
+  /// Builds the current-format snapshot preview and import error details.
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final preview = snapshot;
-    final importProgress = importing ? progress : null;
+    final importProgress = reading || importing
+        ? progress ??
+              const core_proxy.Operit1SnapshotImportProgress(
+                stage: 'prepare',
+                title: '准备导入',
+                detail: '正在准备 Operit1 快照，请稍候。',
+                progress: 0,
+                active: true,
+              )
+        : null;
     return Align(
       alignment: Alignment.topCenter,
       child: SingleChildScrollView(
@@ -2417,7 +2504,8 @@ class _AiSetupImportPage extends StatelessWidget {
                 icon: Icons.move_to_inbox_rounded,
                 eyebrow: '导入配置',
                 title: '从 Operit1 导入',
-                description: '选择旧版快照，将配置、聊天、角色卡、资源等数据迁移到 Operit2。',
+                description:
+                    '请使用最新版 Operit1 导出的快照，将配置、聊天、角色卡、资源等数据迁移到 Operit2。',
               ),
               const SizedBox(height: 22),
               Align(
@@ -2442,6 +2530,13 @@ class _AiSetupImportPage extends StatelessWidget {
                   style: textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
+                ),
+              ],
+              if (importProgress != null) ...<Widget>[
+                const SizedBox(height: 18),
+                Semantics(
+                  liveRegion: true,
+                  child: _Operit1ImportProgressPanel(progress: importProgress),
                 ),
               ],
               if (preview != null) ...<Widget>[
@@ -2516,14 +2611,27 @@ class _AiSetupImportPage extends StatelessWidget {
                     height: 1.36,
                   ),
                 ),
-                if (importProgress != null) ...<Widget>[
-                  const SizedBox(height: 14),
-                  _Operit1ImportProgressPanel(progress: importProgress),
-                ],
               ],
               if (errorText != null) ...<Widget>[
                 const SizedBox(height: 12),
-                CommonNetworkErrorView(errorText: errorText!),
+                Semantics(
+                  liveRegion: true,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colorScheme.errorContainer,
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Text(
+                        '快照导入失败\n$errorText',
+                        style: textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onErrorContainer,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ],
           ),
@@ -2543,6 +2651,11 @@ class _Operit1ImportProgressPanel extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final value = progress.progress.clamp(0.0, 1.0).toDouble();
+    final indeterminate = const <String>{
+      'select',
+      'prepare',
+      'inspect',
+    }.contains(progress.stage);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2565,22 +2678,24 @@ class _Operit1ImportProgressPanel extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 12),
-            Text(
-              '${(value * 100).round()}%',
-              style: textTheme.labelMedium?.copyWith(
-                color: colorScheme.primary,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0,
+            if (!indeterminate) ...<Widget>[
+              const SizedBox(width: 12),
+              Text(
+                '${(value * 100).round()}%',
+                style: textTheme.labelMedium?.copyWith(
+                  color: colorScheme.primary,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0,
+                ),
               ),
-            ),
+            ],
           ],
         ),
         const SizedBox(height: 8),
         ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: LinearProgressIndicator(
-            value: value,
+            value: indeterminate ? null : value,
             minHeight: 6,
             backgroundColor: colorScheme.surfaceContainerHighest.withValues(
               alpha: 0.72,
@@ -2761,8 +2876,70 @@ class _AiSetupModelPage extends StatelessWidget {
   final ValueChanged<String?> onModelChanged;
   final String? errorText;
 
+  /// Returns endpoint options for the selected provider type.
+  List<core_proxy.ProviderEndpointOption> _endpointOptionsForSelection() {
+    for (final entry in catalogEntries) {
+      if (entry.providerTypeId == selectedProviderTypeId) {
+        return entry.endpointOptions;
+      }
+    }
+    return const <core_proxy.ProviderEndpointOption>[];
+  }
+
+  /// Opens endpoint options and applies the chosen endpoint text.
+  Future<void> _showEndpointOptionsDialog(
+    BuildContext context,
+    List<core_proxy.ProviderEndpointOption> options,
+  ) async {
+    if (options.isEmpty) {
+      return;
+    }
+    final selectedEndpoint = endpointController.text.trim();
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('服务地址'),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: options.length,
+              separatorBuilder: (context, index) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final option = options[index];
+                final selected = option.endpoint == selectedEndpoint;
+                return ListTile(
+                  selected: selected,
+                  leading: selected
+                      ? const Icon(Icons.check_rounded)
+                      : const SizedBox(width: 24),
+                  title: Text(option.endpoint),
+                  subtitle: option.label == option.endpoint
+                      ? null
+                      : Text(option.label),
+                  onTap: () {
+                    endpointController.text = option.endpoint;
+                    Navigator.of(dialogContext).pop();
+                  },
+                );
+              },
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final endpointOptions = _endpointOptionsForSelection();
     return Align(
       alignment: Alignment.topCenter,
       child: SingleChildScrollView(
@@ -2781,7 +2958,8 @@ class _AiSetupModelPage extends StatelessWidget {
                   description: '选择模型供应商，填写 API Key，拉取并设置默认模型。',
                 ),
                 const SizedBox(height: 22),
-                DropdownButtonFormField<String>(
+                OperitFormStyles.dropdownButtonFormField<String>(
+                  context,
                   initialValue: selectedProviderTypeId,
                   isExpanded: true,
                   decoration: const InputDecoration(labelText: '模型供应商'),
@@ -2835,10 +3013,26 @@ class _AiSetupModelPage extends StatelessWidget {
                             const SizedBox(height: 12),
                             TextFormField(
                               controller: endpointController,
-                              decoration: const InputDecoration(
+                              decoration: InputDecoration(
                                 labelText: '服务地址',
+                                suffixIcon: endpointOptions.isEmpty
+                                    ? null
+                                    : IconButton(
+                                        tooltip: '服务地址',
+                                        icon: const Icon(
+                                          Icons.arrow_drop_down_rounded,
+                                        ),
+                                        onPressed: () =>
+                                            _showEndpointOptionsDialog(
+                                              context,
+                                              endpointOptions,
+                                            ),
+                                      ),
                               ),
                               keyboardType: TextInputType.url,
+                              inputFormatters: <TextInputFormatter>[
+                                FilteringTextInputFormatter.deny(RegExp(r'\s')),
+                              ],
                               validator: _requiredField,
                             ),
                             const SizedBox(height: 12),
@@ -2875,19 +3069,10 @@ class _AiSetupModelPage extends StatelessWidget {
                 ),
                 if (availableModels.isNotEmpty) ...<Widget>[
                   const SizedBox(height: 16),
-                  DropdownButtonFormField<String>(
-                    initialValue: selectedModelId,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: '默认模型'),
-                    items: availableModels
-                        .map(
-                          (model) => DropdownMenuItem<String>(
-                            value: model.modelId,
-                            child: Text(model.modelId),
-                          ),
-                        )
-                        .toList(growable: false),
-                    onChanged: onModelChanged,
+                  _OnboardingAvailableModelPicker(
+                    availableModels: availableModels,
+                    selectedModelId: selectedModelId,
+                    onModelChanged: onModelChanged,
                   ),
                 ],
                 if (errorText != null) ...<Widget>[
@@ -2899,6 +3084,106 @@ class _AiSetupModelPage extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _OnboardingAvailableModelPicker extends StatefulWidget {
+  const _OnboardingAvailableModelPicker({
+    required this.availableModels,
+    required this.selectedModelId,
+    required this.onModelChanged,
+  });
+
+  final List<core_proxy.AvailableProviderModel> availableModels;
+  final String? selectedModelId;
+  final ValueChanged<String?> onModelChanged;
+
+  /// Creates the state that owns the fetched-or-history toggle.
+  @override
+  State<_OnboardingAvailableModelPicker> createState() =>
+      _OnboardingAvailableModelPickerState();
+}
+
+class _OnboardingAvailableModelPickerState
+    extends State<_OnboardingAvailableModelPicker> {
+  bool _includeHistory = false;
+
+  /// Returns models in the current fetched-or-history scope.
+  List<core_proxy.AvailableProviderModel> _visibleModels() {
+    if (_includeHistory) {
+      return widget.availableModels;
+    }
+    return widget.availableModels
+        .where(
+          (model) =>
+              model.source != core_proxy.AvailableProviderModelSource.catalog,
+        )
+        .toList(growable: false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final visibleModels = _visibleModels();
+    final selectedIsVisible = visibleModels.any(
+      (model) => model.modelId == widget.selectedModelId,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        SegmentedButton<bool>(
+          showSelectedIcon: false,
+          segments: <ButtonSegment<bool>>[
+            ButtonSegment<bool>(
+              value: false,
+              label: Text(l10n.settingsModelAvailableFetchedOnly),
+            ),
+            ButtonSegment<bool>(
+              value: true,
+              label: Text(l10n.settingsModelAvailableIncludeHistory),
+            ),
+          ],
+          selected: <bool>{_includeHistory},
+          onSelectionChanged: (selection) {
+            setState(() {
+              _includeHistory = selection.single;
+            });
+          },
+        ),
+        if (visibleModels.isEmpty) ...<Widget>[
+          const SizedBox(height: 12),
+          Text(l10n.settingsModelAvailableEmptyFetched),
+        ] else ...<Widget>[
+          const SizedBox(height: 12),
+          KeyedSubtree(
+            key: ValueKey<String>('onboarding-model-scope-$_includeHistory'),
+            child: OperitFormStyles.dropdownButtonFormField<String>(
+              context,
+              initialValue: selectedIsVisible ? widget.selectedModelId : null,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: '默认模型'),
+              items: visibleModels
+                  .map(
+                    (model) => DropdownMenuItem<String>(
+                      value: model.modelId,
+                      child: Text(
+                        _includeHistory &&
+                                model.source ==
+                                    core_proxy
+                                        .AvailableProviderModelSource
+                                        .catalog
+                            ? '${model.modelId} (${l10n.settingsModelAvailableSourceHistory})'
+                            : model.modelId,
+                      ),
+                    ),
+                  )
+                  .toList(growable: false),
+              onChanged: widget.onModelChanged,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

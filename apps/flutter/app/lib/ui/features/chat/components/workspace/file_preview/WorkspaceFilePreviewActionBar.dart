@@ -44,6 +44,9 @@ class WorkspaceFilePreviewActionBar extends StatelessWidget {
                 onPressed: onOpenWorkspaceFile,
                 icon: const Icon(Icons.open_in_new, size: 18),
                 visualDensity: VisualDensity.compact,
+                style: const ButtonStyle(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints.tightFor(
                   width: 32,
@@ -55,6 +58,9 @@ class WorkspaceFilePreviewActionBar extends StatelessWidget {
               onPressed: canOpenInBrowser ? onOpenInBrowser : null,
               icon: const Icon(Icons.open_in_browser, size: 18),
               visualDensity: VisualDensity.compact,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints.tightFor(width: 32, height: 32),
             ),

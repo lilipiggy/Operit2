@@ -2,31 +2,81 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    parse_macro_input, Error, FnArg, GenericArgument, Ident, ImplItemFn, Pat, PathArguments,
-    ReturnType, Token, Type,
+    parse_macro_input, Error, FnArg, GenericArgument, Ident, ImplItemFn, LitStr, Pat,
+    PathArguments, ReturnType, Token, Type,
 };
 
 struct CoreRouteArguments {
     binding: Ident,
+    permission: LitStr,
+    sdk: bool,
 }
 
 impl Parse for CoreRouteArguments {
     /// Parses the binding identifier owned by one routed method annotation.
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let name: Ident = input.parse()?;
-        if name != "binding" {
-            return Err(Error::new(name.span(), "expected `binding = argument`"));
+        let mut binding = None;
+        let mut permission = None;
+        let mut sdk = false;
+        let mut create_binding = None;
+        while !input.is_empty() {
+            let name: Ident = input.parse()?;
+            if name == "binding" {
+                input.parse::<Token![=]>()?;
+                binding = Some(input.parse::<Ident>()?);
+            } else if name == "permission" {
+                input.parse::<Token![=]>()?;
+                permission = Some(input.parse::<LitStr>()?);
+            } else if name == "create_binding" {
+                input.parse::<Token![=]>()?;
+                create_binding = Some(input.parse::<LitStr>()?);
+            } else if name == "sdk" {
+                sdk = true;
+            } else {
+                return Err(Error::new(
+                    name.span(),
+                    "expected `binding = argument`, `permission = \"scope:capability\"`, or `sdk`",
+                ));
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
         }
-        input.parse::<Token![=]>()?;
-        let binding = input.parse::<Ident>()?;
-        if input.peek(Token![,]) {
-            input.parse::<Token![,]>()?;
+        let binding = binding.ok_or_else(|| input.error("missing `binding = argument`"))?;
+        let permission = permission.ok_or_else(|| input.error("missing `permission = \"scope:capability\"`"))?;
+        validate_permission(&permission)?;
+        if let Some(capability) = create_binding {
+            if capability.value().trim().is_empty() || !permission.value().starts_with("caller:") {
+                return Err(Error::new(capability.span(), "binding creation requires a target capability and caller permission"));
+            }
         }
-        if !input.is_empty() {
-            return Err(input.error("only one `binding = argument` entry is supported"));
-        }
-        Ok(Self { binding })
+        Ok(Self {
+            binding,
+            permission,
+            sdk,
+        })
     }
+}
+
+/// Validates one explicit route permission scope and capability identifier.
+fn validate_permission(permission: &LitStr) -> syn::Result<()> {
+    let value = permission.value();
+    let Some((scope, capability)) = value.split_once(':') else {
+        return Err(Error::new(
+            permission.span(),
+            "route permission must use `caller:capability` or `target:capability`",
+        ));
+    };
+    if scope != "caller" && scope != "target"
+        || capability.trim().is_empty()
+        || capability.contains(':')
+    {
+        return Err(Error::new(
+            permission.span(),
+            "route permission must use `caller:capability` or `target:capability`",
+        ));
+    }
+    Ok(())
 }
 
 /// Wraps one routed method and preserves its local implementation under a generated name.
@@ -40,6 +90,12 @@ pub fn operit_core_route(attribute: TokenStream, item: TokenStream) -> TokenStre
     }
 }
 
+/// Marks one reverse-stream method as an explicit external Plugin SDK route.
+#[proc_macro_attribute]
+pub fn operit_plugin_sdk_expose(_attribute: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Generates the public routed entry point and its protocol-safe local implementation.
 fn expand_core_route(
     arguments: CoreRouteArguments,
@@ -48,6 +104,8 @@ fn expand_core_route(
     let original_name = function.sig.ident.clone();
     let local_name = format_ident!("__operit_core_local_{}", original_name);
     let binding_argument = arguments.binding;
+    let permission = arguments.permission;
+    let permission_value = permission.value();
     let argument_names = function_argument_names(&function)?;
     if !argument_names.iter().any(|name| name == &binding_argument) {
         return Err(Error::new(
@@ -87,6 +145,7 @@ fn expand_core_route(
     let wrapper_attrs = preserved_attrs.clone();
     let binding_name = binding_argument.to_string();
     let route_metadata_name = format_ident!("__operit_core_binding_{}", original_name);
+    let route_permission_name = format_ident!("__operit_core_permission_{}", original_name);
     let call_helper_name = format_ident!("__operit_core_route_call_{}", original_name);
     let watch_snapshot_helper_name =
         format_ident!("__operit_core_route_watch_snapshot_{}", original_name);
@@ -208,6 +267,11 @@ fn expand_core_route(
         #[doc(hidden)]
         #visibility fn #route_metadata_name() -> &'static str {
             #binding_name
+        }
+
+        #[doc(hidden)]
+        #visibility fn #route_permission_name() -> &'static str {
+            #permission_value
         }
 
         #route_helpers

@@ -14,44 +14,26 @@ const Duration _contentFadeDuration = Duration(milliseconds: 200);
 const Duration _arrowRotationDuration = Duration(milliseconds: 300);
 const Duration _instantDuration = Duration.zero;
 
-enum ToolCollapseMode { full, readOnly, all }
-
-ToolCollapseMode toolCollapseModeFromPreferenceValue(String value) {
-  return switch (value) {
-    'read_only' => ToolCollapseMode.readOnly,
-    'all' => ToolCollapseMode.all,
-    'full' => ToolCollapseMode.full,
-    _ => throw FormatException('invalid tool collapse mode: $value'),
-  };
-}
-
 class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
   const ThinkToolsXmlNodeGrouper({
     required this.showThinkingProcess,
     this.forceExpandGroups = false,
-    this.toolCollapseMode = ToolCollapseMode.all,
   });
 
   final bool showThinkingProcess;
   final bool forceExpandGroups;
-  final ToolCollapseMode toolCollapseMode;
 
   @override
   bool operator ==(Object other) {
     return identical(this, other) ||
         other is ThinkToolsXmlNodeGrouper &&
             other.showThinkingProcess == showThinkingProcess &&
-            other.forceExpandGroups == forceExpandGroups &&
-            other.toolCollapseMode == toolCollapseMode;
+            other.forceExpandGroups == forceExpandGroups;
   }
 
   @override
   int get hashCode {
-    return Object.hash(
-      showThinkingProcess,
-      forceExpandGroups,
-      toolCollapseMode,
-    );
+    return Object.hash(showThinkingProcess, forceExpandGroups);
   }
 
   @override
@@ -70,16 +52,16 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
         continue;
       }
 
-      final tag = _extractXmlTagName(node.content);
+      final tag = _extractXmlTagName(node);
 
       if (showThinkingProcess && (tag == 'think' || tag == 'thinking')) {
         var j = i + 1;
         var toolCount = 0;
+        var searchCount = 0;
         var xmlToolRelatedCount = 0;
         while (j < nodes.length) {
           final next = nodes[j];
-          if (next.type == MarkdownNodeType.plainText &&
-              next.content.trim().isEmpty) {
+          if (_isToolGroupingSeparatorNode(next)) {
             j++;
             continue;
           }
@@ -87,34 +69,35 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
             break;
           }
 
-          final nextTag = _extractXmlTagName(next.content);
+          final nextTag = _extractXmlTagName(next);
           if (_isIgnorableXmlTagForToolGrouping(nextTag)) {
             j++;
             continue;
           }
           final isThinkAgain = nextTag == 'think' || nextTag == 'thinking';
           final isToolRelated = nextTag == 'tool' || nextTag == 'tool_result';
-          if (!isThinkAgain && !isToolRelated) {
+          final isSearchRelated = nextTag == 'search';
+          if (!isThinkAgain && !isToolRelated && !isSearchRelated) {
             break;
           }
 
           if (isToolRelated) {
-            final toolName = _extractToolNameFromToolOrResult(next.content);
-            if (!_shouldGroupToolByName(toolName, toolCollapseMode)) {
-              break;
-            }
             if (nextTag == 'tool') {
               toolCount++;
             }
+            xmlToolRelatedCount++;
+          }
+          if (isSearchRelated) {
+            searchCount++;
             xmlToolRelatedCount++;
           }
 
           j++;
         }
 
-        if (_shouldCollapseToolSequence(
-          toolCollapseMode,
+        if (_shouldCollapseThinkSequence(
           toolCount,
+          searchCount,
           xmlToolRelatedCount,
         )) {
           out.add(
@@ -134,21 +117,13 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
       }
 
       if (tag == 'tool' || tag == 'tool_result') {
-        final firstToolName = _extractToolNameFromToolOrResult(node.content);
-        if (!_shouldGroupToolByName(firstToolName, toolCollapseMode)) {
-          out.add(MarkdownSingleItem(i));
-          i++;
-          continue;
-        }
-
         var j = i + 1;
         var toolCount = tag == 'tool' ? 1 : 0;
         var xmlToolRelatedCount = 1;
 
         while (j < nodes.length) {
           final next = nodes[j];
-          if (next.type == MarkdownNodeType.plainText &&
-              next.content.trim().isEmpty) {
+          if (_isToolGroupingSeparatorNode(next)) {
             j++;
             continue;
           }
@@ -156,18 +131,13 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
             break;
           }
 
-          final nextTag = _extractXmlTagName(next.content);
+          final nextTag = _extractXmlTagName(next);
           if (_isIgnorableXmlTagForToolGrouping(nextTag)) {
             j++;
             continue;
           }
           final isToolRelated = nextTag == 'tool' || nextTag == 'tool_result';
           if (!isToolRelated) {
-            break;
-          }
-
-          final toolName = _extractToolNameFromToolOrResult(next.content);
-          if (!_shouldGroupToolByName(toolName, toolCollapseMode)) {
             break;
           }
 
@@ -178,11 +148,7 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
           j++;
         }
 
-        if (_shouldCollapseToolSequence(
-          toolCollapseMode,
-          toolCount,
-          xmlToolRelatedCount,
-        )) {
+        if (_shouldCollapseToolSequence(toolCount, xmlToolRelatedCount)) {
           out.add(
             MarkdownGroupItem(
               startIndex: i,
@@ -195,6 +161,42 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
           out.add(MarkdownSingleItem(i));
           i++;
         }
+        continue;
+      }
+
+      if (tag == 'search') {
+        var j = i + 1;
+
+        while (j < nodes.length) {
+          final next = nodes[j];
+          if (_isToolGroupingSeparatorNode(next)) {
+            j++;
+            continue;
+          }
+          if (next.type != MarkdownNodeType.xmlBlock) {
+            break;
+          }
+
+          final nextTag = _extractXmlTagName(next);
+          if (_isIgnorableXmlTagForToolGrouping(nextTag)) {
+            j++;
+            continue;
+          }
+          if (nextTag != 'search') {
+            break;
+          }
+
+          j++;
+        }
+
+        out.add(
+          MarkdownGroupItem(
+            startIndex: i,
+            endIndexInclusive: j - 1,
+            stableKey: 'search-only-$i',
+          ),
+        );
+        i = j;
         continue;
       }
 
@@ -214,6 +216,7 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
     required bool isLastNode,
     required Color textColor,
     required MarkdownXmlRenderer xmlRenderer,
+    required MarkdownNodeRangeMergeRender mergeRender,
     required Stream<String>? Function(int index) xmlStreamResolver,
     required Stream<Object>? Function(int index) xmlMarkdownEventStreamResolver,
     required void Function(String url)? onLinkClick,
@@ -227,11 +230,9 @@ class ThinkToolsXmlNodeGrouper extends MarkdownNodeGrouper {
       rendererId: rendererId,
       isVisible: isVisible,
       textColor: textColor,
-      xmlRenderer: xmlRenderer,
+      mergeRender: mergeRender,
       xmlStreamResolver: xmlStreamResolver,
-      xmlMarkdownEventStreamResolver: xmlMarkdownEventStreamResolver,
       forceExpandGroups: forceExpandGroups,
-      toolCollapseMode: toolCollapseMode,
     );
   }
 }
@@ -244,11 +245,9 @@ class _ThinkToolsXmlGroup extends StatefulWidget {
     required this.rendererId,
     required this.isVisible,
     required this.textColor,
-    required this.xmlRenderer,
+    required this.mergeRender,
     required this.xmlStreamResolver,
-    required this.xmlMarkdownEventStreamResolver,
     required this.forceExpandGroups,
-    required this.toolCollapseMode,
   });
 
   final MarkdownGroupItem group;
@@ -256,11 +255,9 @@ class _ThinkToolsXmlGroup extends StatefulWidget {
   final String rendererId;
   final bool isVisible;
   final Color textColor;
-  final MarkdownXmlRenderer xmlRenderer;
+  final MarkdownNodeRangeMergeRender mergeRender;
   final Stream<String>? Function(int index) xmlStreamResolver;
-  final Stream<Object>? Function(int index) xmlMarkdownEventStreamResolver;
   final bool forceExpandGroups;
-  final ToolCollapseMode toolCollapseMode;
 
   @override
   State<_ThinkToolsXmlGroup> createState() => _ThinkToolsXmlGroupState();
@@ -270,9 +267,6 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
   String? _stateKey;
   bool _expanded = false;
   bool? _userOverride;
-  final Set<String> _appearedItemKeys = <String>{};
-  final Set<String> _visibleItemKeys = <String>{};
-  final Set<String> _scheduledItemKeys = <String>{};
 
   @override
   Widget build(BuildContext context) {
@@ -287,12 +281,27 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
 
     final toolCount = slice.where((node) {
       return node.type == MarkdownNodeType.xmlBlock &&
-          _extractXmlTagName(node.content) == 'tool';
+          _extractXmlTagName(node) == 'tool';
+    }).length;
+    final searchCount = slice.where((node) {
+      return node.type == MarkdownNodeType.xmlBlock &&
+          _extractXmlTagName(node) == 'search';
     }).length;
     final l10n = AppLocalizations.of(context)!;
-    final titleText = widget.group.stableKey.startsWith('tools-only-')
-        ? l10n.toolsGroupTitleWithCount(toolCount)
-        : l10n.thinkingToolsGroupTitleWithCount(toolCount);
+    final titleText = switch ((
+      widget.group.stableKey.startsWith('tools-only-'),
+      widget.group.stableKey.startsWith('search-only-'),
+      searchCount > 0,
+      toolCount > 0,
+    )) {
+      (true, _, _, _) => l10n.toolsGroupTitleWithCount(toolCount),
+      (_, true, _, _) => l10n.searchGroupTitle,
+      (_, _, true, true) => l10n.thinkingSearchToolsGroupTitleWithCount(
+        toolCount,
+      ),
+      (_, _, true, false) => l10n.thinkingSearchGroupTitle,
+      _ => l10n.thinkingToolsGroupTitleWithCount(toolCount),
+    };
 
     final hasLiveXmlStream = List<int>.generate(slice.length, (idx) => idx).any(
       (idx) => widget.xmlStreamResolver(widget.group.startIndex + idx) != null,
@@ -341,7 +350,7 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
                 },
                 borderRadius: BorderRadius.circular(6),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  padding: EdgeInsets.zero,
                   child: Row(
                     children: <Widget>[
                       AnimatedRotation(
@@ -351,11 +360,11 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
                             : _arrowRotationDuration,
                         child: Icon(
                           Icons.keyboard_arrow_right,
-                          size: 18,
+                          size: 20,
                           color: widget.textColor.withValues(alpha: 0.7),
                         ),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 4),
                       Text(
                         titleText,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -374,14 +383,15 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
                   ? _instantDuration
                   : _contentFadeDuration,
               child: Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 8, left: 24),
+                padding: const EdgeInsets.only(top: 2, bottom: 4, left: 24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    for (var idx = 0; idx < slice.length; idx++)
-                      if (slice[idx].type == MarkdownNodeType.xmlBlock)
-                        _renderXmlItem(widget.group.startIndex + idx),
-                  ],
+                  children: widget.mergeRender(
+                    startIndex: widget.group.startIndex,
+                    endIndexInclusive: widget.group.endIndexInclusive,
+                    renderInstanceKeyPrefix: 'group-${widget.group.stableKey}',
+                    shouldRenderNode: _renderToolGroupXmlNode,
+                  ),
                 ),
               ),
             ),
@@ -389,52 +399,6 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
         ),
       ),
     );
-  }
-
-  Widget _renderXmlItem(int absoluteIndex) {
-    final node = widget.nodes[absoluteIndex];
-    final itemKey =
-        'think-tools-${widget.rendererId}-${widget.group.stableKey}-$absoluteIndex';
-    final child = widget.xmlRenderer(
-      xmlContent: node.content,
-      isStreaming: node.isStreaming,
-      textColor: widget.textColor,
-      xmlStream: widget.xmlStreamResolver(absoluteIndex),
-      xmlMarkdownEventStream: widget.xmlMarkdownEventStreamResolver(
-        absoluteIndex,
-      ),
-      renderInstanceKey: itemKey,
-    );
-    if (widget.forceExpandGroups) {
-      return child;
-    }
-
-    final isVisible = _isXmlItemVisible(itemKey);
-    return AnimatedOpacity(
-      key: ValueKey<String>(itemKey),
-      opacity: isVisible ? 1 : 0,
-      duration: _groupFadeDuration,
-      child: child,
-    );
-  }
-
-  bool _isXmlItemVisible(String itemKey) {
-    if (_appearedItemKeys.contains(itemKey)) {
-      return true;
-    }
-    if (_scheduledItemKeys.add(itemKey)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _visibleItemKeys.add(itemKey);
-          _appearedItemKeys.add(itemKey);
-          _scheduledItemKeys.remove(itemKey);
-        });
-      });
-    }
-    return _visibleItemKeys.contains(itemKey);
   }
 
   /// Reports whether a trailing node is only part of the active tool sequence layout.
@@ -445,21 +409,22 @@ class _ThinkToolsXmlGroupState extends State<_ThinkToolsXmlGroup> {
       case MarkdownNodeType.htmlBreak:
         return true;
       case MarkdownNodeType.xmlBlock:
-        final tag = _extractXmlTagName(node.content);
+        final tag = _extractXmlTagName(node);
         switch (tag) {
           case 'think':
           case 'thinking':
+          case 'search':
           case 'meta':
             return true;
           case 'tool':
           case 'tool_result':
-            final toolName = _extractToolNameFromToolOrResult(node.content);
-            if (toolName == null && !_isXmlFullyClosed(node.content)) {
+            final toolName = _extractToolNameFromToolOrResult(node);
+            if (toolName == null && !_isXmlFullyClosed(node)) {
               return true;
             }
-            return _shouldGroupToolByName(toolName, widget.toolCollapseMode);
+            return true;
           case null:
-            return !_isXmlFullyClosed(node.content);
+            return !_isXmlFullyClosed(node);
           default:
             return false;
         }
@@ -603,36 +568,22 @@ class _ThinkToolsGroupAlphaState extends State<_ThinkToolsGroupAlpha>
   }
 }
 
-String? _extractXmlTagName(String xml) {
-  return ChatMarkupRegex.normalizeToolLikeTagName(_extractRawXmlTagName(xml));
+String? _extractXmlTagName(MarkdownNodeStable node) {
+  return ChatMarkupRegex.normalizeToolLikeTagName(node.xmlTagName);
 }
 
-String? _extractRawXmlTagName(String xml) {
-  return ChatMarkupRegex.extractOpeningTagName(xml);
+String? _extractToolName(MarkdownNodeStable node) {
+  return node.xmlAttributes?['name'];
 }
 
-String? _extractToolName(String xml) {
-  final nameMatch = ChatMarkupRegex.nameAttr.firstMatch(xml);
-  return nameMatch?.group(1);
+bool _isXmlFullyClosed(MarkdownNodeStable node) {
+  return node.xmlIsClosed == true;
 }
 
-bool _isXmlFullyClosed(String xml) {
-  final tagName = _extractRawXmlTagName(xml);
-  if (tagName == null) {
-    return false;
-  }
-  final trimmed = xml.trim();
-  if (trimmed.endsWith('/>') ||
-      trimmed.startsWith('<$tagName') && trimmed.endsWith('/>')) {
-    return true;
-  }
-  return trimmed.toLowerCase().contains('</${tagName.toLowerCase()}>');
-}
-
-String? _extractToolNameFromToolOrResult(String xml) {
-  final tag = _extractXmlTagName(xml);
+String? _extractToolNameFromToolOrResult(MarkdownNodeStable node) {
+  final tag = _extractXmlTagName(node);
   return switch (tag) {
-    'tool' || 'tool_result' => _extractToolName(xml),
+    'tool' || 'tool_result' => _extractToolName(node),
     _ => null,
   };
 }
@@ -641,47 +592,33 @@ bool _isIgnorableXmlTagForToolGrouping(String? tag) {
   return tag == 'meta';
 }
 
-bool _shouldGroupToolByName(
-  String? toolName,
-  ToolCollapseMode toolCollapseMode,
-) {
-  if (toolCollapseMode == ToolCollapseMode.all ||
-      toolCollapseMode == ToolCollapseMode.full) {
-    return true;
-  }
-
-  final n = toolName?.trim().toLowerCase();
-  if (n == null) {
-    return false;
-  }
-  if (n.contains('search')) {
-    return true;
-  }
-  return const <String>{
-    'list_files',
-    'grep_code',
-    'grep_context',
-    'read_file',
-    'read_file_part',
-    'read_file_full',
-    'read_file_binary',
-    'use_package',
-    'find_files',
-    'visit_web',
-  }.contains(n);
+/// Identifies layout-only Markdown nodes inside one XML grouping sequence.
+bool _isToolGroupingSeparatorNode(MarkdownNodeStable node) {
+  return node.type == MarkdownNodeType.htmlBreak ||
+      node.type == MarkdownNodeType.plainText && node.content.trim().isEmpty;
 }
 
-bool _shouldCollapseToolSequence(
-  ToolCollapseMode toolCollapseMode,
+/// Includes only XML nodes in the visible body of a tool group.
+bool _renderToolGroupXmlNode(MarkdownNodeStable node) {
+  return node.type == MarkdownNodeType.xmlBlock;
+}
+
+/// Returns whether a tool-only sequence should render as one group.
+bool _shouldCollapseToolSequence(int toolCount, int xmlToolRelatedCount) {
+  if (xmlToolRelatedCount <= 0) {
+    return false;
+  }
+  return toolCount >= 2 && xmlToolRelatedCount >= 2;
+}
+
+/// Returns whether a thinking-led sequence should render as one group.
+bool _shouldCollapseThinkSequence(
   int toolCount,
+  int searchCount,
   int xmlToolRelatedCount,
 ) {
   if (xmlToolRelatedCount <= 0) {
     return false;
   }
-  return switch (toolCollapseMode) {
-    ToolCollapseMode.full => true,
-    ToolCollapseMode.readOnly ||
-    ToolCollapseMode.all => toolCount >= 2 && xmlToolRelatedCount >= 2,
-  };
+  return searchCount > 0 || toolCount > 0;
 }

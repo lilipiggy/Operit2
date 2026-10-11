@@ -203,6 +203,26 @@ impl AndroidTerminalHost {
 }
 
 impl TerminalHost for AndroidTerminalHost {
+    /// Resolves proot guest paths separately from Android system-shell host paths.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        match requireAndroidTerminal(terminal, terminalType)?.as_str() {
+            "bash" => operit_host_api::TerminalWorkingDirectory::resolveLinuxGuestDirectory(
+                workingDir,
+                resolveHostDirectory,
+            ),
+            "shell" => resolveHostDirectory(workingDir),
+            value => Err(HostError::new(format!(
+                "Unsupported Android terminal type: {value}"
+            ))),
+        }
+    }
+
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {
             platform: PLATFORM.to_string(),
@@ -291,9 +311,20 @@ impl TerminalHost for AndroidTerminalHost {
         Ok(entries)
     }
 
+    /// Creates or reuses a named session in the configured default terminal.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
+        self.createOrGetTypedSession(sessionName, PRIMARY_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses a named session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
         let normalizedSessionName = nonBlank(sessionName, "session_name")?;
-        let normalizedTerminalType = PRIMARY_TERMINAL_TYPE.to_string();
+        let normalizedTerminalType = nonBlank(terminalType, "type")?;
+        let terminal = androidTerminalName(&normalizedTerminalType)?;
         let key = sessionKey(&normalizedTerminalType, &normalizedSessionName);
         {
             let mut state = self.lockState()?;
@@ -303,7 +334,7 @@ impl TerminalHost for AndroidTerminalHost {
                         sessionId,
                         sessionName: normalizedSessionName,
                         platform: PLATFORM.to_string(),
-                        terminal: PROOT_TERMINAL.to_string(),
+                        terminal: terminal.to_string(),
                         terminalType: normalizedTerminalType,
                         isNewSession: false,
                     });
@@ -328,7 +359,7 @@ impl TerminalHost for AndroidTerminalHost {
             sessionId,
             sessionName: normalizedSessionName,
             platform: PLATFORM.to_string(),
-            terminal: PROOT_TERMINAL.to_string(),
+            terminal: terminal.to_string(),
             terminalType: normalizedTerminalType,
             isNewSession: true,
         })
@@ -760,13 +791,22 @@ fn waitForInitialAndroidPtyPrompt(
                 collected.len(),
                 androidPtyLogSnippet(&collected)
             ));
-            return Err(HostError::new(
-                "Timed out waiting for Android terminal prompt",
-            ));
+            return Err(androidPtyStartupError(&collected));
         }
     }
 }
 
+/// Preserves startup diagnostics in the error returned to terminal callers and tools.
+fn androidPtyStartupError(data: &[u8]) -> HostError {
+    let visibleBytes = stripAndroidPtyPromptMarkers(data);
+    let visibleOutput = renderTerminalText(&String::from_utf8_lossy(&visibleBytes));
+    HostError::new(format!(
+        "Timed out waiting for Android terminal prompt\nStartup output:\n{}",
+        visibleOutput.trim(),
+    ))
+}
+
+/// Produces a compact terminal-output snippet for Android diagnostic logs.
 fn androidPtyLogSnippet(data: &[u8]) -> String {
     const MAX_LOG_BYTES: usize = 4096;
     let start = data.len().saturating_sub(MAX_LOG_BYTES);
@@ -1858,5 +1898,74 @@ fn pollPidExitCode(pid: AndroidPid) -> HostResult<Option<i32>> {
             return Ok(Some(-libc::WTERMSIG(status)));
         }
         Ok(Some(-1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resolves proot guest paths without invoking the Android host VFS mapper.
+    #[test]
+    fn manual_proot_directory_uses_guest_namespace() {
+        let host = AndroidTerminalHost::new();
+        let resolveHost = |_: &str| Err(HostError::new("/mnt/linux is not mounted"));
+        assert_eq!(
+            host.resolveWorkingDirectory("proot", "bash", "/mnt/linux/root", &resolveHost).unwrap(),
+            "/root",
+        );
+    }
+
+    /// Leaves Android system-shell mount errors intact instead of selecting proot.
+    #[test]
+    fn manual_system_shell_preserves_host_mount_failure() {
+        let host = AndroidTerminalHost::new();
+        let resolveHost = |_: &str| Err(HostError::new("/mnt/linux is not mounted"));
+        assert_eq!(
+            host.resolveWorkingDirectory("android-system", "shell", "/mnt/linux/root", &resolveHost)
+                .unwrap_err().message,
+            "/mnt/linux is not mounted",
+        );
+    }
+
+    /// Retains the actual proot startup failure in the returned terminal error.
+    #[test]
+    fn startup_errors_include_process_output() {
+        let error = androidPtyStartupError(b"proot: execve(/bin/bash): Permission denied\r\n");
+        assert_eq!(
+            error.message,
+            "Timed out waiting for Android terminal prompt\nStartup output:\nproot: execve(/bin/bash): Permission denied",
+        );
+    }
+
+    /// Ensures the native system shell and proot Bash have distinct implementation identities.
+    #[test]
+    fn interpreter_types_select_exact_android_implementations() {
+        assert_eq!(
+            androidTerminalName("shell").unwrap(),
+            ANDROID_SYSTEM_TERMINAL
+        );
+        assert_eq!(androidTerminalName("bash").unwrap(), PROOT_TERMINAL);
+        assert_ne!(sessionKey("shell", "chat"), sessionKey("bash", "chat"));
+    }
+
+    /// Rejects an unsupported explicit interpreter before creating any PTY or accessing runtime paths.
+    #[test]
+    fn typed_session_rejects_unsupported_interpreter() {
+        let host = AndroidTerminalHost::new();
+        let error = host
+            .createOrGetTypedSession("chat", "powershell")
+            .unwrap_err();
+        assert_eq!(error.message, "Unsupported Android terminal type: powershell");
+        assert!(host.lockState().unwrap().ptySessions.is_empty());
+    }
+
+    /// Rejects an empty explicit interpreter instead of creating the default proot session.
+    #[test]
+    fn typed_session_rejects_empty_interpreter() {
+        let host = AndroidTerminalHost::new();
+        let error = host.createOrGetTypedSession("chat", " ").unwrap_err();
+        assert_eq!(error.message, "type parameter is required");
+        assert!(host.lockState().unwrap().ptySessions.is_empty());
     }
 }

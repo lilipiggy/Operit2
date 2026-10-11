@@ -11,6 +11,7 @@ use crate::core_proxy::CliCore;
 
 const SNAPSHOT_IMPORT_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Runs export commands for memories, chats, and snapshots.
 pub(super) async fn run_export_command(core: &mut CliCore, args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         print_export_usage();
@@ -28,7 +29,11 @@ pub(super) async fn run_export_command(core: &mut CliCore, args: &[String]) -> R
                 .await
                 .map_err(|error| error.to_string())?;
             write_text(path, &content)?;
-            println!("exported={}", Path::new(path).display());
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!({ "path": Path::new(path), "format": "memory" }));
+            } else {
+                println!("Exported memories to {}", Path::new(path).display());
+            }
             Ok(())
         }
         "chat" => {
@@ -41,7 +46,11 @@ pub(super) async fn run_export_command(core: &mut CliCore, args: &[String]) -> R
                 .await
                 .map_err(|error| error.to_string())?;
             write_text(path, &content)?;
-            println!("exported={}", Path::new(path).display());
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!({ "path": Path::new(path), "format": "chat" }));
+            } else {
+                println!("Exported chats to {}", Path::new(path).display());
+            }
             Ok(())
         }
         "snapshot" => export_snapshot(core, args.get(1)).await,
@@ -52,6 +61,7 @@ pub(super) async fn run_export_command(core: &mut CliCore, args: &[String]) -> R
     }
 }
 
+/// Runs import commands for memories, chats, and snapshots.
 pub(super) async fn run_import_command(core: &mut CliCore, args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         print_import_usage();
@@ -71,10 +81,14 @@ pub(super) async fn run_import_command(core: &mut CliCore, args: &[String]) -> R
                 .importMemoriesFromJson(content, strategy)
                 .await
                 .map_err(|error| error.to_string())?;
-            println!("newMemories={}", result.newMemories);
-            println!("updatedMemories={}", result.updatedMemories);
-            println!("skippedMemories={}", result.skippedMemories);
-            println!("newLinks={}", result.newLinks);
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!(result));
+            } else {
+                println!("New memories: {}", result.newMemories);
+                println!("Updated memories: {}", result.updatedMemories);
+                println!("Skipped memories: {}", result.skippedMemories);
+                println!("New links: {}", result.newLinks);
+            }
             Ok(())
         }
         "chat" => {
@@ -87,9 +101,13 @@ pub(super) async fn run_import_command(core: &mut CliCore, args: &[String]) -> R
                 .importChatHistoriesFromJson(content)
                 .await
                 .map_err(|error| error.to_string())?;
-            println!("new={}", result.new);
-            println!("updated={}", result.updated);
-            println!("skipped={}", result.skipped);
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!(result));
+            } else {
+                println!("New chats: {}", result.new);
+                println!("Updated chats: {}", result.updated);
+                println!("Skipped chats: {}", result.skipped);
+            }
             Ok(())
         }
         "snapshot" => import_snapshot(core, args.get(1)).await,
@@ -101,6 +119,7 @@ pub(super) async fn run_import_command(core: &mut CliCore, args: &[String]) -> R
     }
 }
 
+/// Runs backup creation, restoration, and inspection commands.
 pub(super) async fn run_backup_command(core: &mut CliCore, args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         print_backup_usage();
@@ -120,11 +139,15 @@ pub(super) async fn run_backup_command(core: &mut CliCore, args: &[String]) -> R
                 .await
                 .map_err(|error| error.to_string());
             let manifest = finishStagedArchive(core, &archive, result).await?;
-            println!("formatVersion={}", manifest.formatVersion);
-            println!("createdAt={}", manifest.createdAt);
-            println!("fileCount={}", manifest.includes.len());
-            for path in manifest.includes {
-                println!("{path}");
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!(manifest));
+            } else {
+                println!("Snapshot format: {}", manifest.formatVersion);
+                println!("Created: {}", manifest.createdAt);
+                println!("Files ({}):", manifest.includes.len());
+                for path in manifest.includes {
+                    println!("  {path}");
+                }
             }
             Ok(())
         }
@@ -139,59 +162,31 @@ pub(super) async fn run_backup_command(core: &mut CliCore, args: &[String]) -> R
                 .await
                 .map_err(|error| error.to_string());
             let preview = finishStagedArchive(core, &archive, result).await?;
-            println!("formatVersion={}", preview.formatVersion);
-            println!("packageName={}", preview.packageName);
-            println!("createdAt={}", preview.createdAt);
-            println!("chatCount={}", preview.chatCount);
-            println!("messageCount={}", preview.messageCount);
-            println!("datastoreFileCount={}", preview.datastoreFiles.len());
-            println!("importedFileCount={}", preview.importedFileCount);
-            println!(
-                "importedExternalFileCount={}",
-                preview.importedExternalFileCount
-            );
-            println!("detectedDomains={}", preview.detectedDomains.join(","));
-            println!(
-                "chatConfigId={}",
-                preview.modelConfig.chatConfigId.unwrap_or_default()
-            );
-            println!(
-                "chatModelId={}",
-                preview.modelConfig.chatModelId.unwrap_or_default()
-            );
-            println!(
-                "chatModelIndex={}",
-                preview
-                    .modelConfig
-                    .chatModelIndex
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            );
-            println!("configCount={}", preview.modelConfig.configs.len());
-            for config in preview.modelConfig.configs {
-                println!("configId={}", config.configId);
-                println!("  name={}", config.name);
-                println!("  providerTypeId={}", config.providerTypeId);
-                println!("  providerDisplayName={}", config.providerDisplayName);
-                println!("  endpoint={}", config.endpoint);
+            if cli_json_mode() {
+                emit_cli_json(serde_json::json!(preview));
+            } else {
+                println!("Package: {}", preview.packageName);
+                println!("Chats: {}", preview.chatCount);
+                println!("Messages: {}", preview.messageCount);
+                println!("Imported files: {}", preview.importedFileCount);
                 println!(
-                    "  selectedModelId={}",
-                    config.selectedModelId.unwrap_or_default()
+                    "Imported external files: {}",
+                    preview.importedExternalFileCount
                 );
+                println!("Detected domains: {}", preview.detectedDomains.join(", "));
                 println!(
-                    "  selectedModelIndex={}",
-                    config
-                        .selectedModelIndex
-                        .map(|value| value.to_string())
-                        .unwrap_or_default()
+                    "Model configurations: {}",
+                    preview.modelConfig.configs.len()
                 );
-                println!("  modelIds={}", config.modelIds.join(","));
-            }
-            for datastoreFile in preview.datastoreFiles {
-                println!(
-                    "datastore={}:{}",
-                    datastoreFile.fileName, datastoreFile.keyCount
-                );
+                for config in preview.modelConfig.configs {
+                    println!("  {} ({})", config.name, config.configId);
+                }
+                for datastoreFile in preview.datastoreFiles {
+                    println!(
+                        "  datastore {}: {} keys",
+                        datastoreFile.fileName, datastoreFile.keyCount
+                    );
+                }
             }
             Ok(())
         }
@@ -202,19 +197,47 @@ pub(super) async fn run_backup_command(core: &mut CliCore, args: &[String]) -> R
     }
 }
 
+/// Copies a host-backed snapshot to the requested file without loading its bytes into memory.
 async fn export_snapshot(core: &mut CliCore, path: Option<&String>) -> Result<(), String> {
     let path = path.ok_or_else(|| "usage: operit2 export snapshot <path>".to_string())?;
-    let bytes = core
+    let file = core
         .services_snapshot_import_manager()
         .exportRawSnapshot()
         .await
         .map_err(|error| error.to_string())?;
-    write_bytes(path, &bytes)?;
-    println!("exported={}", Path::new(path).display());
-    println!("bytes={}", bytes.len());
+    let result = (|| {
+        if let Some(parent) = Path::new(path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let written = fs::copy(&file.fileReference, path).map_err(|error| error.to_string())?;
+        if i64::try_from(written).map_err(|error| error.to_string())? != file.archive.byteLength {
+            return Err("Saved snapshot length does not match the exported archive".to_string());
+        }
+        Ok(())
+    })();
+    core.services_archive_transfer_manager()
+        .discardArchiveUpload(file.archive.archiveId)
+        .await
+        .map_err(|error| error.to_string())?;
+    result?;
+    if cli_json_mode() {
+        emit_cli_json(
+            serde_json::json!({ "path": Path::new(path), "bytes": file.archive.byteLength, "format": "snapshot" }),
+        );
+    } else {
+        println!(
+            "Exported snapshot to {} ({} bytes)",
+            Path::new(path).display(),
+            file.archive.byteLength
+        );
+    }
     Ok(())
 }
 
+/// Restores a raw runtime snapshot from a local archive file.
 async fn import_snapshot(core: &mut CliCore, path: Option<&String>) -> Result<(), String> {
     let path = path.ok_or_else(|| "usage: operit2 import snapshot <path>".to_string())?;
     let archive = stageArchiveUpload(core, path).await?;
@@ -230,10 +253,15 @@ async fn import_snapshot(core: &mut CliCore, path: Option<&String>) -> Result<()
     }
     .await;
     finishStagedArchive(core, &archive, result).await?;
-    println!("imported={}", Path::new(path).display());
+    if cli_json_mode() {
+        emit_cli_json(serde_json::json!({ "path": Path::new(path), "format": "snapshot" }));
+    } else {
+        println!("Imported snapshot from {}", Path::new(path).display());
+    }
     Ok(())
 }
 
+/// Imports an Operit1 snapshot and reports the structured migration result.
 async fn import_operit1_snapshot(core: &mut CliCore, path: Option<&String>) -> Result<(), String> {
     let path = path
         .ok_or_else(|| "usage: operit2 import operit1-snapshot <snapshot-zip-path>".to_string())?;
@@ -250,33 +278,21 @@ async fn import_operit1_snapshot(core: &mut CliCore, path: Option<&String>) -> R
     }
     .await;
     let result = finishStagedArchive(core, &archive, importResult).await?;
-    println!("providerId={}", result.modelConfig.providerId);
-    println!("providerTypeId={}", result.modelConfig.providerTypeId);
-    println!("providerName={}", result.modelConfig.providerName);
-    println!("modelId={}", result.modelConfig.modelId);
-    println!(
-        "importedModelCount={}",
-        result.modelConfig.importedModelCount
-    );
-    println!(
-        "chatBindingUpdated={}",
-        result.modelConfig.chatBindingUpdated
-    );
-    println!("importedDatastoreFiles={}", result.importedDatastoreFiles);
-    println!("importedDatastoreKeys={}", result.importedDatastoreKeys);
-    println!("importedChats={}", result.importedChats);
-    println!("importedMessages={}", result.importedMessages);
-    println!("importedMemories={}", result.importedMemories);
-    println!("importedMemoryLinks={}", result.importedMemoryLinks);
-    println!("importedFiles={}", result.importedFiles);
-    println!("importedExternalFiles={}", result.importedExternalFiles);
-    println!("importedWorkspaces={}", result.importedWorkspaces);
-    println!("importedWorkspaceFiles={}", result.importedWorkspaceFiles);
-    if !result.modelConfig.skippedFields.is_empty() {
-        println!(
-            "skippedFields={}",
-            result.modelConfig.skippedFields.join(",")
-        );
+    if cli_json_mode() {
+        emit_cli_json(serde_json::json!(result));
+    } else {
+        println!("Imported chats: {}", result.importedChats);
+        println!("Imported messages: {}", result.importedMessages);
+        println!("Imported memories: {}", result.importedMemories);
+        println!("Imported files: {}", result.importedFiles);
+        println!("Imported external files: {}", result.importedExternalFiles);
+        println!("Imported workspaces: {}", result.importedWorkspaces);
+        if !result.modelConfig.skippedFields.is_empty() {
+            println!(
+                "Skipped fields: {}",
+                result.modelConfig.skippedFields.join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -399,29 +415,39 @@ fn write_text(path: &str, content: &str) -> Result<(), String> {
     fs::write(path, content).map_err(|error| error.to_string())
 }
 
-fn write_bytes(path: &str, content: &[u8]) -> Result<(), String> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-    }
-    fs::write(path, content).map_err(|error| error.to_string())
-}
-
+/// Prints export command usage in the selected output format.
 fn print_export_usage() {
+    if cli_json_mode() {
+        emit_cli_json(serde_json::json!({ "usage": "operit2 cli export <memory|chat|snapshot>" }));
+        return;
+    }
     println!("operit2 cli export memory <path> <owner-key>");
     println!("operit2 cli export chat <path>");
     println!("operit2 cli export snapshot <path>");
 }
 
+/// Prints import command usage in the selected output format.
 fn print_import_usage() {
+    if cli_json_mode() {
+        emit_cli_json(
+            serde_json::json!({ "usage": "operit2 cli import <memory|chat|snapshot|operit1-snapshot>" }),
+        );
+        return;
+    }
     println!("operit2 cli import memory <path> <SKIP|UPDATE|CREATE_NEW> <owner-key>");
     println!("operit2 cli import chat <path>");
     println!("operit2 cli import snapshot <path>");
     println!("operit2 cli import operit1-snapshot <snapshot-zip-path>");
 }
 
+/// Prints backup command usage in the selected output format.
 fn print_backup_usage() {
+    if cli_json_mode() {
+        emit_cli_json(
+            serde_json::json!({ "usage": "operit2 cli backup <create|restore|inspect|inspect-operit1-snapshot>" }),
+        );
+        return;
+    }
     println!("operit2 cli backup create <snapshot-zip-path>");
     println!("operit2 cli backup restore <snapshot-zip-path>");
     println!("operit2 cli backup inspect <snapshot-zip-path>");

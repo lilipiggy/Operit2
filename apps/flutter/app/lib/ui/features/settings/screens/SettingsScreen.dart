@@ -33,7 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       widget.initialCategory ?? SettingsCategory.model;
   TopBarController? _topBarController;
   bool _isCurrentMainScreen = true;
-  int _profileRevision = 0;
+  bool _useWideLayout = false;
 
   @override
   void didChangeDependencies() {
@@ -61,23 +61,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final useWideLayout = settingsUseWideLayout(context);
-    if (useWideLayout) {
-      return _buildWideSettingsLayout(context);
-    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Navigation consumes part of the window width. Using MediaQuery here
+        // can squeeze the detail pane (including offstage cached pages) to
+        // almost zero width and repeatedly fail ExpansionTile layout.
+        final useWideLayout = settingsUseWideLayout(constraints.maxWidth);
+        if (_useWideLayout != useWideLayout) {
+          _useWideLayout = useWideLayout;
+          _syncTopBarTitle();
+        }
+        if (useWideLayout) {
+          return _buildWideSettingsLayout(context);
+        }
 
-    final selectedCategory = _phoneSelectedCategory;
-    if (selectedCategory == null) {
-      return SettingsCategoryList(
-        selectedCategory: null,
-        onCategorySelected: _openPhoneCategory,
-        profileRevision: _profileRevision,
-      );
-    }
+        final selectedCategory = _phoneSelectedCategory;
+        if (selectedCategory == null) {
+          return SettingsCategoryList(
+            selectedCategory: null,
+            onCategorySelected: _openPhoneCategory,
+          );
+        }
 
-    return SettingsDetailView(
-      category: selectedCategory,
-      onProfileChanged: _handleProfileChanged,
+        return SettingsDetailView(
+          category: selectedCategory,
+          onOpenProfile: () => _openPhoneCategory(SettingsCategory.profile),
+        );
+      },
     );
   }
 
@@ -113,7 +123,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: SettingsCategoryList(
               selectedCategory: _wideSelectedCategory,
               onCategorySelected: _selectWideCategory,
-              profileRevision: _profileRevision,
             ),
           ),
         ),
@@ -143,7 +152,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: SettingsDetailView(
               key: ValueKey<SettingsCategory>(_wideSelectedCategory),
               category: _wideSelectedCategory,
-              onProfileChanged: _handleProfileChanged,
+              onOpenProfile: () =>
+                  _selectWideCategory(SettingsCategory.profile),
             ),
           ),
         ),
@@ -172,16 +182,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  /// Invalidates the profile summary after the detail page mutates account data.
-  void _handleProfileChanged() {
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _profileRevision += 1;
-    });
-  }
-
   void _syncTopBarTitle() {
     final controller = _topBarController;
     if (controller == null) {
@@ -191,7 +191,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       controller.clearTitleContent(owner: this);
       return;
     }
-    final category = settingsUseWideLayout(context)
+    final category = _useWideLayout
         ? _wideSelectedCategory
         : _phoneSelectedCategory;
     if (category == null) {

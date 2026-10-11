@@ -3,11 +3,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../../l10n/generated/app_localizations.dart';
 import '../utils/PackageDisplayUtils.dart';
+import '../screens/ToolPkgDesktopWidgetsScreen.dart';
 
 class PluginDetailsDialog extends StatefulWidget {
   const PluginDetailsDialog({
@@ -15,7 +17,6 @@ class PluginDetailsDialog extends StatefulWidget {
     required this.plugin,
     required this.enabled,
     required this.packageManager,
-    required this.onEnabledChanged,
     required this.onOpenUi,
     required this.onDeletePackage,
   });
@@ -23,7 +24,6 @@ class PluginDetailsDialog extends StatefulWidget {
   final core_proxy.ToolPkgContainerRuntime plugin;
   final bool enabled;
   final GeneratedApplicationPackageManagerCoreProxy packageManager;
-  final ValueChanged<bool> onEnabledChanged;
   final ValueChanged<String?> onOpenUi;
   final VoidCallback? onDeletePackage;
 
@@ -33,6 +33,7 @@ class PluginDetailsDialog extends StatefulWidget {
 
 class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
   core_proxy.ToolPkgContainerDetails? _details;
+  core_proxy.ToolPkgLogoBytes? _logo;
   bool _loadingDetails = true;
   String? _toggleError;
   final Set<String> _togglingSubpackages = <String>{};
@@ -45,6 +46,7 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
     }
   }
 
+  /// Loads ToolPkg metadata and the manifest-declared logo resource.
   Future<void> _loadDetails() async {
     final useEnglish = _useEnglishForToolPkgText(context);
     try {
@@ -52,11 +54,22 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
         packageName: widget.plugin.packageName,
         useEnglish: useEnglish,
       );
+      final logo = details?.logoResourceKey == null
+          ? null
+          : await widget.packageManager.readToolPkgLogoBytes(
+              packageName: widget.plugin.packageName,
+            );
+      if (details?.logoResourceKey != null && logo == null) {
+        throw StateError(
+          'ToolPkg logo resource is unavailable: ${details!.logoResourceKey}',
+        );
+      }
       if (!mounted) {
         return;
       }
       setState(() {
         _details = details;
+        _logo = logo;
         _loadingDetails = false;
       });
     } catch (error, stackTrace) {
@@ -120,8 +133,11 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
         ? details!.description
         : localizedText(widget.plugin.description);
     return AlertDialog(
-      icon: const Icon(Icons.extension_outlined),
-      title: Text(displayName),
+      titlePadding: const EdgeInsets.fromLTRB(24, 16, 8, 0),
+      title: _PackageDialogTitle(
+        icon: Icons.extension_outlined,
+        title: displayName,
+      ),
       content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 620, maxHeight: 620),
         child: SingleChildScrollView(
@@ -134,14 +150,65 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
                 label: l10n.version,
                 value: details?.version ?? widget.plugin.version,
               ),
+              if (details != null)
+                _DetailLine(label: 'ToolPkg API', value: details.apiVersion),
               _DetailLine(
                 label: l10n.author,
                 value: (details?.author ?? widget.plugin.author).join(', '),
               ),
               _DetailLine(label: l10n.entry, value: widget.plugin.mainEntry),
               _DetailLine(label: l10n.source, value: widget.plugin.sourcePath),
+              if (_logo != null) ...<Widget>[
+                const SizedBox(height: 12),
+                _ToolPkgLogo(logo: _logo!),
+              ],
               const SizedBox(height: 12),
               _DescriptionText(description),
+              if (widget.plugin.dependencyIssues.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 16),
+                const _SectionTitle(text: '前置插件错误'),
+                const SizedBox(height: 8),
+                for (final issue in widget.plugin.dependencyIssues)
+                  _ModuleTile(
+                    title: issue.id,
+                    subtitle: _dependencyIssueDescription(issue),
+                    icon: Icons.error_outline,
+                    footer: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: <Widget>[
+                        _SmallBadge(text: _dependencyIssueStatus(issue)),
+                        if (issue.requiredMinVersion != null)
+                          _SmallBadge(text: '>= ${issue.requiredMinVersion}'),
+                        if (issue.requiredMaxVersion != null)
+                          _SmallBadge(text: '<= ${issue.requiredMaxVersion}'),
+                        if (issue.installedVersion != null)
+                          _SmallBadge(text: '当前 v${issue.installedVersion}'),
+                      ],
+                    ),
+                  ),
+              ],
+              if (details != null && details.requires.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 16),
+                const _SectionTitle(text: 'Requirements'),
+                const SizedBox(height: 8),
+                for (final requirement in details.requires)
+                  _ModuleTile(
+                    title: requirement.id,
+                    subtitle: requirement.description,
+                    icon: Icons.link_outlined,
+                    footer: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: <Widget>[
+                        if (requirement.minVersion != null)
+                          _SmallBadge(text: '>= ${requirement.minVersion}'),
+                        if (requirement.maxVersion != null)
+                          _SmallBadge(text: '<= ${requirement.maxVersion}'),
+                      ],
+                    ),
+                  ),
+              ],
               const SizedBox(height: 16),
               _SectionTitle(text: l10n.toolPkgResources),
               const SizedBox(height: 8),
@@ -168,6 +235,25 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
                 const SizedBox(height: 14),
                 const Center(child: CircularProgressIndicator()),
               ],
+              if (widget.enabled && widget.plugin.desktopWidgets.isNotEmpty)
+                TextButton.icon(
+                  icon: const Icon(Icons.widgets_outlined),
+                  label: Text(
+                    l10n.desktopWidgetsCount(
+                      widget.plugin.desktopWidgets.length,
+                    ),
+                  ),
+                  onPressed: () => Navigator.of(context).push<void>(
+                    MaterialPageRoute(
+                      builder: (_) => ToolPkgDesktopWidgetsScreen(
+                        clients: GeneratedCoreProxyClients(
+                          widget.packageManager.bridge,
+                        ),
+                        plugin: widget.plugin,
+                      ),
+                    ),
+                  ),
+                ),
               if (details != null &&
                   details.toolboxUiModules.isNotEmpty) ...<Widget>[
                 const SizedBox(height: 14),
@@ -178,17 +264,19 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
                     title: module.title,
                     subtitle: '${module.uiModuleId} · ${module.runtime}',
                     icon: Icons.tune_outlined,
-                    trailing: FilledButton.tonalIcon(
-                      onPressed: widget.enabled
-                          ? () => widget.onOpenUi(module.routeId)
-                          : null,
-                      icon: const Icon(Icons.open_in_new, size: 18),
-                      label: Text(widget.enabled ? '打开' : '启用后打开'),
-                      style: FilledButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                      ),
-                    ),
+                    trailing: widget.enabled
+                        ? FilledButton.tonalIcon(
+                            onPressed: () => widget.onOpenUi(module.routeId),
+                            icon: const Icon(Icons.open_in_new, size: 18),
+                            label: const Text('打开'),
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
+                            ),
+                          )
+                        : null,
                   ),
               ],
               const SizedBox(height: 14),
@@ -246,10 +334,6 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
         ),
       ),
       actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(l10n.close),
-        ),
         if (widget.onDeletePackage != null)
           OutlinedButton.icon(
             onPressed: widget.onDeletePackage,
@@ -259,21 +343,99 @@ class _PluginDetailsDialogState extends State<PluginDetailsDialog> {
               foregroundColor: Theme.of(context).colorScheme.error,
             ),
           ),
-        if (toolPkgHasUi(widget.plugin))
+        if (toolPkgHasUi(widget.plugin) && widget.enabled)
           OutlinedButton.icon(
-            onPressed: widget.enabled ? () => widget.onOpenUi(null) : null,
+            onPressed: () => widget.onOpenUi(null),
             icon: const Icon(Icons.open_in_new_outlined),
-            label: Text(widget.enabled ? '打开' : '启用后打开'),
+            label: const Text('打开'),
           ),
-        FilledButton.icon(
-          onPressed: () => widget.onEnabledChanged(!widget.enabled),
-          icon: Icon(
-            widget.enabled ? Icons.toggle_off_outlined : Icons.toggle_on,
+      ],
+    );
+  }
+}
+
+/// Provides a user-facing explanation for one structured ToolPkg dependency issue.
+String _dependencyIssueDescription(core_proxy.ToolPkgDependencyIssue issue) {
+  return switch (issue.code) {
+    'missing' => '未安装此前置插件。',
+    'disabled' => '此前置插件已安装，但当前未启用。',
+    'version_incompatible' => '此前置插件的版本不满足 manifest 声明的版本范围。',
+    'load_order' => '此前置插件必须排在当前插件之前加载。',
+    _ => throw StateError(
+      'Unsupported ToolPkg dependency issue code: ${issue.code}',
+    ),
+  };
+}
+
+/// Provides a compact label for one structured ToolPkg dependency issue.
+String _dependencyIssueStatus(core_proxy.ToolPkgDependencyIssue issue) {
+  return switch (issue.code) {
+    'missing' => '未安装',
+    'disabled' => '未启用',
+    'version_incompatible' => '版本不兼容',
+    'load_order' => '加载顺序错误',
+    _ => throw StateError(
+      'Unsupported ToolPkg dependency issue code: ${issue.code}',
+    ),
+  };
+}
+
+class _PackageDialogTitle extends StatelessWidget {
+  /// Creates a centered package title with a close action in the top-right.
+  const _PackageDialogTitle({required this.icon, required this.title});
+
+  final IconData icon;
+  final String title;
+
+  /// Builds the package identity block and close button.
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.topCenter,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(48, 8, 48, 0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(icon, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(height: 16),
+              Text(title, textAlign: TextAlign.center),
+            ],
           ),
-          label: Text(widget.enabled ? l10n.disable : l10n.enable),
+        ),
+        PositionedDirectional(
+          top: 0,
+          end: 0,
+          child: IconButton(
+            tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close),
+          ),
         ),
       ],
     );
+  }
+}
+
+class _ToolPkgLogo extends StatelessWidget {
+  const _ToolPkgLogo({required this.logo});
+
+  final core_proxy.ToolPkgLogoBytes logo;
+
+  /// Builds the image widget for a parser-validated ToolPkg logo resource.
+  @override
+  Widget build(BuildContext context) {
+    final image = switch (logo.mimeType) {
+      'image/svg+xml' => SvgPicture.memory(logo.bytes, fit: BoxFit.contain),
+      'image/png' ||
+      'image/jpeg' ||
+      'image/webp' => Image.memory(logo.bytes, fit: BoxFit.contain),
+      _ => throw StateError(
+        'Unsupported ToolPkg logo MIME type: ${logo.mimeType}',
+      ),
+    };
+    return SizedBox(width: 96, height: 96, child: image);
   }
 }
 
@@ -285,15 +447,11 @@ class PackageDetailsDialog extends StatelessWidget {
   const PackageDetailsDialog({
     super.key,
     required this.package,
-    required this.enabled,
-    required this.onEnabledChanged,
     required this.onDeletePackage,
     required this.onRunTool,
   });
 
   final core_proxy.ToolPackage package;
-  final bool enabled;
-  final ValueChanged<bool> onEnabledChanged;
   final VoidCallback onDeletePackage;
   final ValueChanged<core_proxy.PackageTool> onRunTool;
 
@@ -301,8 +459,11 @@ class PackageDetailsDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     return AlertDialog(
-      icon: Icon(packageCategoryIcon(package.category)),
-      title: Text(toolPackageDisplayName(package)),
+      titlePadding: const EdgeInsets.fromLTRB(24, 16, 8, 0),
+      title: _PackageDialogTitle(
+        icon: packageCategoryIcon(package.category),
+        title: toolPackageDisplayName(package),
+      ),
       content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 620, maxHeight: 620),
         child: SingleChildScrollView(
@@ -370,10 +531,6 @@ class PackageDetailsDialog extends StatelessWidget {
         ),
       ),
       actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(l10n.close),
-        ),
         if (!package.isBuiltIn)
           OutlinedButton.icon(
             onPressed: onDeletePackage,
@@ -383,11 +540,6 @@ class PackageDetailsDialog extends StatelessWidget {
               foregroundColor: Theme.of(context).colorScheme.error,
             ),
           ),
-        FilledButton.icon(
-          onPressed: () => onEnabledChanged(!enabled),
-          icon: Icon(enabled ? Icons.toggle_off_outlined : Icons.toggle_on),
-          label: Text(enabled ? l10n.disable : l10n.enable),
-        ),
       ],
     );
   }

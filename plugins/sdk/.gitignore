@@ -1,0 +1,4 @@
+clients/*/native/
+clients/kotlin/src/android/jniLibs/
+clients/dart/android/src/main/jniLibs/
+clients/typescript/dist/

@@ -26,15 +26,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  fonts:
-    - family: SFSymbols
-      fonts:
-        - asset: assets/fonts/SFSymbols.ttf
-  assets:
-    - assets/wallpaper.jpg
-    - assets/wallpaper_dark.jpg
-    - assets/mountain_landscape.jpg
-    - assets/bulldog.jpeg
-    - assets/news_images/
-    - assets/modal_sheet_showcase/
-    - assets/podcast_images/

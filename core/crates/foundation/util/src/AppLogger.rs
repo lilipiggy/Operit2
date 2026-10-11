@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "espidf"))]
 use std::backtrace::Backtrace;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, Once, OnceLock};
@@ -19,12 +20,26 @@ pub const ERROR: i32 = 6;
 /// Android-compatible assert log priority.
 pub const ASSERT: i32 = 7;
 
+/// First Verbose detail level.
+pub const VERBOSE_LEVEL_1: i32 = 1;
+/// Second Verbose detail level.
+pub const VERBOSE_LEVEL_2: i32 = 2;
+/// Third Verbose detail level.
+pub const VERBOSE_LEVEL_3: i32 = 3;
+/// Fourth Verbose detail level.
+pub const VERBOSE_LEVEL_4: i32 = 4;
+/// Fifth Verbose detail level.
+pub const VERBOSE_LEVEL_5: i32 = 5;
+/// Sixth Verbose detail level.
+pub const VERBOSE_LEVEL_6: i32 = 6;
+
 const TOOLPKG_LOG_TAG: &str = "ToolPkg";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One in-memory and file-backed application log entry.
 pub struct LogEntry {
     pub priority: i32,
+    pub verbose_level: Option<i32>,
     pub tag: String,
     pub message: String,
     pub throwable: Option<String>,
@@ -34,10 +49,13 @@ pub struct LogEntry {
 struct LoggerState {
     enable_file_logging: bool,
     enable_console_logging: bool,
+    console_min_level: i32,
+    console_max_verbose_level: i32,
     file_system_host: Option<Arc<dyn FileSystemHost>>,
     log_file: Option<String>,
     package_log_file: Option<String>,
     entries: Vec<LogEntry>,
+    retain_entries: bool,
 }
 
 static STATE: OnceLock<Mutex<LoggerState>> = OnceLock::new();
@@ -49,10 +67,13 @@ fn state() -> &'static Mutex<LoggerState> {
         Mutex::new(LoggerState {
             enable_file_logging: true,
             enable_console_logging: true,
+            console_min_level: INFO,
+            console_max_verbose_level: VERBOSE_LEVEL_6,
             file_system_host: None,
             log_file: None,
             package_log_file: None,
             entries: Vec::new(),
+            retain_entries: true,
         })
     })
 }
@@ -69,6 +90,14 @@ fn install_host_log_sink_once() {
 pub struct AppLogger;
 
 impl AppLogger {
+    /// Controls in-memory history independently of console/file sinks.
+    /// Constrained apps may disable retention without changing other hosts.
+    pub fn set_retain_entries(enabled: bool) {
+        let mut guard = state().lock().expect("AppLogger mutex poisoned");
+        guard.retain_entries = enabled;
+        if !enabled { guard.entries = Vec::new(); }
+    }
+
     /// Enables or disables file logging.
     pub fn set_enable_file_logging(enabled: bool) {
         let mut guard = state().lock().expect("AppLogger mutex poisoned");
@@ -97,14 +126,63 @@ impl AppLogger {
             .enable_console_logging
     }
 
+    /// Sets the minimum severity emitted to the live console.
+    pub fn set_console_min_level(level: i32) -> Result<(), String> {
+        if level < VERBOSE || level > ASSERT {
+            return Err(format!(
+                "console log level must be between {VERBOSE} and {ASSERT}"
+            ));
+        }
+        let mut guard = state().lock().expect("AppLogger mutex poisoned");
+        guard.console_min_level = level;
+        Ok(())
+    }
+
+    /// Returns the minimum severity emitted to the live console.
+    pub fn console_min_level() -> i32 {
+        state()
+            .lock()
+            .expect("AppLogger mutex poisoned")
+            .console_min_level
+    }
+
+    /// Sets the maximum Verbose detail level emitted to the live console.
+    pub fn set_console_max_verbose_level(level: i32) -> Result<(), String> {
+        if !(VERBOSE_LEVEL_1..=VERBOSE_LEVEL_6).contains(&level) {
+            return Err(format!(
+                "Verbose detail level must be between {VERBOSE_LEVEL_1} and {VERBOSE_LEVEL_6}"
+            ));
+        }
+        let mut guard = state().lock().expect("AppLogger mutex poisoned");
+        guard.console_max_verbose_level = level;
+        Ok(())
+    }
+
+    /// Returns the maximum Verbose detail level emitted to the live console.
+    pub fn console_max_verbose_level() -> i32 {
+        state()
+            .lock()
+            .expect("AppLogger mutex poisoned")
+            .console_max_verbose_level
+    }
+
     /// Configures runtime and ToolPkg logs through the supplied file-system host.
+    /// Falls back to console and in-memory logging if either file cannot be prepared.
     pub fn configure_log_files(
         file_system_host: Arc<dyn FileSystemHost>,
         log_file: String,
         package_log_file: String,
     ) -> Result<(), String> {
-        ensure_log_file(&file_system_host, &log_file)?;
-        ensure_log_file(&file_system_host, &package_log_file)?;
+        if let Err(error) = ensure_log_file(&file_system_host, &log_file)
+            .and_then(|()| ensure_log_file(&file_system_host, &package_log_file))
+        {
+            let mut guard = state().lock().expect("AppLogger mutex poisoned");
+            guard.file_system_host = None;
+            guard.log_file = None;
+            guard.package_log_file = None;
+            guard.enable_file_logging = false;
+            return Err(error);
+        }
         let mut guard = state().lock().expect("AppLogger mutex poisoned");
         guard.file_system_host = Some(file_system_host);
         guard.log_file = Some(log_file);
@@ -188,7 +266,24 @@ impl AppLogger {
 
     /// Writes a verbose log message.
     pub fn v(tag: &str, msg: &str) -> i32 {
-        Self::println(VERBOSE, tag, msg)
+        Self::v_with_level(tag, msg, VERBOSE_LEVEL_1)
+    }
+
+    /// Writes a verbose log message with an explicit detail level.
+    pub fn v_with_level(tag: &str, msg: &str, verbose_level: i32) -> i32 {
+        assert!((VERBOSE_LEVEL_1..=VERBOSE_LEVEL_6).contains(&verbose_level));
+        write_entry(VERBOSE, Some(verbose_level), tag, msg, None);
+        0
+    }
+
+    /// Writes a flow trace at Verbose detail level five.
+    pub fn trace(tag: &str, msg: &str) -> i32 {
+        Self::v_with_level(tag, msg, VERBOSE_LEVEL_5)
+    }
+
+    /// Writes a high-frequency flow trace at Verbose detail level six.
+    pub fn trace_detail(tag: &str, msg: &str) -> i32 {
+        Self::v_with_level(tag, msg, VERBOSE_LEVEL_6)
     }
 
     /// Writes a debug log message.
@@ -218,7 +313,8 @@ impl AppLogger {
 
     /// Writes a log message with an explicit priority.
     pub fn println(priority: i32, tag: &str, msg: &str) -> i32 {
-        write_entry(priority, tag, msg, None);
+        let verbose_level = (priority == VERBOSE).then_some(VERBOSE_LEVEL_1);
+        write_entry(priority, verbose_level, tag, msg, None);
         0
     }
 
@@ -229,37 +325,65 @@ impl AppLogger {
         msg: &str,
         tr: &(dyn std::error::Error),
     ) -> i32 {
-        write_entry(priority, tag, msg, Some(error_chain(tr)));
+        let verbose_level = (priority == VERBOSE).then_some(VERBOSE_LEVEL_1);
+        write_entry(priority, verbose_level, tag, msg, Some(error_chain(tr)));
         0
     }
 
     /// Captures the current stack trace as display text.
     pub fn get_stack_trace_string(_tr: &(dyn std::error::Error)) -> String {
-        format!("{:?}", Backtrace::capture())
+        #[cfg(not(target_os = "espidf"))]
+        { format!("{:?}", Backtrace::capture()) }
+        #[cfg(target_os = "espidf")]
+        { "Backtrace unavailable on ESP-IDF".to_string() }
     }
 
-    /// Returns whether a tag and priority should be logged.
-    pub fn is_loggable(_tag: &str, _level: i32) -> bool {
-        true
+    /// Returns whether a severity is enabled by the console threshold.
+    pub fn is_loggable(_tag: &str, level: i32) -> bool {
+        level >= Self::console_min_level()
+    }
+
+    /// Returns whether a Verbose detail level is enabled by the console thresholds.
+    pub fn is_verbose_loggable(verbose_level: i32) -> bool {
+        VERBOSE >= Self::console_min_level()
+            && (VERBOSE_LEVEL_1..=Self::console_max_verbose_level()).contains(&verbose_level)
     }
 }
 
-fn write_entry(priority: i32, tag: &str, msg: &str, throwable: Option<String>) {
+/// Stores one log entry and emits it to the configured sinks.
+fn write_entry(
+    priority: i32,
+    verbose_level: Option<i32>,
+    tag: &str,
+    msg: &str,
+    throwable: Option<String>,
+) {
     let timestamp_ms = operit_host_api::TimeUtils::currentTimeMillisU128();
     let entry = LogEntry {
         priority,
+        verbose_level,
         tag: tag.to_string(),
         message: msg.to_string(),
         throwable,
         timestamp_ms,
     };
 
-    let (enable_file_logging, enable_console_logging, file_system_host, log_file, package_log_file) = {
+    let (
+        enable_file_logging,
+        enable_console_logging,
+        console_min_level,
+        console_max_verbose_level,
+        file_system_host,
+        log_file,
+        package_log_file,
+    ) = {
         let mut guard = state().lock().expect("AppLogger mutex poisoned");
-        guard.entries.push(entry.clone());
+        if guard.retain_entries { guard.entries.push(entry.clone()); }
         (
             guard.enable_file_logging,
             guard.enable_console_logging,
+            guard.console_min_level,
+            guard.console_max_verbose_level,
             guard.file_system_host.clone(),
             guard.log_file.clone(),
             guard.package_log_file.clone(),
@@ -267,10 +391,19 @@ fn write_entry(priority: i32, tag: &str, msg: &str, throwable: Option<String>) {
     };
 
     let line = format_log_line(&entry, tag);
-    if enable_console_logging {
-        match priority {
-            ERROR | ASSERT => eprint!("{line}"),
-            _ => print!("{line}"),
+    if enable_console_logging
+        && is_console_loggable(
+            priority,
+            verbose_level,
+            console_min_level,
+            console_max_verbose_level,
+        )
+    {
+        if !operit_host_api::tryLogHostConsole(priority, tag, &line) {
+            match priority {
+                ERROR | ASSERT => eprint!("{line}"),
+                _ => print!("{line}"),
+            }
         }
     }
 
@@ -297,11 +430,24 @@ fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &st
 fn ensure_log_file(file_system_host: &Arc<dyn FileSystemHost>, path: &str) -> Result<(), String> {
     let metadata = file_system_host
         .fileExists(path)
-        .map_err(|error| error.message)?;
+        .map_err(|error| format!("Cannot inspect log file '{path}': {}", error.message))?;
+    if metadata.exists && metadata.isDirectory {
+        return Err(format!("Log file path is a directory: '{path}'"));
+    }
     if !metadata.exists {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let parent = parent.to_string_lossy();
+            if !parent.is_empty() {
+                file_system_host
+                    .makeDirectory(&parent, true)
+                    .map_err(|error| {
+                        format!("Cannot create log directory '{parent}': {}", error.message)
+                    })?;
+            }
+        }
         file_system_host
             .writeFile(path, "", false)
-            .map_err(|error| error.message)?;
+            .map_err(|error| format!("Cannot create log file '{path}': {}", error.message))?;
     }
     Ok(())
 }
@@ -328,7 +474,7 @@ fn format_log_line(entry: &LogEntry, tag: &str) -> String {
         out,
         "{} {}/{}: {}",
         format_timestamp_ms(entry.timestamp_ms),
-        priority_char(entry.priority),
+        priority_label(entry.priority, entry.verbose_level),
         tag,
         entry.message
     );
@@ -336,7 +482,7 @@ fn format_log_line(entry: &LogEntry, tag: &str) -> String {
         let prefix = format!(
             "{} {}/{}: ",
             format_timestamp_ms(entry.timestamp_ms),
-            priority_char(entry.priority),
+            priority_label(entry.priority, entry.verbose_level),
             tag
         );
         for line in throwable.lines() {
@@ -353,7 +499,7 @@ fn format_package_log_line(entry: &LogEntry) -> String {
         out,
         "{} {}/{} ",
         format_timestamp_ms(entry.timestamp_ms),
-        priority_char(entry.priority),
+        priority_label(entry.priority, entry.verbose_level),
         TOOLPKG_LOG_TAG
     );
     if let Some(package_id) = extract_named_token(
@@ -377,7 +523,7 @@ fn format_package_log_line(entry: &LogEntry) -> String {
         let prefix = format!(
             "{} {}/{} ",
             format_timestamp_ms(entry.timestamp_ms),
-            priority_char(entry.priority),
+            priority_label(entry.priority, entry.verbose_level),
             TOOLPKG_LOG_TAG
         );
         for line in throwable.lines() {
@@ -412,6 +558,32 @@ fn priority_char(priority: i32) -> char {
     }
 }
 
+/// Formats a severity code with the Verbose detail level when present.
+fn priority_label(priority: i32, verbose_level: Option<i32>) -> String {
+    if priority == VERBOSE {
+        if let Some(verbose_level) = verbose_level {
+            return format!("V{verbose_level}");
+        }
+    }
+    priority_char(priority).to_string()
+}
+
+/// Returns whether one log entry passes both console thresholds.
+fn is_console_loggable(
+    priority: i32,
+    verbose_level: Option<i32>,
+    console_min_level: i32,
+    console_max_verbose_level: i32,
+) -> bool {
+    if priority < console_min_level {
+        return false;
+    }
+    if priority == VERBOSE {
+        return verbose_level.is_some_and(|level| level <= console_max_verbose_level);
+    }
+    true
+}
+
 fn extract_named_token(text: &str, names: &[&str]) -> Option<String> {
     for name in names {
         let marker = format!("{name}=");
@@ -442,3 +614,7 @@ fn error_chain(error: &(dyn std::error::Error)) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "AppLoggerTests.rs"]
+mod tests;

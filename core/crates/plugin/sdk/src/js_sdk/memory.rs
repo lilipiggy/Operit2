@@ -42,6 +42,8 @@ pub enum MemoryMoveOptionsTitles {
 ///- shared:<shared-memory-id>
 ///
 pub trait MemoryHost: Send + Sync {
+    /// Resolves the memory owner bound to the specified calling character card.
+    fn getOwnerKey(&self, callerCardId: String) -> JsFuture<String>;
     ///
     ///Query memory. When targetOwnerKey is provided, only that owner is queried.
     ///During agent execution, omitting targetOwnerKey queries the current role's readable memory owners.

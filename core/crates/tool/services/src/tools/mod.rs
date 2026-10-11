@@ -41,6 +41,9 @@ pub mod mcp;
 #[path = "mcp_runtime/mod.rs"]
 pub mod mcp_runtime;
 
+#[path = "PackageLoadingProgress.rs"]
+pub mod PackageLoadingProgress;
+
 #[path = "packTool/mod.rs"]
 pub mod packTool;
 
@@ -49,3 +52,6 @@ pub mod skill;
 
 #[path = "skill_runtime/mod.rs"]
 pub mod skill_runtime;
+
+#[path = "EdgePortTool.rs"]
+pub mod EdgePortTool;

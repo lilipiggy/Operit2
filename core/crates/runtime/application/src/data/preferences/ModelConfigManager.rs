@@ -12,14 +12,17 @@ use operit_model::ModelCatalog::ModelCatalog;
 use operit_model::ModelConfigData::{
     default_deepseek_provider, local_model_provider, ApiProviderType, AvailableProviderModel,
     AvailableProviderModelSource, ModelCapabilities, ModelConfigDefaults, ModelContextSpec,
-    ModelProfile, ModelRequestSpec, ModelSummarySettings, ProviderModelSummary, ProviderProfile,
-    ResolvedModelConfig,
+    ModelProfile, ModelRequestSpec, ModelSummarySettings, ProviderCatalogEntry,
+    ProviderModelSummary, ProviderProfile, ResolvedModelConfig,
 };
 use operit_model::ModelParameter::ModelParameter;
 use operit_providers::chat::llmprovider::ModelConfigConnectionTester::{
     ModelConfigConnectionTester, ModelConnectionTestReport,
 };
 use operit_providers::chat::llmprovider::ModelListFetcher::ModelListFetcher;
+use operit_providers::chat::llmprovider::ThinkingConfiguration::{
+    ThinkingConfigurationApplier, ThinkingControl, ThinkingSettingsDescriptor,
+};
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_store::PreferencesDataStore::{
     stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
@@ -55,8 +58,8 @@ pub enum ModelConfigError {
     ModelListFetch(String),
     #[error("connection test error: {0}")]
     ConnectionTest(String),
-    #[error("built-in provider operation is not allowed: {0}")]
-    BuiltInProvider(String),
+    #[error("invalid thinking configuration: {0}")]
+    InvalidThinkingConfiguration(String),
 }
 
 /// Reports the result of importing model configuration backup data.
@@ -77,7 +80,7 @@ pub struct ModelConfigManager {
 }
 
 impl ModelConfigManager {
-    const PREFERENCES_VERSION: u32 = 1;
+    const PREFERENCES_VERSION: u32 = 3;
     pub const DEFAULT_PROVIDER_ID: &'static str = ModelConfigDefaults::DEFAULT_PROVIDER_ID;
     pub const DEFAULT_MODEL_ID: &'static str = ModelConfigDefaults::DEFAULT_MODEL_ID;
 
@@ -185,11 +188,11 @@ impl ModelConfigManager {
     ) -> Result<String, ModelConfigError> {
         let providerType = ApiProviderType::fromProviderTypeId(&providerTypeId)
             .ok_or_else(|| ModelConfigError::InvalidProviderType(providerTypeId.clone()))?;
-        if providerType == ApiProviderType::LOCAL_MODEL {
-            return Err(ModelConfigError::BuiltInProvider(
-                ApiProviderType::LOCAL_MODEL.name().to_string(),
-            ));
-        }
+        let endpoint = if providerType == ApiProviderType::OPENAI_CODEX {
+            "https://chatgpt.com/backend-api/codex/responses".to_string()
+        } else {
+            endpoint
+        };
         let providerId = self.createProviderId();
         let provider = ProviderProfile::new(providerId.clone(), name, providerType, endpoint);
         self.modelConfigDataStore.try_edit_result(|preferences| {
@@ -208,6 +211,12 @@ impl ModelConfigManager {
         &self,
         provider: ProviderProfile,
     ) -> Result<ProviderProfile, ModelConfigError> {
+        let mut provider = Self::providerWithProviderOwnedThinkingRules(provider)?;
+        if provider.providerType == ApiProviderType::OPENAI_CODEX {
+            provider.endpoint = "https://chatgpt.com/backend-api/codex/responses".to_string();
+        }
+        ThinkingConfigurationApplier::validate(&provider.thinkingConfigurations)
+            .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
         self.modelConfigDataStore.try_edit_result(|preferences| {
             self.assertProviderExistsInPreferences(preferences, &provider.id)?;
             Self::assertProviderNameUniqueInPreferences(
@@ -226,6 +235,9 @@ impl ModelConfigManager {
         &self,
         provider: ProviderProfile,
     ) -> Result<ProviderProfile, ModelConfigError> {
+        let provider = Self::providerWithProviderOwnedThinkingRules(provider)?;
+        ThinkingConfigurationApplier::validate(&provider.thinkingConfigurations)
+            .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
         if provider.id != Self::DEFAULT_PROVIDER_ID {
             return Err(ModelConfigError::ProviderNotFound(provider.id));
         }
@@ -243,9 +255,6 @@ impl ModelConfigManager {
 
     /// Deletes one provider profile and removes it from provider order.
     pub fn deleteProvider(&self, providerId: &str) -> Result<(), ModelConfigError> {
-        if providerId == ApiProviderType::LOCAL_MODEL.name() {
-            return Err(ModelConfigError::BuiltInProvider(providerId.to_string()));
-        }
         let providerKey = self.providerKey(providerId);
         self.modelConfigDataStore.try_edit_result(|preferences| {
             self.assertProviderExistsInPreferences(preferences, providerId)?;
@@ -273,7 +282,7 @@ impl ModelConfigManager {
         Ok(modelId)
     }
 
-    /// Fetches provider models available for import into a provider profile.
+    /// Lists live provider models first, then catalog history entries that were not fetched.
     pub fn getAvailableProviderModels(
         &self,
         providerId: &str,
@@ -294,30 +303,46 @@ impl ModelConfigManager {
                 })
                 .collect());
         }
+        if provider.providerType == ApiProviderType::OPENAI_CODEX {
+            let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
+                .map_err(ModelConfigError::ModelListFetch)?;
+            return Ok(providerCatalog
+                .models
+                .iter()
+                .map(|catalogModel| AvailableProviderModel {
+                    modelId: catalogModel.modelId.clone(),
+                    source: AvailableProviderModelSource::Remote,
+                    pricing: catalogModel.pricing.clone(),
+                    context: catalogModel.context.clone(),
+                    capabilities: catalogModel.capabilities.clone(),
+                    builtinTools: catalogModel.builtinTools.clone(),
+                    request: catalogModel.request.clone(),
+                })
+                .collect());
+        }
         let providerCatalog = ModelCatalog::provider(&provider.providerTypeId)
             .map_err(ModelConfigError::ModelListFetch)?;
-        let mut models: Vec<AvailableProviderModel> = providerCatalog
-            .models
-            .iter()
-            .map(|model| AvailableProviderModel {
-                modelId: model.modelId.clone(),
-                source: AvailableProviderModelSource::Catalog,
-                pricing: model.pricing.clone(),
-                context: model.context.clone(),
-                capabilities: model.capabilities.clone(),
-                builtinTools: model.builtinTools.clone(),
-                request: model.request.clone(),
-            })
-            .collect();
         let remoteModels = ModelListFetcher::fetch(&provider, &providerCatalog)
             .map_err(ModelConfigError::ModelListFetch)?;
+        let mut models: Vec<AvailableProviderModel> = Vec::new();
+        let mut seenModelIds = HashSet::new();
         for remoteModel in remoteModels {
-            let remoteModel = Self::completeAvailableProviderModel(remoteModel);
-            if !models
-                .iter()
-                .any(|model| model.modelId.eq_ignore_ascii_case(&remoteModel.modelId))
-            {
-                models.push(remoteModel);
+            let model = Self::fetchedModelWithCatalogMetadata(remoteModel, &providerCatalog);
+            if seenModelIds.insert(model.modelId.to_ascii_lowercase()) {
+                models.push(model);
+            }
+        }
+        for catalogModel in &providerCatalog.models {
+            if seenModelIds.insert(catalogModel.modelId.to_ascii_lowercase()) {
+                models.push(AvailableProviderModel {
+                    modelId: catalogModel.modelId.clone(),
+                    source: AvailableProviderModelSource::Catalog,
+                    pricing: catalogModel.pricing.clone(),
+                    context: catalogModel.context.clone(),
+                    capabilities: catalogModel.capabilities.clone(),
+                    builtinTools: catalogModel.builtinTools.clone(),
+                    request: catalogModel.request.clone(),
+                });
             }
         }
         Ok(models)
@@ -471,6 +496,57 @@ impl ModelConfigManager {
         self.updateModelProfile(providerId, model)
     }
 
+    /// Resolves provider thinking controls for a selected model.
+    pub fn getThinkingSettingsForProvider(
+        &self,
+        providerId: &str,
+        modelId: &str,
+    ) -> Result<ThinkingSettingsDescriptor, ModelConfigError> {
+        let provider = self.getProviderProfile(providerId)?;
+        ThinkingConfigurationApplier::describe(
+            &provider.providerTypeId,
+            modelId,
+            &provider.endpoint,
+            &provider.thinkingConfigurations,
+        )
+        .map_err(ModelConfigError::InvalidThinkingConfiguration)
+    }
+
+    /// Updates the selected thinking option for one provider/model pair.
+    pub fn updateThinkingOptionForProvider(
+        &self,
+        providerId: &str,
+        modelId: &str,
+        thinkingOptionId: String,
+    ) -> Result<ProviderProfile, ModelConfigError> {
+        let mut provider = self.getProviderProfile(providerId)?;
+        let descriptor = ThinkingConfigurationApplier::describe(
+            &provider.providerTypeId,
+            modelId,
+            &provider.endpoint,
+            &provider.thinkingConfigurations,
+        )
+        .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
+        if descriptor.control != ThinkingControl::Levels && !thinkingOptionId.is_empty() {
+            return Err(ModelConfigError::InvalidThinkingConfiguration(
+                "thinking option is only valid for level-based controls".to_string(),
+            ));
+        }
+        if descriptor.control == ThinkingControl::Levels
+            && !thinkingOptionId.is_empty()
+            && !descriptor
+                .options
+                .iter()
+                .any(|option| option.id == thinkingOptionId)
+        {
+            return Err(ModelConfigError::InvalidThinkingConfiguration(format!(
+                "thinking option is not supported: {thinkingOptionId}"
+            )));
+        }
+        provider.thinkingOptionId = thinkingOptionId;
+        self.updateProviderProfile(provider)
+    }
+
     /// Tests connectivity for one provider/model configuration.
     pub async fn testModelConnection(
         &self,
@@ -581,7 +657,8 @@ impl ModelConfigManager {
                         providerIds.push(provider.id.clone());
                         newCount += 1;
                     }
-                    Self::writeProvider(preferences, provider)?;
+                    let provider = Self::providerWithProviderOwnedThinkingRules(provider.clone())?;
+                    Self::writeProvider(preferences, &provider)?;
                 }
                 Self::writeProviderList(preferences, &providerIds)?;
 
@@ -606,6 +683,13 @@ impl ModelConfigManager {
         let capabilities = model.capabilitiesOverride.clone().unwrap_or_default();
         let builtinTools = model.builtinToolsOverride.clone().unwrap_or_default();
         let request = model.requestOverride.clone().unwrap_or_default();
+        let thinkingOptionId = Self::selectedThinkingOptionId(
+            &provider.providerTypeId,
+            &model.id,
+            &provider.endpoint,
+            &provider.thinkingConfigurations,
+            &provider.thinkingOptionId,
+        )?;
 
         Ok(ResolvedModelConfig {
             providerId: provider.id.clone(),
@@ -628,9 +712,62 @@ impl ModelConfigManager {
             builtinTools,
             request,
             parameters: model.parameters.clone(),
+            thinkingConfigurations: provider.thinkingConfigurations.clone(),
+            thinkingOptionId,
             summary: model.summary.clone(),
             localRuntime: model.localRuntime.clone(),
         })
+    }
+
+    /// Removes catalog-only provider selectors from persisted provider-owned thinking rules.
+    fn providerWithProviderOwnedThinkingRules(
+        mut provider: ProviderProfile,
+    ) -> Result<ProviderProfile, ModelConfigError> {
+        provider.thinkingConfigurations =
+            Self::providerOwnedThinkingConfigurations(&provider.thinkingConfigurations)?;
+        Ok(provider)
+    }
+
+    /// Encodes thinking rules without provider target fields.
+    fn providerOwnedThinkingConfigurations(
+        thinkingConfigurations: &str,
+    ) -> Result<String, ModelConfigError> {
+        let mut rules = serde_json::from_str::<Vec<serde_json::Value>>(thinkingConfigurations)?;
+        for rule in &mut rules {
+            if let Some(object) = rule.as_object_mut() {
+                object.remove("providers");
+                object.remove("providerTypeIds");
+            }
+        }
+        Ok(serde_json::to_string(&rules)?)
+    }
+
+    /// Selects the persisted thinking option supported by a provider/model pair.
+    fn selectedThinkingOptionId(
+        providerTypeId: &str,
+        modelId: &str,
+        endpoint: &str,
+        thinkingConfigurations: &str,
+        currentOptionId: &str,
+    ) -> Result<String, ModelConfigError> {
+        let descriptor = ThinkingConfigurationApplier::describe(
+            providerTypeId,
+            modelId,
+            endpoint,
+            thinkingConfigurations,
+        )
+        .map_err(ModelConfigError::InvalidThinkingConfiguration)?;
+        if descriptor.control != ThinkingControl::Levels || descriptor.options.is_empty() {
+            return Ok(String::new());
+        }
+        if descriptor
+            .options
+            .iter()
+            .any(|option| option.id == currentOptionId)
+        {
+            return Ok(currentOptionId.to_string());
+        }
+        Ok(descriptor.options[0].id.clone())
     }
 
     /// Builds an independent model profile from selected availability metadata.
@@ -676,8 +813,28 @@ impl ModelConfigManager {
                 }
                 Self::writeProviderList(preferences, &providerIds)
             }
+            1 => Ok(()),
+            2 => Self::normalizeProviderThinkingPreferences(preferences),
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
         }
+    }
+
+    /// Removes catalog-only provider selectors from stored provider thinking rules.
+    fn normalizeProviderThinkingPreferences(
+        preferences: &mut Preferences,
+    ) -> Result<(), PreferencesDataStoreError> {
+        let providerIds = Self::readProviderList(preferences)?;
+        for providerId in providerIds {
+            let providerKey = stringPreferencesKey(&format!("provider_{providerId}"));
+            let Some(providerJson) = preferences.get(&providerKey) else {
+                continue;
+            };
+            let provider: ProviderProfile = serde_json::from_str(providerJson)?;
+            let provider = Self::providerWithProviderOwnedThinkingRules(provider)
+                .map_err(|error| PreferencesDataStoreError::Message(error.to_string()))?;
+            Self::writeProvider(preferences, &provider)?;
+        }
+        Ok(())
     }
 
     /// Loads and decodes one provider profile from preferences.
@@ -871,6 +1028,29 @@ impl ModelConfigManager {
             })
     }
 
+    /// Marks a live listing as fetched and applies catalog metadata when the IDs match.
+    fn fetchedModelWithCatalogMetadata(
+        remoteModel: AvailableProviderModel,
+        providerCatalog: &ProviderCatalogEntry,
+    ) -> AvailableProviderModel {
+        if let Some(catalogModel) = providerCatalog
+            .models
+            .iter()
+            .find(|model| model.modelId.eq_ignore_ascii_case(&remoteModel.modelId))
+        {
+            return Self::completeAvailableProviderModel(AvailableProviderModel {
+                modelId: catalogModel.modelId.clone(),
+                source: AvailableProviderModelSource::Remote,
+                pricing: catalogModel.pricing.clone(),
+                context: catalogModel.context.clone(),
+                capabilities: catalogModel.capabilities.clone(),
+                builtinTools: catalogModel.builtinTools.clone(),
+                request: catalogModel.request.clone(),
+            });
+        }
+        Self::completeAvailableProviderModel(remoteModel)
+    }
+
     fn completeAvailableProviderModel(mut model: AvailableProviderModel) -> AvailableProviderModel {
         if model.context.is_none() {
             model.context = Some(ModelContextSpec::default());
@@ -977,7 +1157,7 @@ impl ModelConfigManager {
 mod tests {
     use super::{ModelConfigError, ModelConfigManager};
     use operit_host_api::{HostError, HostResult, RuntimeStorageEntry, RuntimeStorageHost};
-    use operit_model::ModelConfigData::ModelConfigDefaults;
+    use operit_model::ModelConfigData::{ApiProviderType, ModelConfigDefaults};
     use operit_store::RuntimeStorageHost::setDefaultRuntimeStorageHost;
     use operit_util::RuntimeStorageLayout::WORKSPACE_DIR_PATH;
     use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeStoreRootConfig};
@@ -1009,6 +1189,82 @@ mod tests {
                 .iter()
                 .any(|provider| provider.id == "LOCAL_MODEL"));
         });
+        fs::remove_dir_all(root).expect("remove model config test root");
+    }
+
+    #[test]
+    fn create_local_provider_with_empty_endpoint() {
+        let root = unique_test_root("create_local_provider_with_empty_endpoint");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let provider_id = manager
+            .createProvider(
+                "Additional Local Models".to_string(),
+                ApiProviderType::LOCAL_MODEL.name().to_string(),
+                String::new(),
+            )
+            .expect("create local provider");
+
+        let provider = manager
+            .getProviderProfile(&provider_id)
+            .expect("created local provider");
+        assert_eq!(provider.providerType, ApiProviderType::LOCAL_MODEL);
+        assert!(provider.endpoint.is_empty());
+        let ids = manager.getProviderIds().expect("provider ids");
+        assert!(ids.contains(&provider_id));
+        assert!(ids.iter().any(|id| id == ApiProviderType::LOCAL_MODEL.name()));
+
+        fs::remove_dir_all(root).expect("remove model config test root");
+    }
+
+    #[test]
+    fn delete_and_recreate_local_provider() {
+        let root = unique_test_root("delete_and_recreate_local_provider");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+        let original_id = ApiProviderType::LOCAL_MODEL.name();
+        manager
+            .getProviderProfile(original_id)
+            .expect("initial local provider");
+        manager
+            .deleteProvider(original_id)
+            .expect("delete initial local provider");
+        assert!(matches!(
+            manager.getProviderProfile(original_id),
+            Err(ModelConfigError::ProviderNotFound(_))
+        ));
+
+        let manager = ModelConfigManager::new(root.clone());
+        assert!(!manager
+            .getProviderIds()
+            .expect("provider ids after reload")
+            .iter()
+            .any(|id| id == original_id));
+        let provider_id = manager
+            .createProvider(
+                "Local Models".to_string(),
+                ApiProviderType::LOCAL_MODEL.name().to_string(),
+                String::new(),
+            )
+            .expect("recreate local provider");
+        let manager = ModelConfigManager::new(root.clone());
+        let provider = manager
+            .getProviderProfile(&provider_id)
+            .expect("recreated local provider after reload");
+        assert_eq!(provider.name, "Local Models");
+        assert_eq!(provider.providerType, ApiProviderType::LOCAL_MODEL);
+        manager
+            .deleteProvider(&provider_id)
+            .expect("delete recreated local provider");
+        assert!(!manager
+            .getProviderIds()
+            .expect("provider ids after deletion")
+            .contains(&provider_id));
+        assert!(matches!(
+            manager.getProviderProfile(&provider_id),
+            Err(ModelConfigError::ProviderNotFound(_))
+        ));
+
         fs::remove_dir_all(root).expect("remove model config test root");
     }
 
@@ -1070,6 +1326,72 @@ mod tests {
                 .apiKey,
             "sk-restored"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Verifies creating a provider with an occupied name is rejected.
+    #[test]
+    fn create_provider_rejects_duplicate_name() {
+        let root = unique_test_root("create_provider_rejects_duplicate_name");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+
+        manager
+            .createProvider(
+                "Same provider name".to_string(),
+                "OPENAI".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            )
+            .expect("first provider with this name");
+        let error = manager
+            .createProvider(
+                "Same provider name".to_string(),
+                "OPENAI".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            )
+            .expect_err("duplicate provider name should be rejected");
+        assert!(matches!(
+            error,
+            ModelConfigError::ProviderNameAlreadyExists(name) if name == "Same provider name"
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Verifies renaming a provider onto an occupied name is rejected.
+    #[test]
+    fn update_provider_profile_rejects_duplicate_name() {
+        let root = unique_test_root("update_provider_profile_rejects_duplicate_name");
+        setup_test_runtime(root.clone());
+        let manager = ModelConfigManager::new(root.clone());
+
+        let providerId = manager
+            .createProvider(
+                "First provider".to_string(),
+                "OPENAI".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            )
+            .expect("first provider");
+        manager
+            .createProvider(
+                "Second provider".to_string(),
+                "OPENAI".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            )
+            .expect("second provider");
+
+        let mut provider = manager
+            .getProviderProfile(&providerId)
+            .expect("created provider");
+        provider.name = "Second provider".to_string();
+        let error = manager
+            .updateProviderProfile(provider)
+            .expect_err("duplicate provider name should be rejected");
+        assert!(matches!(
+            error,
+            ModelConfigError::ProviderNameAlreadyExists(name) if name == "Second provider"
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

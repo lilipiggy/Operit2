@@ -86,29 +86,73 @@ impl RuntimeStorageWriteSession for NativeRuntimeStorageWriteSession {
 /// Stages streamed archive uploads in the runtime-private temporary directory.
 #[derive(Clone, Debug)]
 pub struct NativeArchiveStagingHost {
-    runtimeRoot: PathBuf,
+    stagingRoot: PathBuf,
     uploads: Arc<Mutex<HashMap<String, NativeArchiveUpload>>>,
 }
 
 /// Tracks the declared length and lifecycle state of one current-process archive upload.
 #[derive(Clone, Debug)]
 struct NativeArchiveUpload {
-    expectedByteLength: u64,
+    expectedByteLength: Option<u64>,
     sealed: bool,
 }
 
 impl NativeArchiveStagingHost {
-    /// Creates native archive staging rooted under one runtime data directory.
+    /// Creates native archive staging beside one runtime data directory.
     pub fn new(runtimeRoot: PathBuf) -> Self {
         Self {
-            runtimeRoot,
+            stagingRoot: Self::stagingRootForRuntimeRoot(&runtimeRoot),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// Resolves the archive staging root owned by one runtime root.
+    fn stagingRootForRuntimeRoot(runtimeRoot: &Path) -> PathBuf {
+        let parent = runtimeRoot
+            .parent()
+            .expect("runtime root must have a parent for archive staging");
+        let name = runtimeRoot
+            .file_name()
+            .expect("runtime root must have a final segment for archive staging");
+        parent.join("archive_staging").join(name)
+    }
+
+    /// Creates an archive with an explicit upload or growable-export length contract.
+    fn createPendingArchive(
+        &self,
+        archiveId: &str,
+        expectedByteLength: Option<u64>,
+    ) -> HostResult<()> {
+        let path = self.uploadingArchivePath(archiveId)?;
+        let sealedPath = self.sealedArchivePath(archiveId)?;
+        let mut uploads = self
+            .uploads
+            .lock()
+            .map_err(|_| HostError::new("Archive staging upload state is poisoned"))?;
+        if uploads.contains_key(archiveId) {
+            return Err(HostError::new("Archive staging ID already exists"));
+        }
+        fs::create_dir_all(self.stagingRoot())?;
+        if sealedPath.exists() {
+            return Err(HostError::new("Archive staging ID already exists"));
+        }
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)?;
+        uploads.insert(
+            archiveId.to_string(),
+            NativeArchiveUpload {
+                expectedByteLength,
+                sealed: false,
+            },
+        );
+        Ok(())
+    }
+
     /// Returns the private directory containing staged archive files.
     fn stagingRoot(&self) -> PathBuf {
-        self.runtimeRoot.join("temp").join("archive_staging")
+        self.stagingRoot.clone()
     }
 
     /// Validates an opaque archive identifier supplied by the Core API.
@@ -139,31 +183,58 @@ impl NativeArchiveStagingHost {
 impl ArchiveStagingHost for NativeArchiveStagingHost {
     /// Creates one empty private staging file without replacing an existing upload.
     fn createArchive(&self, archiveId: &str, expectedByteLength: u64) -> HostResult<()> {
-        let path = self.uploadingArchivePath(archiveId)?;
-        let sealedPath = self.sealedArchivePath(archiveId)?;
-        let mut uploads = self
+        self.createPendingArchive(archiveId, Some(expectedByteLength))
+    }
+
+    /// Creates a growable output file for a streamed snapshot export.
+    fn createExportArchive(&self, archiveId: &str) -> HostResult<()> {
+        self.createPendingArchive(archiveId, None)
+    }
+
+    /// Writes a bounded export range without loading the archive into memory.
+    fn writeExportArchive(&self, archiveId: &str, offset: u64, chunk: &[u8]) -> HostResult<()> {
+        if chunk.len() > 64 * 1024 {
+            return Err(HostError::new("Snapshot export chunk exceeds 64 KiB"));
+        }
+        let uploads = self
             .uploads
             .lock()
-            .map_err(|_| HostError::new("Archive staging upload state is poisoned"))?;
-        if uploads.contains_key(archiveId) {
-            return Err(HostError::new("Archive staging ID already exists"));
+            .map_err(|_| HostError::new("Archive staging state is poisoned"))?;
+        let upload = uploads
+            .get(archiveId)
+            .ok_or_else(|| HostError::new("Archive staging ID does not exist"))?;
+        if upload.sealed || upload.expectedByteLength.is_some() {
+            return Err(HostError::new("Archive is not an active snapshot export"));
         }
-        fs::create_dir_all(self.stagingRoot())?;
-        if sealedPath.exists() {
-            return Err(HostError::new("Archive staging ID already exists"));
-        }
-        fs::OpenOptions::new()
-            .create_new(true)
+        let mut file = fs::OpenOptions::new()
             .write(true)
-            .open(path)?;
-        uploads.insert(
-            archiveId.to_string(),
-            NativeArchiveUpload {
-                expectedByteLength,
-                sealed: false,
-            },
-        );
+            .open(self.uploadingArchivePath(archiveId)?)?;
+        if offset > file.metadata()?.len() {
+            return Err(HostError::new(
+                "Snapshot write starts beyond the current output",
+            ));
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(chunk)?;
         Ok(())
+    }
+
+    /// Exposes the sealed staging file as a platform-saveable file reference.
+    fn archiveFileReference(&self, archiveId: &str) -> HostResult<String> {
+        let uploads = self
+            .uploads
+            .lock()
+            .map_err(|_| HostError::new("Archive staging state is poisoned"))?;
+        let upload = uploads
+            .get(archiveId)
+            .ok_or_else(|| HostError::new("Archive staging ID does not exist"))?;
+        if !upload.sealed {
+            return Err(HostError::new("Archive must be sealed before saving"));
+        }
+        self.sealedArchivePath(archiveId)?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::new("Snapshot file path is not valid UTF-8"))
     }
 
     /// Appends one ordered upload chunk to the private staging file.
@@ -182,6 +253,7 @@ impl ArchiveStagingHost for NativeArchiveStagingHost {
         let currentByteLength = fs::metadata(&path)?.len();
         let remainingByteLength = upload
             .expectedByteLength
+            .ok_or_else(|| HostError::new("Export archives require ranged writes"))?
             .checked_sub(currentByteLength)
             .ok_or_else(|| {
                 HostError::new("Archive staging upload exceeds its declared byte length")
@@ -214,7 +286,10 @@ impl ArchiveStagingHost for NativeArchiveStagingHost {
             return Ok(fs::metadata(sealedPath)?.len());
         }
         let actualByteLength = fs::metadata(&uploadingPath)?.len();
-        if actualByteLength != upload.expectedByteLength {
+        if upload
+            .expectedByteLength
+            .is_some_and(|expected| actualByteLength != expected)
+        {
             return Err(HostError::new(
                 "Archive staging upload does not match its declared byte length",
             ));
@@ -282,6 +357,29 @@ impl NativeRuntimeStorageHost {
         }
     }
 
+    // Enforce non-following workspace access at the actual storage boundary too:
+    // recheck components before reads/writes, rather than trusting an earlier listing.
+    fn resolveFile(&self, path: &str) -> HostResult<PathBuf> {
+        let resolved = self.resolve(path)?;
+        let segments = normalizeStoragePath(path)?;
+        if segments.first().map(String::as_str) == Some("workspaces") {
+            let mut current = self.workspaceRoot.clone();
+            for segment in segments.iter().skip(1) {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if isStorageLink(&metadata) =>
+                        return Err(HostError::new("Workspace storage does not follow links")),
+                    Ok(metadata) if !metadata.is_dir() && !metadata.is_file() =>
+                        return Err(HostError::new("Workspace storage requires a regular file or directory")),
+                    Ok(_) => {},
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
     fn storagePathForPhysical(&self, path: &Path) -> HostResult<String> {
         if let Ok(relative) = path.strip_prefix(&self.runtimeRoot) {
             return Ok(prefixedPath("runtime", relative));
@@ -297,6 +395,35 @@ impl NativeRuntimeStorageHost {
             "Physical path is outside configured runtime and workspace roots: {}",
             path.display()
         )))
+    }
+
+    /// Opens a staging writer, optionally retaining identity-private catalog permissions.
+    fn createWriteSessionInternal(
+        &self,
+        path: &str,
+        privateCatalog: bool,
+    ) -> HostResult<Box<dyn RuntimeStorageWriteSession>> {
+        let targetPath = self.resolveFile(path)?;
+        let parent = targetPath
+            .parent()
+            .ok_or_else(|| HostError::new("Runtime storage file has no parent directory"))?;
+        fs::create_dir_all(storageFsPath(parent)?)?;
+        let temporaryPath = Self::writeTemporaryPath(&targetPath)?;
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        if privateCatalog {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+        }
+        let file = options.open(storageFsPath(&temporaryPath)?)?;
+        Ok(Box::new(NativeRuntimeStorageWriteSession {
+            targetPath,
+            temporaryPath,
+            file: Some(file),
+        }))
     }
 
     /// Creates a unique sibling path used while one storage file is streamed.
@@ -315,21 +442,7 @@ impl NativeRuntimeStorageHost {
 impl RuntimeStorageWriteHost for NativeRuntimeStorageHost {
     /// Opens one private streaming write session for a validated storage path.
     fn createWriteSession(&self, path: &str) -> HostResult<Box<dyn RuntimeStorageWriteSession>> {
-        let targetPath = self.resolve(path)?;
-        let parent = targetPath
-            .parent()
-            .ok_or_else(|| HostError::new("Runtime storage file has no parent directory"))?;
-        fs::create_dir_all(parent)?;
-        let temporaryPath = Self::writeTemporaryPath(&targetPath)?;
-        let file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporaryPath)?;
-        Ok(Box::new(NativeRuntimeStorageWriteSession {
-            targetPath,
-            temporaryPath,
-            file: Some(file),
-        }))
+        self.createWriteSessionInternal(path, false)
     }
 }
 
@@ -343,12 +456,12 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn readBytes(&self, path: &str) -> HostResult<Vec<u8>> {
-        Ok(fs::read(self.resolve(path)?)?)
+        Ok(fs::read(self.resolveFile(path)?)?)
     }
 
     /// Reads one bounded byte range from native runtime storage.
     fn readBytesRange(&self, path: &str, offset: u64, length: usize) -> HostResult<Vec<u8>> {
-        let mut file = fs::File::open(self.resolve(path)?)?;
+        let mut file = fs::File::open(self.resolveFile(path)?)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; length];
         let count = file.read(&mut bytes)?;
@@ -362,9 +475,16 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         session.commitFast()
     }
 
+    /// Flushes and atomically replaces an identity-private catalog.
+    fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        let mut session = self.createWriteSessionInternal(path, true)?;
+        session.writeChunk(content)?;
+        session.commit()
+    }
+
     /// Appends bytes to a native runtime storage file.
     fn appendBytes(&self, path: &str, content: &[u8]) -> HostResult<()> {
-        let path = self.resolve(path)?;
+        let path = self.resolveFile(path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -377,7 +497,7 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()> {
-        let path = self.resolve(path)?;
+        let path = self.resolveFile(path)?;
         if !path.exists() {
             return Ok(());
         }
@@ -394,18 +514,63 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
     }
 
     fn exists(&self, path: &str) -> HostResult<bool> {
-        Ok(self.resolve(path)?.exists())
+        let resolved = self.resolve(path)?;
+        if normalizeStoragePath(path)?.first().map(String::as_str) == Some("workspaces") {
+            // A dangling link is still an occupied destination, never a new writable file.
+            return match fs::symlink_metadata(resolved) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            };
+        }
+        Ok(resolved.exists())
     }
 
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>> {
         let directory = self.resolve(prefix)?;
         let mut entries = Vec::new();
+        let managedWorkspace = normalizeStoragePath(prefix)?.first().map(String::as_str)
+            == Some("workspaces");
+        if managedWorkspace {
+            // Never descend into links, even when a caller lists a linked directory directly.
+            // The configured workspace root itself is trusted; only its descendants are scanned.
+            let relative = directory.strip_prefix(&self.workspaceRoot)
+                .map_err(|_| HostError::new("Workspace listing escaped its root"))?;
+            let mut current = self.workspaceRoot.clone();
+            for component in relative.components() {
+                current.push(component);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if isStorageLink(&metadata) => return Ok(entries),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         if !directory.exists() {
             return Ok(entries);
         }
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let metadata = if managedWorkspace {
+                // The host's atomic writer stages a private sibling until commit.
+                // Never publish that transient file as user workspace content.
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') && name.strip_suffix(".partial")
+                    .and_then(|stem| stem.rsplit_once('.'))
+                    .is_some_and(|(_, id)| uuid::Uuid::parse_str(id).is_ok()) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(entry.path())?;
+                // Do not copy link targets or try reading sockets, devices and FIFOs as files.
+                if isStorageLink(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
+                    continue;
+                }
+                metadata
+            } else {
+                entry.metadata()?
+            };
             entries.push(RuntimeStorageEntry {
                 path: self.storagePathForPhysical(&entry.path())?,
                 isDirectory: metadata.is_dir(),
@@ -414,6 +579,21 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
         }
         Ok(entries)
     }
+}
+
+/// Detects symbolic links and Windows junctions without resolving their targets.
+#[allow(non_snake_case)]
+fn isStorageLink(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x400 != 0; // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// Atomically publishes one sibling staging file over its target path.
@@ -432,8 +612,10 @@ fn atomicReplace(source: &Path, target: &Path) -> HostResult<()> {
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let source = widePath(source.as_os_str());
-    let target = widePath(target.as_os_str());
+    let sourcePath = windowsExtendedPath(source)?;
+    let targetPath = windowsExtendedPath(target)?;
+    let source = widePath(sourcePath.as_os_str());
+    let target = widePath(targetPath.as_os_str());
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -445,6 +627,42 @@ fn atomicReplace(source: &Path, target: &Path) -> HostResult<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+/// Converts a storage path into the representation required by local file APIs.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+fn storageFsPath(path: &Path) -> HostResult<PathBuf> {
+    Ok(path.to_path_buf())
+}
+
+/// Converts a storage path into extended-length Windows syntax for local file APIs.
+#[cfg(windows)]
+#[allow(non_snake_case)]
+fn storageFsPath(path: &Path) -> HostResult<PathBuf> {
+    windowsExtendedPath(path)
+}
+
+/// Converts one Windows path to extended-length syntax.
+#[cfg(windows)]
+#[allow(non_snake_case)]
+fn windowsExtendedPath(path: &Path) -> HostResult<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let text = absolute.to_string_lossy();
+    if text.starts_with(r"\\?\") || text.starts_with(r"\??\") {
+        return Ok(absolute);
+    }
+    if text.starts_with(r"\\") {
+        return Ok(PathBuf::from(format!(
+            r"\\?\UNC\{}",
+            text.trim_start_matches('\\')
+        )));
+    }
+    Ok(PathBuf::from(format!(r"\\?\{}", text)))
 }
 
 /// Encodes one Windows path as a null-terminated UTF-16 string.
@@ -672,6 +890,98 @@ mod tests {
 
     use super::{NativeArchiveStagingHost, NativeRuntimeStorageHost};
 
+    /// Verifies that snapshot outputs grow, accept ZIP header updates, and expose sealed files.
+    #[test]
+    fn snapshot_export_is_file_backed_and_seekable() {
+        let root = std::env::temp_dir().join(format!("operit-snapshot-export-{}", uuid::Uuid::new_v4()));
+        let host = NativeArchiveStagingHost::new(root.join("runtime"));
+        host.createExportArchive("snapshot").unwrap();
+        assert!(host.archiveFileReference("snapshot").is_err());
+        assert!(host.appendArchive("snapshot", b"invalid").is_err());
+        let chunk = vec![42; 64 * 1024];
+        for index in 0..16 {
+            host.writeExportArchive("snapshot", index * chunk.len() as u64, &chunk).unwrap();
+        }
+        host.writeExportArchive("snapshot", 0, b"PK").unwrap();
+        assert_eq!(host.sealArchive("snapshot").unwrap(), 16 * chunk.len() as u64);
+        assert_eq!(host.readArchive("snapshot", 0, 4).unwrap(), [b'P', b'K', 42, 42]);
+        let reference = host.archiveFileReference("snapshot").unwrap();
+        assert_eq!(fs::metadata(&reference).unwrap().len(), 16 * chunk.len() as u64);
+        assert!(host.writeExportArchive("snapshot", 0, b"invalid").is_err());
+        host.removeArchive("snapshot").unwrap();
+        assert!(!std::path::Path::new(&reference).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Rejects oversized export writes and keeps exact-length upload validation unchanged.
+    #[test]
+    fn snapshot_export_rejects_invalid_writes_without_changing_upload_contracts() {
+        let root = std::env::temp_dir().join(format!("operit-snapshot-ranges-{}", uuid::Uuid::new_v4()));
+        let host = NativeArchiveStagingHost::new(root.join("runtime"));
+        host.createExportArchive("snapshot").unwrap();
+        assert!(host.writeExportArchive("snapshot", 1, b"gap").is_err());
+        assert!(host.writeExportArchive("snapshot", 0, &vec![0; 65537]).is_err());
+        assert_eq!(host.sealArchive("snapshot").unwrap(), 0);
+        host.createArchive("upload", 4).unwrap();
+        assert!(host.writeExportArchive("upload", 0, b"data").is_err());
+        host.appendArchive("upload", b"ab").unwrap();
+        assert!(host.sealArchive("upload").is_err());
+        host.appendArchive("upload", b"cd").unwrap();
+        assert_eq!(host.sealArchive("upload").unwrap(), 4);
+        host.removeArchive("snapshot").unwrap();
+        host.removeArchive("upload").unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_listing_skips_file_directory_broken_and_cyclic_links() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("operit-workspace-links-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspaces");
+        let body = workspace.join("project");
+        let outside = root.join("outside");
+        fs::create_dir_all(&body).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(body.join("normal.txt"), b"portable").unwrap();
+        fs::write(outside.join("secret.txt"), b"local only").unwrap();
+        symlink(outside.join("secret.txt"), body.join("file-link")).unwrap();
+        symlink(&outside, body.join("directory-link")).unwrap();
+        symlink(&body, body.join("loop")).unwrap();
+        symlink(body.join("missing"), body.join("broken-link")).unwrap();
+        symlink(&outside, workspace.join("linked-workspace")).unwrap();
+        let host = NativeRuntimeStorageHost::new(root.join("runtime"), workspace);
+        let entries = host.list("workspaces/project").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "workspaces/project/normal.txt");
+        assert_eq!(host.list("workspaces").unwrap().len(), 1);
+        for path in ["workspaces/project/loop", "workspaces/project/loop/loop",
+            "workspaces/project/directory-link", "workspaces/linked-workspace"] {
+            assert!(host.list(path).unwrap().is_empty(), "{path}");
+        }
+        assert!(host.writeBytes("workspaces/project/file-link", b"overwrite").is_err());
+        assert!(host.writeBytes("workspaces/project/directory-link/new.txt", b"overwrite").is_err());
+        assert!(host.writeBytes("workspaces/project/broken-link", b"overwrite").is_err());
+        assert!(host.readBytes("workspaces/project/file-link").is_err());
+        assert!(!outside.join("new.txt").exists());
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"local only");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_listing_hides_uncommitted_atomic_write_staging() {
+        let root = std::env::temp_dir().join(format!("operit-workspace-stage-{}", uuid::Uuid::new_v4()));
+        let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
+        let mut session = host.createWriteSession("workspaces/project/data.txt").unwrap();
+        session.writeChunk(b"new").unwrap();
+        assert!(host.list("workspaces/project").unwrap().is_empty());
+        session.commitFast().unwrap();
+        let files = host.list("workspaces/project").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "workspaces/project/data.txt");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Verifies that a native staged archive rejects excess bytes and seals only at its declared length.
     #[test]
     fn archive_staging_enforces_declared_length() {
@@ -679,6 +989,7 @@ mod tests {
             std::env::temp_dir().join(format!("operit-archive-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temporary archive test root must be created");
         let host = NativeArchiveStagingHost::new(root.clone());
+        let stagingRoot = host.stagingRoot();
 
         host.createArchive("archive", 4)
             .expect("archive must be created");
@@ -699,6 +1010,7 @@ mod tests {
         host.removeArchive("archive")
             .expect("sealed archive must be removed");
         fs::remove_dir_all(root).expect("temporary archive test root must be removed");
+        fs::remove_dir_all(stagingRoot).expect("temporary archive staging root must be removed");
     }
 
     /// Verifies that native runtime storage appends without rewriting earlier content.

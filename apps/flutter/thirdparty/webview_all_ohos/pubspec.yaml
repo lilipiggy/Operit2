@@ -1,0 +1,37 @@
+name: webview_all_ohos
+description: OpenHarmony implementation of the webview_all federated WebView plugin.
+repository: https://github.com/abandoft/webview_all
+homepage: https://github.com/abandoft/webview_all
+issue_tracker: https://github.com/abandoft/webview_all/issues
+version: 1.4.0
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.35.0"
+
+flutter:
+  plugin:
+    implements: webview_all
+    platforms:
+      ohos:
+        package: com.abandoft.webview_all_ohos
+        pluginClass: WebviewAllOhosPlugin
+        dartPluginClass: OhosWebViewPlatform
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # This vendored adapter uses Operit's native local-resource extension.
+  webview_platform_interface:
+    path: ../webview_platform_interface
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+topics:
+  - webview
+  - webview-flutter
+  - ohos
+  - openharmony
+  - browser

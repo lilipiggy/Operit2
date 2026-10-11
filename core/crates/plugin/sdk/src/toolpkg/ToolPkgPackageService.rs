@@ -10,7 +10,8 @@ use crate::toolpkg::ToolPkgCommonPluginConstants::{
 use crate::toolpkg::ToolPkgPackageModels::{
     ToolPkgContainerDetails, ToolPkgDesktopWidget, ToolPkgNavigationActionHook,
     ToolPkgNavigationEntry, ToolPkgSubpackageInfo, ToolPkgToolboxUiModule, ToolPkgUiRoute,
-    ToolPkgWorkspaceTemplate, ToolPkgWorkspaceTemplateImportResult,
+    ToolPkgWorkspaceTemplate,
+    ToolPkgWorkspaceTemplateImportResult,
 };
 use crate::toolpkg::ToolPkgParser::{
     ToolPkgArchiveParser, ToolPkgContainerRuntime, ToolPkgResourceRuntime, ToolPkgSubpackageRuntime,
@@ -412,7 +413,17 @@ impl<'a> ToolPkgPackageService<'a> {
             displayName: container.displayName.resolve(useEnglish),
             description: container.description.resolve(useEnglish),
             version: container.version.clone(),
+            apiVersion: container.apiVersion.clone(),
+            logoResourceKey: container
+                .logoResource
+                .as_ref()
+                .map(|resource| resource.key.clone()),
+            logoMimeType: container
+                .logoResource
+                .as_ref()
+                .map(|resource| resource.mime.clone()),
             author: container.author.clone(),
+            requires: container.requires.clone(),
             resourceCount: container.resources.len(),
             workspaceTemplateCount: workspaceTemplates.len(),
             uiModuleCount: container.uiModules.len(),

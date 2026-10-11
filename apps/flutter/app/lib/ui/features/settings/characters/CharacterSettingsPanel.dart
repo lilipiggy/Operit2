@@ -1,13 +1,14 @@
 // ignore_for_file: file_names
 
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui' show TimingsCallback;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../../core/host/FileSaveService.dart';
 import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
@@ -15,14 +16,19 @@ import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/CharacterAvatar.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../common/components/OperitDialog.dart';
-import '../../packages/utils/PackageDisplayUtils.dart';
 import '../../../theme/OperitFormStyles.dart';
+import '../../packages/utils/PackageDisplayUtils.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../components/SettingsControlStyles.dart';
 import 'MemoryGraphScreen.dart';
 part 'CharacterSettingsPanelWidgets.dart';
 part 'CharacterCardEditorDialog.dart';
 part 'CharacterGroupDialogs.dart';
+
+const XTypeGroup _characterJsonFileTypeGroup = XTypeGroup(
+  label: 'Operit character JSON',
+  extensions: <String>['json'],
+);
 
 class CharacterSettingsPanel extends StatefulWidget {
   const CharacterSettingsPanel({super.key, GeneratedCoreProxyClients? clients})
@@ -200,14 +206,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
         'ttsConfigManager.getAllTtsConfigs',
         _loadTtsConfigs,
       );
-      final enableMemoryAutoUpdate = await _timeLoadStep(
-        'apiPreferences.enableMemoryAutoUpdateFlow',
-        () => apiPreferences.enableMemoryAutoUpdateFlow().first,
-      );
-      final disableUserPreferenceDescription = await _timeLoadStep(
-        'apiPreferences.disableUserPreferenceDescriptionFlow',
-        () => apiPreferences.disableUserPreferenceDescriptionFlow().first,
-      );
       final data = CharacterSettingsData(
         cards: cards,
         groups: groups,
@@ -221,8 +219,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
         mcpToolOptions: mcpOptions,
         activeCardId: activePrompt.cardId,
         activeGroupId: activePrompt.groupId,
-        enableMemoryAutoUpdate: enableMemoryAutoUpdate,
-        disableUserPreferenceDescription: disableUserPreferenceDescription,
       );
       stopwatch.stop();
       _writeTiming(
@@ -316,58 +312,109 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
   }
 
   void _reload() {
+    if (!mounted) {
+      return;
+    }
     setState(() {
       _future = load();
     });
   }
 
-  Future<void> _copyCharacterCardJson(core_proxy.CharacterCard card) async {
-    final l10n = AppLocalizations.of(context)!;
-    final jsonText = const JsonEncoder.withIndent('  ').convert(card.toJson());
-    await Clipboard.setData(ClipboardData(text: jsonText));
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.settingsCharactersJsonCopied(card.name))),
+  /// Writes a JSON document to a user-selected file.
+  Future<String?> _saveJsonFile({
+    required String jsonText,
+    required String suggestedName,
+  }) {
+    return FileSaveService.saveBytes(
+      bytes: Uint8List.fromList(utf8.encode(jsonText)),
+      name: suggestedName,
+      mimeType: 'application/json',
+      acceptedTypeGroups: const <XTypeGroup>[_characterJsonFileTypeGroup],
     );
   }
 
-  Future<void> _copyCharacterCardTavernJson(
-    core_proxy.CharacterCard card,
-  ) async {
+  /// Reads a JSON document from a user-selected file.
+  Future<String?> _readJsonFile() async {
+    final file = await openFile(
+      acceptedTypeGroups: const <XTypeGroup>[_characterJsonFileTypeGroup],
+    );
+    if (file == null) {
+      return null;
+    }
+    return file.readAsString();
+  }
+
+  /// Exports one character card as an Operit JSON file.
+  Future<void> _exportCharacterCardJson(core_proxy.CharacterCard card) async {
     final l10n = AppLocalizations.of(context)!;
     try {
-      final jsonText = await widget.clients.preferencesCharacterCardManager
-          .exportCharacterCardToTavernJson(characterCardId: card.id);
-      await Clipboard.setData(ClipboardData(text: jsonText));
+      final jsonText = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(card.toJson());
+      final savedPath = await _saveJsonFile(
+        jsonText: jsonText,
+        suggestedName:
+            'operit-character-${card.id}-${DateTime.now().millisecondsSinceEpoch}.json',
+      );
+      if (savedPath == null) {
+        return;
+      }
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(l10n.settingsCharactersTavernJsonCopied(card.name)),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(l10n.settingsCharactersTavernJsonCopyError('$error')),
+          content: Text(l10n.settingsCharactersExportJsonError('$error')),
         ),
       );
     }
   }
 
+  /// Exports one character card as a Tavern JSON file.
+  Future<void> _exportCharacterCardTavernJson(
+    core_proxy.CharacterCard card,
+  ) async {
+    final l10n = AppLocalizations.of(context)!;
+    try {
+      final jsonText = await widget.clients.preferencesCharacterCardManager
+          .exportCharacterCardToTavernJson(characterCardId: card.id);
+      final savedPath = await _saveJsonFile(
+        jsonText: jsonText,
+        suggestedName:
+            'tavern-character-${card.id}-${DateTime.now().millisecondsSinceEpoch}.json',
+      );
+      if (savedPath == null) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(l10n.settingsCharactersExportTavernJsonError('$error')),
+        ),
+      );
+    }
+  }
+
+  /// Imports one character card from an Operit JSON file.
   Future<void> _importCharacterCardJson() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _JsonImportDialog.show(
-      context: context,
-      title: l10n.settingsCharactersImportCardJson,
-      label: l10n.settingsCharactersJsonInput,
-    );
+    final jsonText = await _readJsonFile();
     if (jsonText == null) {
       return;
     }
@@ -405,13 +452,10 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
     }
   }
 
+  /// Imports one character card from a Tavern JSON file.
   Future<void> _importTavernCharacterCardJson() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _JsonImportDialog.show(
-      context: context,
-      title: l10n.settingsCharactersImportTavernJson,
-      label: l10n.settingsCharactersTavernJsonInput,
-    );
+    final jsonText = await _readJsonFile();
     if (jsonText == null) {
       return;
     }
@@ -437,6 +481,7 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
     }
   }
 
+  /// Lets the user choose a character import file format.
   Future<void> _chooseCharacterCardImport() async {
     final action = await _CharacterCardImportDialog.show(context: context);
     if (action == null) {
@@ -450,27 +495,45 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
     }
   }
 
-  Future<void> _copyCharacterGroupJson(
+  /// Exports one character group as an Operit JSON file.
+  Future<void> _exportCharacterGroupJson(
     core_proxy.CharacterGroupCard group,
   ) async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = const JsonEncoder.withIndent('  ').convert(group.toJson());
-    await Clipboard.setData(ClipboardData(text: jsonText));
-    if (!mounted) {
-      return;
+    try {
+      final jsonText = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(group.toJson());
+      final savedPath = await _saveJsonFile(
+        jsonText: jsonText,
+        suggestedName:
+            'operit-character-group-${group.id}-${DateTime.now().millisecondsSinceEpoch}.json',
+      );
+      if (savedPath == null) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(l10n.settingsCharactersExportJsonError('$error')),
+        ),
+      );
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.settingsCharactersJsonCopied(group.name))),
-    );
   }
 
+  /// Imports one character group from an Operit JSON file.
   Future<void> _importCharacterGroupJson() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _JsonImportDialog.show(
-      context: context,
-      title: l10n.settingsCharactersImportGroupJson,
-      label: l10n.settingsCharactersJsonInput,
-    );
+    final jsonText = await _readJsonFile();
     if (jsonText == null) {
       return;
     }
@@ -548,10 +611,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
       modelSummaries: data.modelSummaries,
       sharedMemoryStores: data.sharedMemoryStores,
       ttsConfigs: data.ttsConfigs,
-      enableMemoryAutoUpdate: data.enableMemoryAutoUpdate,
-      disableUserPreferenceDescription: data.disableUserPreferenceDescription,
-      onSaveMemoryAutoUpdate: _saveMemoryAutoUpdate,
-      onSavePreferenceDescription: _savePreferenceDescription,
       builtinToolOptions: data.builtinToolOptions,
       packageToolOptions: data.packageToolOptions,
       skillToolOptions: data.skillToolOptions,
@@ -570,8 +629,8 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
         await widget.clients.preferencesCharacterCardManager
             .createCharacterCard(card: edited);
         _reload();
-      case _CharacterCardEditorCopyJson() ||
-          _CharacterCardEditorCopyTavernJson() ||
+      case _CharacterCardEditorExportJson() ||
+          _CharacterCardEditorExportTavernJson() ||
           _CharacterCardEditorDelete():
         return;
     }
@@ -590,10 +649,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
       modelSummaries: data.modelSummaries,
       sharedMemoryStores: data.sharedMemoryStores,
       ttsConfigs: data.ttsConfigs,
-      enableMemoryAutoUpdate: data.enableMemoryAutoUpdate,
-      disableUserPreferenceDescription: data.disableUserPreferenceDescription,
-      onSaveMemoryAutoUpdate: _saveMemoryAutoUpdate,
-      onSavePreferenceDescription: _savePreferenceDescription,
       builtinToolOptions: data.builtinToolOptions,
       packageToolOptions: data.packageToolOptions,
       skillToolOptions: data.skillToolOptions,
@@ -612,10 +667,10 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
         await widget.clients.preferencesCharacterCardManager
             .updateCharacterCard(card: edited);
         _reload();
-      case _CharacterCardEditorCopyJson():
-        await _copyCharacterCardJson(card);
-      case _CharacterCardEditorCopyTavernJson():
-        await _copyCharacterCardTavernJson(card);
+      case _CharacterCardEditorExportJson():
+        await _exportCharacterCardJson(card);
+      case _CharacterCardEditorExportTavernJson():
+        await _exportCharacterCardTavernJson(card);
       case _CharacterCardEditorDelete():
         await _deleteCard(card);
     }
@@ -706,7 +761,8 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
     }
     final edited = switch (result) {
       _CharacterGroupEditorSave(:final group) => group,
-      _CharacterGroupEditorCopyJson() || _CharacterGroupEditorDelete() => null,
+      _CharacterGroupEditorExportJson() ||
+      _CharacterGroupEditorDelete() => null,
     };
     if (edited == null) {
       return;
@@ -736,8 +792,8 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
         await widget.clients.preferencesCharacterGroupCardManager
             .updateCharacterGroupCard(group: group);
         _reload();
-      case _CharacterGroupEditorCopyJson():
-        await _copyCharacterGroupJson(group);
+      case _CharacterGroupEditorExportJson():
+        await _exportCharacterGroupJson(group);
       case _CharacterGroupEditorDelete():
         await _deleteGroup(group);
     }
@@ -746,43 +802,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
   Future<void> _deleteGroup(core_proxy.CharacterGroupCard group) async {
     await widget.clients.preferencesCharacterGroupCardManager
         .deleteCharacterGroupCard(groupId: group.id);
-    _reload();
-  }
-
-  Future<void> _createSharedMemoryStore() async {
-    final edited = await _SharedMemoryStoreEditorDialog.show(
-      context: context,
-      title: '新建共享记忆库',
-    );
-    if (edited == null) {
-      return;
-    }
-    await widget.clients.preferencesSharedMemoryStoreManager
-        .createSharedMemoryStore(name: edited.name);
-    _reload();
-  }
-
-  Future<void> _renameSharedMemoryStore(
-    core_proxy.SharedMemoryStore store,
-  ) async {
-    final edited = await _SharedMemoryStoreEditorDialog.show(
-      context: context,
-      title: '编辑共享记忆库',
-      store: store,
-    );
-    if (edited == null) {
-      return;
-    }
-    await widget.clients.preferencesSharedMemoryStoreManager
-        .renameSharedMemoryStore(id: store.id, name: edited.name);
-    _reload();
-  }
-
-  Future<void> _deleteSharedMemoryStore(
-    core_proxy.SharedMemoryStore store,
-  ) async {
-    await widget.clients.preferencesSharedMemoryStoreManager
-        .deleteSharedMemoryStore(id: store.id);
     _reload();
   }
 
@@ -825,19 +844,6 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
     );
   }
 
-  Future<void> _saveMemoryAutoUpdate(bool enabled) async {
-    await widget.clients.preferencesApiPreferences.saveEnableMemoryAutoUpdate(
-      isEnabled: enabled,
-    );
-    _reload();
-  }
-
-  Future<void> _savePreferenceDescription(bool enabled) async {
-    await widget.clients.preferencesApiPreferences
-        .saveDisableUserPreferenceDescription(isDisabled: !enabled);
-    _reload();
-  }
-
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -872,22 +878,22 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
           children: <Widget>[
             _SectionCard(
               title: l10n.settingsCharactersCardsSection,
+              icon: Icons.badge_outlined,
               action: Wrap(
-                spacing: 8,
+                spacing: 6,
                 runSpacing: 4,
                 alignment: WrapAlignment.end,
                 children: <Widget>[
-                  TextButton.icon(
+                  SettingsSectionAddButton(
+                    tooltip: l10n.settingsCharactersImport,
+                    label: l10n.settingsCharactersImport,
+                    icon: Icons.upload_file_outlined,
                     onPressed: _chooseCharacterCardImport,
-                    style: SettingsControlStyles.sectionTextButton(),
-                    icon: const Icon(Icons.upload_file_outlined, size: 18),
-                    label: Text(l10n.settingsCharactersImport),
                   ),
-                  FilledButton.icon(
+                  SettingsSectionAddButton(
+                    tooltip: l10n.create,
+                    label: l10n.create,
                     onPressed: () => _createCard(data),
-                    style: SettingsControlStyles.sectionFilledButton(),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: Text(l10n.create),
                   ),
                 ],
               ),
@@ -913,22 +919,22 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
             ),
             _SectionCard(
               title: l10n.settingsCharactersGroupsSection,
+              icon: Icons.groups_outlined,
               action: Wrap(
-                spacing: 8,
+                spacing: 6,
                 runSpacing: 4,
                 alignment: WrapAlignment.end,
                 children: <Widget>[
-                  TextButton.icon(
+                  SettingsSectionAddButton(
+                    tooltip: l10n.settingsCharactersImportJson,
+                    label: l10n.settingsCharactersImportJson,
+                    icon: Icons.upload_file_outlined,
                     onPressed: _importCharacterGroupJson,
-                    style: SettingsControlStyles.sectionTextButton(),
-                    icon: const Icon(Icons.upload_file_outlined, size: 18),
-                    label: Text(l10n.settingsCharactersImportJson),
                   ),
-                  FilledButton.icon(
+                  SettingsSectionAddButton(
+                    tooltip: l10n.create,
+                    label: l10n.create,
                     onPressed: () => _createGroup(data),
-                    style: SettingsControlStyles.sectionFilledButton(),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: Text(l10n.create),
                   ),
                 ],
               ),
@@ -938,43 +944,12 @@ class CharacterSettingsPanelState extends State<CharacterSettingsPanel> {
                     group: group,
                     active: group.id == data.activeGroupId,
                     cards: data.cards,
-                    avatarUri: null,
                     onActivate: () => _activateGroup(group),
                     onEdit: () => _editGroup(group, data),
                   ),
               ],
             ),
-            _ExpandableSectionCard(
-              title: l10n.settingsAdvanced,
-              children: <Widget>[
-                _AdvancedSettingsGroup(
-                  title: '共享记忆',
-                  description: '配置可被多个角色卡挂载的共享记忆库。',
-                  action: FilledButton.icon(
-                    onPressed: _createSharedMemoryStore,
-                    style: SettingsControlStyles.sectionFilledButton(),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: Text(l10n.create),
-                  ),
-                  children: <Widget>[
-                    for (final store in data.sharedMemoryStores)
-                      _SharedMemoryStoreTile(
-                        store: store,
-                        onEdit: () => _renameSharedMemoryStore(store),
-                        onDelete: () => _deleteSharedMemoryStore(store),
-                        onEditUserMarkdown: () => _editOwnerUserMarkdown(
-                          ownerKey: _sharedOwnerKey(store.id),
-                          titleName: store.name,
-                        ),
-                        onOpenMemoryGraph: () => _openMemoryGraph(
-                          ownerKey: _sharedOwnerKey(store.id),
-                          titleName: store.name,
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ),
+
           ],
         );
       },

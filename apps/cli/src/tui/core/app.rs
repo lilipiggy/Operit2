@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -13,8 +13,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use serde::Deserialize;
 
 use operit_model::ActivePrompt::ActivePrompt;
 use operit_model::AttachmentInfo::AttachmentInfo;
@@ -27,9 +29,18 @@ use operit_model::InputProcessingState::InputProcessingState;
 use operit_model::MessagePart::MessagePart;
 use operit_model::MessagePartCodec::AssistantMarkupStreamState;
 use operit_model::PromptFunctionType::PromptFunctionType;
+use operit_node_runtime::NodeServices::{
+    DiscoveredPeer, PairedPeer, PairingPrompt, PeerTransport, PendingPairing,
+};
+use operit_node_runtime::SpaceDoctor::{diagnose as space_diagnose, SpaceHealthReport};
+use operit_node_runtime::RuntimeRemoteLinkService::{
+    RuntimeDeviceSpaceDevice, RuntimeDeviceSpaceTopology, RuntimePairedDevice,
+    RuntimePairedDeviceStatus, RuntimeRemoteLinkService, SpaceJoinRequest, SpaceJoinStatus,
+};
 use operit_runtime::data::preferences::ModelConfigManager::ModelConfigManager;
 use operit_runtime::services::ChatServiceCore::ChatState;
-use operit_tools::tools::ToolPermissionSystem::{AiPermissionMode, PermissionRequestResult};
+use operit_runtime::services::RuntimeHostInteractionService::RuntimeHostInteractionToolPermissionRequest;
+use operit_tools::tools::ToolPermissionSystem::AiPermissionMode;
 use operit_util::stream::TextStreamRevisionTracker::TextStreamRevisionTracker;
 use operit_util::AppLogger::AppLogger;
 use operit_util::GithubReleaseUtil::{
@@ -37,29 +48,47 @@ use operit_util::GithubReleaseUtil::{
 };
 use operit_util::MarkdownRenderStream::MarkdownStreamEvent;
 
-use super::approval::TuiApprovalBridge;
+use super::commands::{expand_plugin_command, keyword_options_for, TuiPluginCommandSpec};
 use super::config;
 use super::config::ConfigUi;
 use super::helpers::{short_chat_label, split_command_line};
-use super::i18n::{TuiLanguage, TuiText};
+use super::input::InputHistory;
+use super::i18n::{TuiLanguage, TuiText, TuiTextKey};
 use super::link_proxy_rs::{TuiContentStreamEventInfo, TuiCore};
+pub(super) use super::outgoing_joins::space_join_is_active;
+use super::peer_discovery::spawn_peer_discovery;
 use super::pending_queue::PendingQueueMessage;
+use super::scrollbar::{
+    pointer_hits_scrollbar, scroll_position_for_pointer, scrollbar_hit_part, ScrollbarHit,
+};
 use super::selection::{
-    mouse_drag_transcript_position, mouse_transcript_position, TranscriptCopyLine,
-    TranscriptSelectionState,
+    apply_popup_selection_highlight, mouse_drag_transcript_position, mouse_popup_drag_position,
+    mouse_popup_position, mouse_transcript_position, popup_rows_from_buffer, popup_selected_text,
+    TranscriptCopyLine, TranscriptSelectionState,
 };
 use super::transcript::TranscriptRenderCache;
 use super::typewriter::TypewriterState;
+use crate::cli::network_control_ui::{
+    network_capabilities, network_device_id, network_device_label_by_id, network_role_id,
+    network_role_summary, new_network_control_id,
+};
 use crate::cli::CliInstallProgress;
+use crate::tui::NetworkUiEvent;
 use crate::{build_attachment_info, parse_shell_args, ChatSendArgs, ShellArgs};
+use operit_store::NetworkControlStore::{NetworkControlIdentityAssignment, NetworkControlRole};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RUNTIME_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+/// Space membership is a local read; a slower cadence than the chat status is
+/// enough to notice a member joining, leaving, or being removed.
+const SPACE_MEMBERSHIP_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const TRANSIENT_STATUS_DURATION: Duration = Duration::from_secs(3);
 const MAX_PENDING_TERMINAL_EVENTS_PER_FRAME: usize = 64;
 
 pub(super) struct OperitTui {
+    pub(super) compose: super::compose::ComposeHost,
     pub(super) core: TuiCore,
+    networkControl: RuntimeRemoteLinkService,
     pub(super) initial_shell_args: ShellArgs,
     pub(super) current_chat_id_cache: Option<String>,
     pub(super) current_messages_cache: Vec<ChatMessage>,
@@ -84,7 +113,10 @@ pub(super) struct OperitTui {
     pub(super) focus: FocusArea,
     pub(super) input: String,
     pub(super) input_cursor: usize,
+    /// Submitted inputs recalled with the arrow keys in the input box.
+    pub(super) input_history: InputHistory,
     pub(super) autocomplete_index: usize,
+    pub(super) plugin_commands: Vec<TuiPluginCommandSpec>,
     pub(super) queued_attachment_paths: Vec<String>,
     pub(super) queued_inline_attachments: Vec<AttachmentInfo>,
     pub(super) queued_attachment_tokens: Vec<QueuedAttachmentToken>,
@@ -98,43 +130,128 @@ pub(super) struct OperitTui {
     pub(super) pending_queue_manual_send: Option<PendingQueueMessage>,
     pub(super) paste_attachment_counter: usize,
     pub(super) status_message: String,
+    route_permission_error: Option<String>,
     pub(super) status_message_expires_at: Option<Instant>,
     pub(super) transient_status_message: Option<String>,
+    toast_receiver: mpsc::Receiver<String>,
+    network_event_receiver: mpsc::Receiver<NetworkUiEvent>,
+    /// Sender for background network results that must not block the loop.
+    network_event_sender: mpsc::Sender<NetworkUiEvent>,
+    seen_pairing_prompt_ids: BTreeSet<String>,
+    seen_join_request_ids: BTreeSet<String>,
+    /// Pairings this session started with `/network pair` and has not yet
+    /// confirmed or cancelled; lets the follow-up commands resolve the id.
+    pub(super) pending_pairings: Vec<PendingPairing>,
+    /// The list popup is currently the Y/N confirm for `/network leave`; any
+    /// other popup open clears it so a stale confirm cannot fire elsewhere.
+    leave_confirm_pending: bool,
+    /// The list popup is currently the Y/N confirm for hub unpair; holds the
+    /// (device id, label) the confirm will act on.
+    unpair_confirm: Option<(String, String)>,
+    /// The network hub panel opened by bare `/network`.
+    pub(super) network_hub: Option<NetworkHubModal>,
+    /// The pairing wizard; opened from the hub, discovery, or `/network pair`.
+    pub(super) pair_wizard: Option<PairWizardModal>,
+    /// Discovery candidates behind the current list popup; Enter on the
+    /// popup feeds the selected candidate into the pairing wizard.
+    pub(super) discovered_peers: Vec<DiscoveredPeer>,
+    discover_select_pending: bool,
+    /// A LAN scan is running; the candidate list opens from its result event.
+    discover_in_flight: bool,
+    /// Last observed local Space identity (id, name) and members; drives the
+    /// membership change notice. `None` until the first observation seeds it.
+    space_identity: Option<(String, String)>,
+    space_members: BTreeSet<String>,
+    last_space_membership_check_at: Option<Instant>,
+    /// Seeds the seen-id snapshots from the first fetch so a TUI start does
+    /// not replay requests that predate the session.
+    network_snapshots_seeded: bool,
     pub(super) context_usage_label: String,
     pub(super) transcript_scroll: u16,
     pub(super) transcript_viewport_height: u16,
     pub(super) transcript_max_scroll: u16,
+    /// Pins the rendered transcript to its newest line. Only explicit user
+    /// intent sets this (sending a turn, switching chats, scrolling back to
+    /// the bottom); growing content and periodic status refreshes never do, so
+    /// a response can stream in while the reader browses history.
     pub(super) follow_transcript: bool,
     pub(super) transcript_render_cache: TranscriptRenderCache,
     pub(super) transcript_area: Rect,
     pub(super) transcript_copy_lines: Vec<TranscriptCopyLine>,
     pub(super) transcript_selection: TranscriptSelectionState,
+    pub(super) popup_selection: TranscriptSelectionState,
+    /// Content rect of the topmost modal popup, recorded during render.
+    pub(super) popup_selection_rect: Option<Rect>,
+    pub(super) popup_copy_rows: Vec<Vec<String>>,
+    /// Long-lived clipboard owner. On Linux the clipboard is served by this
+    /// process, so a short-lived instance loses the contents when dropped.
+    clipboard: Option<arboard::Clipboard>,
+    pub(super) scrollbar_hovered: bool,
+    pub(super) scrollbar_pressed: bool,
+    pub(super) scrollbar_dragging: bool,
     pub(super) show_chat_list: bool,
     pub(super) ctrl_c_pending: bool,
     pub(super) last_current_chat_loading: bool,
     pub(super) awaiting_runtime_loading: bool,
     pub(super) last_runtime_status_refresh_at: Option<Instant>,
     pub(super) typewriter_state: TypewriterState,
-    pub(super) approval_bridge: TuiApprovalBridge,
+    /// Pending chat-scoped tool permission requests from the current chat
+    /// state; answers go back through the owning chat route.
+    pub(super) current_tool_permission_requests: Vec<RuntimeHostInteractionToolPermissionRequest>,
     pub(super) language: TuiLanguage,
     pub(super) show_help: bool,
     pub(super) startup_install_prompt: Option<StartupInstallPrompt>,
     pub(super) startup_update_prompt: Option<StartupUpdatePrompt>,
     pub(super) startup_workspace_prompt: Option<StartupWorkspacePrompt>,
+    pub(super) join_decision: Option<JoinDecisionModal>,
+    pub(super) device_manager: Option<DeviceManagerModal>,
     pub(super) show_config_popup: bool,
     pub(super) config_ui: ConfigUi,
     pub(super) should_quit: bool,
 }
 
 struct TuiMessageContentStreamState {
+    eventCount: u64,
     revisionTracker: TextStreamRevisionTracker,
     partStream: AssistantMarkupStreamState,
+}
+
+#[derive(Deserialize)]
+struct PluginCommandInfoPayload {
+    name: String,
+    usage: String,
+    description: String,
+}
+
+/// Loads enabled ToolPkg slash-command metadata from the Core command registry.
+async fn load_plugin_command_specs(
+    core: &mut TuiCore,
+) -> Result<Vec<TuiPluginCommandSpec>, String> {
+    let args = vec![
+        "plugin".to_string(),
+        "commands".to_string(),
+        "--json".to_string(),
+    ];
+    let output = core
+        .runCoreCommand(&args)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.stderr.trim().is_empty() {
+        return Err(output.stderr.trim().to_string());
+    }
+    let commands = serde_json::from_str::<Vec<PluginCommandInfoPayload>>(&output.stdout)
+        .map_err(|error| format!("plugin command metadata is invalid: {error}"))?;
+    Ok(commands
+        .into_iter()
+        .flat_map(|command| expand_plugin_command(command.name, command.usage, command.description))
+        .collect())
 }
 
 impl TuiMessageContentStreamState {
     /// Creates an empty semantic projection for one embedded AI content stream.
     fn new() -> Self {
         Self {
+            eventCount: 0,
             revisionTracker: TextStreamRevisionTracker::new(""),
             partStream: AssistantMarkupStreamState::new(),
         }
@@ -210,11 +327,290 @@ pub(super) struct StartupWorkspacePrompt {
     pub(super) accept_selected: bool,
 }
 
+/// Interactive decision popup for incoming Space join requests. Requests are
+/// decided in place with Y/N; Esc defers them and the command path stays
+/// available as the fallback.
+pub(super) struct JoinDecisionModal {
+    pub(super) requests: Vec<SpaceJoinRequest>,
+    pub(super) selected: usize,
+}
+
+/// One selectable row in the device management window: a pending join
+/// request or a known device. Row identities stay stable across snapshot
+/// merges so the selection never jumps.
+pub(super) enum DeviceManagerRow {
+    Request(SpaceJoinRequest),
+    Device(RuntimeDeviceSpaceDevice),
+}
+
+impl DeviceManagerRow {
+    pub(super) fn id(&self) -> &str {
+        match self {
+            Self::Request(request) => &request.requestId,
+            Self::Device(device) => &device.deviceId,
+        }
+    }
+}
+
+/// Actions offered by the device management window. The connection axis is
+/// a single slot derived from the restriction flag: admit and disconnect
+/// are policy-level conjugates over `disconnectedNodeIds`, never two
+/// parallel menu entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceManagerAction {
+    Pair,
+    Admit,
+    Disconnect,
+    AssignIdentity,
+    ClearIdentity,
+    Unpair,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceManagerMode {
+    Browsing,
+    ActionMenu,
+    ConfirmRemove,
+    ConfirmUnpair,
+    AssignIdentity,
+}
+
+/// Interactive device management window opened by `/network devices`.
+/// Reachability (`online` in the topology) and policy restriction
+/// (`blocked`) are independent flags: admit only lifts a restriction and
+/// never dials a connection, so an offline member offers no connection
+/// action at all.
+pub(super) struct DeviceManagerModal {
+    pub(super) topology: RuntimeDeviceSpaceTopology,
+    pub(super) blocked: BTreeSet<String>,
+    /// Devices this node already holds a pairing (edge) for.
+    pub(super) paired: BTreeSet<String>,
+    pub(super) requests: Vec<SpaceJoinRequest>,
+    pub(super) roles: BTreeMap<String, NetworkControlRole>,
+    pub(super) initialized: bool,
+    pub(super) selected: usize,
+    pub(super) mode: DeviceManagerMode,
+    /// Device the action menu / confirm / identity picker is targeting.
+    pub(super) menu_device_id: Option<String>,
+    /// Cursor inside the current menu or identity picker.
+    pub(super) menu_index: usize,
+}
+
+impl DeviceManagerModal {
+    /// Pending join requests first, then devices; render and selection both
+    /// derive from this ordering.
+    pub(super) fn rows(&self) -> Vec<DeviceManagerRow> {
+        self.requests
+            .iter()
+            .cloned()
+            .map(DeviceManagerRow::Request)
+            .chain(
+                self.topology
+                    .devices
+                    .iter()
+                    .cloned()
+                    .map(DeviceManagerRow::Device),
+            )
+            .collect()
+    }
+
+    pub(super) fn selected_row(&self) -> Option<DeviceManagerRow> {
+        self.rows().into_iter().nth(self.selected)
+    }
+
+    /// Identities ordered by display name so the picker is stable across
+    /// BTreeMap reorderings.
+    pub(super) fn sorted_roles(&self) -> Vec<&NetworkControlRole> {
+        let mut roles = self.roles.values().collect::<Vec<_>>();
+        roles.sort_by(|left, right| left.displayName.cmp(&right.displayName));
+        roles
+    }
+
+    /// Derives the action menu for one device from its current policy
+    /// state: a restricted device can only be restored, an unrestricted
+    /// foreign device can be disconnected, identities appear only when
+    /// they can apply, and the local device never offers actions at all -
+    /// identity changes would drop the capabilities the local UI itself
+    /// depends on, and leaving or demoting this device is managed from
+    /// another administrator device.
+    ///
+    /// Pairing leads the menu because it is the only link-layer action: an
+    /// admitted member without a local pairing can gain a direct edge without
+    /// any Space capability and without joining again.
+    pub(super) fn menu_actions(&self, device_id: &str) -> Vec<DeviceManagerAction> {
+        let is_self = device_id == self.topology.currentDeviceId;
+        if is_self {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if !self.blocked.contains(device_id) && !self.paired.contains(device_id) {
+            actions.push(DeviceManagerAction::Pair);
+        }
+        if self.blocked.contains(device_id) {
+            actions.push(DeviceManagerAction::Admit);
+        } else {
+            actions.push(DeviceManagerAction::Disconnect);
+        }
+        if !self.roles.is_empty() {
+            actions.push(DeviceManagerAction::AssignIdentity);
+        }
+        if self
+            .topology
+            .devices
+            .iter()
+            .find(|device| device.deviceId == device_id)
+            .is_some_and(|device| device.currentIdentity.is_some())
+        {
+            actions.push(DeviceManagerAction::ClearIdentity);
+        }
+        actions.push(DeviceManagerAction::Unpair);
+        actions.push(DeviceManagerAction::Remove);
+        actions
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct StartupInstallPrompt {
     pub(super) install_selected: bool,
     pub(super) state: StartupInstallState,
     pub(super) progress_rx: Option<mpsc::Receiver<StartupInstallMessage>>,
+}
+
+/// One selectable row in the network hub device area: a Space member from
+/// the live topology, or a paired device that has not joined this Space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum NetworkHubRow {
+    Member(RuntimeDeviceSpaceDevice),
+    Peer {
+        deviceId: String,
+        label: String,
+        outbound: bool,
+    },
+}
+
+impl NetworkHubRow {
+    pub(super) fn id(&self) -> &str {
+        match self {
+            NetworkHubRow::Member(device) => &device.deviceId,
+            NetworkHubRow::Peer { deviceId, .. } => deviceId,
+        }
+    }
+}
+
+/// The `/network` hub panel: a persistent answer to "who am I, what is
+/// waiting for me, what do I manage", with flows one key away. Data is a
+/// snapshot refreshed on open and on every peer-change signal.
+pub(super) struct NetworkHubModal {
+    pub(super) topology: RuntimeDeviceSpaceTopology,
+    pub(super) spaceName: String,
+    pub(super) initialized: bool,
+    /// Listener summary ("bind · transports") or None when not listening.
+    pub(super) listening: Option<String>,
+    pub(super) paired: BTreeMap<String, RuntimePairedDevice>,
+    pub(super) prompts: Vec<PairingPrompt>,
+    pub(super) outgoingJoins: Vec<SpaceJoinRequest>,
+    /// Devices the Space policy restricts (`disconnectedNodeIds`). The hub must
+    /// show these as restricted instead of merely offline: they will not come
+    /// back on their own, and no other panel exposes the restriction.
+    pub(super) blocked: BTreeSet<String>,
+    pub(super) selected: usize,
+}
+
+/// Stages of the pairing wizard. `Code` and `JoinOffer` are reached
+/// automatically: starting a pairing (command or wizard) jumps straight to
+/// code entry, and a successful confirmation advances to the join offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PairStage {
+    Address,
+    Code,
+    JoinOffer,
+}
+
+/// Focused input field on the wizard address form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PairField {
+    Address,
+    Transport,
+    Token,
+}
+
+pub(super) struct PairWizardModal {
+    pub(super) stage: PairStage,
+    pub(super) field: PairField,
+    pub(super) address: String,
+    pub(super) transportIndex: usize,
+    pub(super) token: String,
+    /// Node id the handshake must match, when the wizard targets a known
+    /// device; empty means "accept whatever node answers the address".
+    pub(super) expectedNode: Option<String>,
+    /// Display label of the expected device, shown while dialing.
+    pub(super) expectedLabel: Option<String>,
+    pub(super) pairing: Option<PendingPairing>,
+    pub(super) code: String,
+    /// The peer a finished pairing produced; drives the join offer.
+    pub(super) peer: Option<PairedPeer>,
+    pub(super) error: Option<String>,
+}
+
+/// Transports the wizard cycles through, in listener-spelling order.
+pub(super) const PAIR_WIZARD_TRANSPORTS: [PeerTransport; 5] = [
+    PeerTransport::Http,
+    PeerTransport::WebSocket,
+    PeerTransport::Tcp,
+    PeerTransport::Serial,
+    PeerTransport::Bluetooth,
+];
+
+/// Listener-spelling label for one transport, shared by the wizard and hub.
+pub(super) fn peer_transport_label(transport: &PeerTransport) -> &'static str {
+    match transport {
+        PeerTransport::Http => "http",
+        PeerTransport::WebSocket => "ws",
+        PeerTransport::Tcp => "tcp",
+        PeerTransport::Serial => "serial",
+        PeerTransport::Bluetooth => "bluetooth",
+    }
+}
+
+/// Pushes one character into the confirmation-code buffer: digits only,
+/// six digits at most, so `Enter` can mean "code is complete".
+pub(super) fn pair_code_push(code: &str, ch: char) -> String {
+    if !ch.is_ascii_digit() || code.len() >= 6 {
+        return code.to_string();
+    }
+    format!("{code}{ch}")
+}
+
+/// Derives the hub device rows: every Space member (self first, matching
+/// the topology order), then every paired device that is not a member yet -
+/// those are the natural join targets after a fresh pairing.
+pub(super) fn network_hub_rows(
+    topology: &RuntimeDeviceSpaceTopology,
+    paired: &BTreeMap<String, RuntimePairedDevice>,
+) -> Vec<NetworkHubRow> {
+    let mut rows = topology
+        .devices
+        .iter()
+        .cloned()
+        .map(NetworkHubRow::Member)
+        .collect::<Vec<_>>();
+    let members = topology
+        .devices
+        .iter()
+        .map(|device| device.deviceId.as_str())
+        .collect::<BTreeSet<_>>();
+    rows.extend(
+        paired
+            .iter()
+            .filter(|(device_id, _)| !members.contains(device_id.as_str()))
+            .map(|(device_id, peer)| NetworkHubRow::Peer {
+                deviceId: device_id.clone(),
+                label: paired_device_label(device_id, peer),
+                outbound: peer.outbound,
+            }),
+    );
+    rows
 }
 
 #[derive(Debug, Clone)]
@@ -290,13 +686,16 @@ pub(super) enum FocusArea {
 impl OperitTui {
     pub(super) async fn new(
         mut core: TuiCore,
+        networkControl: RuntimeRemoteLinkService,
         initial_shell_args: ShellArgs,
         initial_chat_id: String,
-        approval_bridge: TuiApprovalBridge,
         language: TuiLanguage,
         startup_install_prompt: Option<StartupInstallPrompt>,
         startup_update_prompt: Option<StartupUpdatePrompt>,
         startup_workspace_prompt_path: Option<String>,
+        toast_receiver: mpsc::Receiver<String>,
+        network_event_receiver: mpsc::Receiver<NetworkUiEvent>,
+        network_event_sender: mpsc::Sender<NetworkUiEvent>,
     ) -> Result<Self, String> {
         let chat_histories = core
             .chat_runtime_holder_main()
@@ -317,38 +716,87 @@ impl OperitTui {
         let active_chat_id = current_chat_id_cache
             .clone()
             .ok_or_else(|| "no active chat in tui".to_string())?;
-        let current_messages_cache = core
+        let mut route_permission_error = None;
+        let current_messages_cache = match core
             .chat_runtime_holder_main()
             .chatMessagesFlowSnapshot(active_chat_id.clone())
             .await
-            .map_err(|error| error.to_string())?;
-        let current_chat_state_cache = core
+        {
+            Ok(messages) => messages,
+            Err(error) if error.isRoutePermissionDenied() => {
+                route_permission_error = Some(error.to_string());
+                Vec::new()
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let current_chat_state_cache = match core
             .chat_runtime_holder_main()
             .chatStateFlowSnapshot(active_chat_id.clone())
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            Ok(state) => state,
+            Err(error) if error.isRoutePermissionDenied() => {
+                route_permission_error = Some(error.to_string());
+                ChatState {
+                    currentChatId: active_chat_id.clone(),
+                    currentChatTitle: String::new(),
+                    currentCharacterCardName: None,
+                    currentCharacterCardAvatarUri: None,
+                    currentWorkspacePath: None,
+                    isLoading: false,
+                    inputProcessingState: InputProcessingState::Error {
+                        message: route_permission_error
+                            .clone()
+                            .expect("route permission error must be recorded"),
+                    },
+                    hasOlderDisplayHistory: false,
+                    hasNewerDisplayHistory: false,
+                    isLoadingDisplayWindow: false,
+                    pendingQueueMessages: Vec::new(),
+                    isPendingQueueExpanded: false,
+                    toolPermissionRequests: Vec::new(),
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         let current_chat_is_loading_cache = current_chat_state_cache.isLoading;
         let current_chat_input_processing_state_cache =
             current_chat_state_cache.inputProcessingState.clone();
+        let current_tool_permission_requests = current_chat_state_cache.toolPermissionRequests;
         let current_window_size_cache = core
             .chat_runtime_holder_main()
             .currentWindowSizeFlowSnapshot()
             .await
             .map_err(|error| error.to_string())?;
-        core.watchMainChatGeneratedStateFlows()
-            .await
-            .map_err(|error| error.to_string())?;
-        core.watchMainChatStateFlow(active_chat_id.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        core.watchMainChatMessagesFlow(active_chat_id)
-            .await
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = core.watchMainChatGeneratedStateFlows().await {
+            if error.isRoutePermissionDenied() {
+                route_permission_error = Some(error.to_string());
+            } else {
+                return Err(error.to_string());
+            }
+        }
+        if let Err(error) = core.watchMainChatStateFlow(active_chat_id.clone()).await {
+            if error.isRoutePermissionDenied() {
+                route_permission_error = Some(error.to_string());
+            } else {
+                return Err(error.to_string());
+            }
+        }
+        if let Err(error) = core.watchMainChatMessagesFlow(active_chat_id).await {
+            if error.isRoutePermissionDenied() {
+                route_permission_error = Some(error.to_string());
+            } else {
+                return Err(error.to_string());
+            }
+        }
         core.syncMainChatContentStreams(&current_messages_cache)
             .await
             .map_err(|error| error.to_string())?;
+        let plugin_commands = load_plugin_command_specs(&mut core).await?;
         Ok(Self {
+            compose: super::compose::ComposeHost::default(),
             core,
+            networkControl,
             initial_shell_args,
             current_chat_id_cache: current_chat_id_cache.clone(),
             current_messages_cache,
@@ -373,7 +821,9 @@ impl OperitTui {
             focus: FocusArea::Input,
             input: String::new(),
             input_cursor: 0,
+            input_history: InputHistory::default(),
             autocomplete_index: 0,
+            plugin_commands,
             queued_attachment_paths: Vec::new(),
             queued_inline_attachments: Vec::new(),
             queued_attachment_tokens: Vec::new(),
@@ -386,9 +836,27 @@ impl OperitTui {
             pending_queue_auto_send_at: None,
             pending_queue_manual_send: None,
             paste_attachment_counter: 0,
-            status_message,
+            status_message: route_permission_error.clone().unwrap_or(status_message),
+            route_permission_error,
             status_message_expires_at: None,
             transient_status_message: None,
+            toast_receiver,
+            network_event_receiver,
+            network_event_sender,
+            seen_pairing_prompt_ids: BTreeSet::new(),
+            seen_join_request_ids: BTreeSet::new(),
+            pending_pairings: Vec::new(),
+            leave_confirm_pending: false,
+            unpair_confirm: None,
+            network_hub: None,
+            pair_wizard: None,
+            discovered_peers: Vec::new(),
+            discover_select_pending: false,
+            discover_in_flight: false,
+            space_identity: None,
+            space_members: BTreeSet::new(),
+            last_space_membership_check_at: None,
+            network_snapshots_seeded: false,
             context_usage_label: String::new(),
             transcript_scroll: 0,
             transcript_viewport_height: 1,
@@ -398,13 +866,20 @@ impl OperitTui {
             transcript_area: Rect::default(),
             transcript_copy_lines: Vec::new(),
             transcript_selection: TranscriptSelectionState::default(),
+            popup_selection: TranscriptSelectionState::default(),
+            popup_selection_rect: None,
+            popup_copy_rows: Vec::new(),
+            clipboard: None,
+            scrollbar_hovered: false,
+            scrollbar_pressed: false,
+            scrollbar_dragging: false,
             show_chat_list: false,
             ctrl_c_pending: false,
             last_current_chat_loading: false,
             awaiting_runtime_loading: false,
             last_runtime_status_refresh_at: None,
             typewriter_state: TypewriterState::default(),
-            approval_bridge,
+            current_tool_permission_requests,
             language,
             show_help: false,
             startup_install_prompt,
@@ -417,6 +892,8 @@ impl OperitTui {
             }),
             show_config_popup: false,
             config_ui: ConfigUi::new(),
+            join_decision: None,
+            device_manager: None,
             should_quit: false,
         })
     }
@@ -467,6 +944,7 @@ impl OperitTui {
             }
         };
         let result = self.run_loop(&mut terminal).await;
+        let compose_cleanup = self.compose.clear(&mut self.core).await;
         let screen_result = execute!(
             terminal.backend_mut(),
             DisableMouseCapture,
@@ -478,7 +956,24 @@ impl OperitTui {
         let cursor_result = terminal.show_cursor().map_err(|error| error.to_string());
         let cleanup_result = screen_result.and(raw_mode_result).and(cursor_result);
         AppLogger::set_enable_console_logging(previous_console_logging);
-        result.and(cleanup_result)
+        result.and(cleanup_result).and(compose_cleanup)
+    }
+
+    /// Applies a route permission failure to the visible TUI state.
+    fn apply_route_permission_error(&mut self, error: String) {
+        self.current_chat_is_loading_cache = false;
+        self.last_current_chat_loading = false;
+        self.awaiting_runtime_loading = false;
+        self.current_chat_input_processing_state_cache = InputProcessingState::Error {
+            message: error.clone(),
+        };
+        self.route_permission_error = Some(error.clone());
+        self.set_status_message(error);
+    }
+
+    /// Returns whether a rendered error is a route permission failure.
+    fn is_route_permission_error_message(error: &str) -> bool {
+        error.strip_prefix("ROUTE_PERMISSION_DENIED:").is_some()
     }
 
     async fn run_loop(
@@ -487,16 +982,47 @@ impl OperitTui {
     ) -> Result<(), String> {
         while !self.should_quit {
             self.ensure_pending_queue_chat_id();
-            self.apply_pushed_events().await?;
+            if let Err(error) = self.apply_pushed_events().await {
+                if Self::is_route_permission_error_message(&error) {
+                    self.apply_route_permission_error(error);
+                } else {
+                    return Err(error);
+                }
+            }
+            self.apply_toast_messages();
+            self.apply_network_events();
+            if let Err(error) = self.sync_compose_surfaces().await {
+                if Self::is_route_permission_error_message(&error) {
+                    self.apply_route_permission_error(error);
+                } else {
+                    self.status_message = error;
+                }
+            }
             self.ensure_pending_queue_chat_id();
             self.refresh_runtime_status_if_due().await;
-            self.advance_pending_message_queue().await?;
+            if let Err(error) = self.advance_pending_message_queue().await {
+                if Self::is_route_permission_error_message(&error) {
+                    self.apply_route_permission_error(error);
+                } else {
+                    return Err(error);
+                }
+            }
             self.clear_expired_status_message();
             terminal
                 .draw(|frame| self.render(frame))
                 .map_err(|error| error.to_string())?;
 
-            self.handle_terminal_events(EVENT_POLL_INTERVAL).await?;
+            if let Err(error) = self.handle_terminal_events(EVENT_POLL_INTERVAL).await {
+                if Self::is_route_permission_error_message(&error) {
+                    self.apply_route_permission_error(error);
+                } else {
+                    return Err(error);
+                }
+            }
+            // Crossterm polls synchronously and local proxy futures can be
+            // immediately ready. Explicitly let the local network tasks run
+            // even when an idle frame contains no other yielding await.
+            tokio::task::yield_now().await;
         }
         Ok(())
     }
@@ -505,6 +1031,191 @@ impl OperitTui {
         self.status_message = message.clone();
         self.transient_status_message = Some(message);
         self.status_message_expires_at = Some(Instant::now() + TRANSIENT_STATUS_DURATION);
+    }
+
+    /// Applies queued host toasts to the TUI transient status line.
+    fn apply_toast_messages(&mut self) {
+        while let Ok(message) = self.toast_receiver.try_recv() {
+            self.set_transient_status_message(message);
+        }
+    }
+
+    /// Applies background network results and opens popups when ids beyond the
+    /// previous snapshot appear. The first fetch only seeds the snapshots so
+    /// a TUI start does not replay requests that predate the session.
+    fn apply_network_events(&mut self) {
+        while let Ok(event) = self.network_event_receiver.try_recv() {
+            match event {
+                NetworkUiEvent::OutgoingJoinSettled(updated) => {
+                    let message = match updated.status {
+                        SpaceJoinStatus::Joined => format!(
+                            "network join approved: joined {} with {}",
+                            updated.spaceName, updated.targetDeviceId
+                        ),
+                        SpaceJoinStatus::Rejected => {
+                            format!("network join rejected by {}", updated.targetDeviceId)
+                        }
+                        _ => format!(
+                            "network join {}: {} ({})",
+                            join_status_label(self.text(), &updated.status),
+                            updated.targetDeviceId,
+                            updated.spaceName
+                        ),
+                    };
+                    self.set_transient_status_message(message);
+                }
+                NetworkUiEvent::Snapshot { prompts, requests } => {
+                    self.apply_network_snapshots(prompts, requests);
+                }
+                NetworkUiEvent::DiscoveryFinished(result) => {
+                    self.apply_discovery_result(result);
+                }
+            }
+        }
+    }
+
+    /// Applies a finished LAN scan: opens the candidate list, or reports why
+    /// there is none. Runs on the terminal loop, so it only touches state.
+    fn apply_discovery_result(&mut self, result: Result<Vec<DiscoveredPeer>, String>) {
+        self.discover_in_flight = false;
+        match result {
+            Err(error) => self.status_message = status_error_line(&error),
+            Ok(candidates) if candidates.is_empty() => {
+                self.set_transient_status_message(self.text().network_discover_none().to_string());
+            }
+            Ok(candidates) => {
+                let text = self.text();
+                let items = discovery_popup_items(text, &candidates);
+                self.discovered_peers = candidates;
+                self.open_list_popup(text.network_discover_title().to_string(), items);
+                self.discover_select_pending = true;
+            }
+        }
+    }
+
+    async fn refresh_network_snapshots(&mut self) {
+        let prompts = self.networkControl.pairingPrompts().unwrap_or_default();
+        let requests = self.networkControl.incomingDeviceSpaceJoins().await.ok();
+        self.apply_network_snapshots(prompts, requests);
+    }
+
+    /// Applies already-fetched data without waiting for network I/O.
+    fn apply_network_snapshots(
+        &mut self,
+        prompts: Vec<PairingPrompt>,
+        requests: Option<Vec<SpaceJoinRequest>>,
+    ) {
+        let has_new_prompts = prompts
+            .iter()
+            .any(|prompt| !self.seen_pairing_prompt_ids.contains(&prompt.pairingId));
+        // The hub's waiting area shows inbound pairing codes live, so the
+        // popup would only fight it for screen space.
+        if self.network_snapshots_seeded && has_new_prompts && self.network_hub.is_none() {
+            self.open_pairing_prompts_popup(&prompts);
+        }
+        self.seen_pairing_prompt_ids = prompts
+            .iter()
+            .map(|prompt| prompt.pairingId.clone())
+            .collect();
+
+        // Hub snapshots are local reads, so refresh them even when fetching
+        // incoming join requests failed, without blocking the terminal loop.
+        if self.network_hub.is_some() {
+            self.refresh_network_hub();
+        }
+        let Some(requests) = requests else {
+            self.network_snapshots_seeded = true;
+            return;
+        };
+        let has_new_requests = requests
+            .iter()
+            .any(|request| !self.seen_join_request_ids.contains(&request.requestId));
+        if self.network_snapshots_seeded && has_new_requests {
+            self.open_join_decision_modal(requests.clone());
+        }
+        // Keep an already open queue aligned with this fetch: reassignments
+        // bump the assignment version, and a decision on a cached version
+        // would be rejected forever.
+        self.refresh_join_decision_modal(&requests);
+        self.seen_join_request_ids = requests
+            .iter()
+            .map(|request| request.requestId.clone())
+            .collect();
+        self.network_snapshots_seeded = true;
+        if self.device_manager.is_some() {
+            self.apply_device_manager_snapshot(requests);
+        }
+    }
+
+    /// Opens the pairing popup listing every pending prompt, one block per
+    /// prompt with the confirmation code on its own line, plus a trailing
+    /// hint line. Esc or Enter closes it.
+    fn open_pairing_prompts_popup(&mut self, prompts: &[PairingPrompt]) {
+        let text = self.text();
+        let mut items = Vec::new();
+        for prompt in prompts {
+            items.push(prompt.displayName.clone());
+            items.push(format!(
+                "{}: {}",
+                text.network_pairing_popup_code(),
+                prompt.confirmationCode
+            ));
+        }
+        items.push(text.network_pairing_popup_hint().to_string());
+        self.open_list_popup(text.network_pairing_popup_title().to_string(), items);
+    }
+
+    /// Opens the Space join decision popup for the given pending requests.
+    /// Requests this node cannot approve are filtered out. When the popup is
+    /// already open, fresh requests merge into the queue and the current
+    /// selection is preserved.
+    fn open_join_decision_modal(&mut self, requests: Vec<SpaceJoinRequest>) {
+        let decidable: Vec<SpaceJoinRequest> = requests
+            .into_iter()
+            .filter(|request| request.canApprove)
+            .collect();
+        if decidable.is_empty() {
+            return;
+        }
+        match self.join_decision.as_mut() {
+            Some(modal) => {
+                for request in decidable {
+                    if !modal
+                        .requests
+                        .iter()
+                        .any(|existing| existing.requestId == request.requestId)
+                    {
+                        modal.requests.push(request);
+                    }
+                }
+            }
+            None => {
+                self.join_decision = Some(JoinDecisionModal {
+                    requests: decidable,
+                    selected: 0,
+                });
+            }
+        }
+    }
+
+    /// Keeps an open decision queue aligned with the freshest decidable set:
+    /// entries are replaced in place (a reviewer reassignment bumps the
+    /// assignment version) and entries this device no longer reviews are
+    /// dropped, so a retry can never loop against a stale assignment. The
+    /// popup closes when nothing is left to decide.
+    fn refresh_join_decision_modal(&mut self, fresh: &[SpaceJoinRequest]) {
+        let Some(modal) = self.join_decision.as_ref() else {
+            return;
+        };
+        let (requests, selected) = refreshed_decision_queue(&modal.requests, fresh, modal.selected);
+        if requests.is_empty() {
+            self.join_decision = None;
+            return;
+        }
+        if let Some(modal) = self.join_decision.as_mut() {
+            modal.requests = requests;
+            modal.selected = selected;
+        }
     }
 
     fn clear_expired_status_message(&mut self) {
@@ -543,17 +1254,143 @@ impl OperitTui {
     async fn handle_terminal_event(&mut self, terminal_event: Event) -> Result<(), String> {
         match terminal_event {
             Event::Key(key) => self.handle_key_event(key).await,
-            Event::Mouse(mouse) => self.handle_mouse_event(mouse),
-            Event::Paste(text) => self.handle_paste(text).await,
+            Event::Mouse(mouse) => self.handle_mouse_event(mouse).await,
+            Event::Paste(text) => {
+                if self.show_config_popup {
+                    self.config_ui.handle_paste(&text);
+                    return Ok(());
+                }
+                if let Some(editor) = &mut self.compose.editor {
+                    editor.value.push_str(&text);
+                    return Ok(());
+                }
+                if self.show_list_popup {
+                    self.list_popup_search.push_str(&text);
+                    self.update_list_popup_filter();
+                    return Ok(());
+                }
+                if self.show_model_chooser {
+                    self.status_message.clear();
+                    self.status_message_expires_at = None;
+                    self.transient_status_message = None;
+                    self.model_chooser_search.push_str(&text);
+                    self.update_model_chooser_filter();
+                    return Ok(());
+                }
+                self.handle_paste(text).await
+            }
             _ => Ok(()),
         }
     }
 
-    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<(), String> {
+    /// Routes plugin control clicks before transcript selection and scrolling.
+    async fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<(), String> {
+        let overlay = self.show_help
+            || self.show_config_popup
+            || self.show_list_popup
+            || self.show_model_chooser
+            || self.startup_install_prompt.is_some()
+            || self.startup_update_prompt.is_some()
+            || self.startup_workspace_prompt.is_some()
+            || !self.current_tool_permission_requests.is_empty()
+            || self.join_decision.is_some()
+            || self.device_manager.is_some();
+        if self.compose.editor.is_some() {
+            return Ok(());
+        }
+        if let Some(area) = self.popup_selection_rect {
+            let inside = mouse.column >= area.x
+                && mouse.column < area.x.saturating_add(area.width)
+                && mouse.row >= area.y
+                && mouse.row < area.y.saturating_add(area.height);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) if inside => {
+                    self.scrollbar_pressed = false;
+                    self.scrollbar_dragging = false;
+                    self.transcript_selection.clear();
+                    if let Some(position) =
+                        mouse_popup_position(mouse.column, mouse.row, area, &self.popup_copy_rows)
+                    {
+                        self.popup_selection.begin(position);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Drag(MouseButton::Left) if self.popup_selection.is_dragging() => {
+                    if let Some(position) = mouse_popup_drag_position(
+                        mouse.column,
+                        mouse.row,
+                        area,
+                        &self.popup_copy_rows,
+                    ) {
+                        self.popup_selection.drag_to(position);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Up(MouseButton::Left) if self.popup_selection.is_dragging() => {
+                    match mouse_popup_drag_position(
+                        mouse.column,
+                        mouse.row,
+                        area,
+                        &self.popup_copy_rows,
+                    ) {
+                        Some(position) => self.popup_selection.end(position),
+                        None => self.popup_selection.clear(),
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Right) if inside => {
+                    self.popup_selection.clear();
+                    return Ok(());
+                }
+                // Presses outside the popup discard its selection and keep the
+                // scrollbar/transcript behavior below.
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.popup_selection.clear();
+                }
+                _ => {}
+            }
+        }
+        if !overlay {
+            let area = super::scrollbar::split_transcript_inner(self.transcript_area).content;
+            let inside = mouse.column >= area.x
+                && mouse.column < area.x + area.width
+                && mouse.row >= area.y
+                && mouse.row < area.y + area.height;
+            let row = if inside {
+                usize::from(mouse.row - area.y + self.transcript_scroll)
+            } else {
+                usize::MAX
+            };
+            let col = if inside {
+                usize::from(mouse.column - area.x)
+            } else {
+                usize::MAX
+            };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) if self.compose.press(row, col) => {
+                    self.transcript_selection.clear();
+                    return Ok(());
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    match self.compose.release_click(&mut self.core, row, col).await {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.status_message = error;
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_transcript_up(self.terminal_wheel_step()),
             MouseEventKind::ScrollDown => self.scroll_transcript_down(self.terminal_wheel_step()),
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.handle_scrollbar_press(mouse) {
+                    return Ok(());
+                }
                 if let Some(position) = mouse_transcript_position(
                     mouse,
                     self.transcript_area,
@@ -566,6 +1403,13 @@ impl OperitTui {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.scrollbar_dragging {
+                    self.drag_scrollbar_to(mouse.row);
+                    return Ok(());
+                }
+                if self.scrollbar_pressed {
+                    return Ok(());
+                }
                 if let Some(position) = mouse_drag_transcript_position(
                     mouse,
                     self.transcript_area,
@@ -576,19 +1420,76 @@ impl OperitTui {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.scrollbar_pressed {
+                    self.scrollbar_pressed = false;
+                    self.scrollbar_dragging = false;
+                    return Ok(());
+                }
                 if let Some(position) = mouse_drag_transcript_position(
                     mouse,
                     self.transcript_area,
                     self.transcript_scroll,
                     &self.transcript_copy_lines,
                 ) {
+                    if self.transcript_selection.is_click()
+                        && self
+                            .transcript_render_cache
+                            .toggle_fold_at_line(position.line)
+                    {
+                        self.transcript_selection.clear();
+                        return Ok(());
+                    }
                     self.transcript_selection.end(position);
                 }
             }
-            MouseEventKind::Down(MouseButton::Right) => self.transcript_selection.clear(),
+            MouseEventKind::Moved => self.update_scrollbar_hover(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.scrollbar_pressed = false;
+                self.scrollbar_dragging = false;
+                self.transcript_selection.clear();
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Starts scrollbar interaction when the pointer is on the visible bar.
+    fn handle_scrollbar_press(&mut self, mouse: MouseEvent) -> bool {
+        if self.transcript_max_scroll == 0
+            || !pointer_hits_scrollbar(mouse.column, mouse.row, self.transcript_area)
+        {
+            self.scrollbar_pressed = false;
+            self.scrollbar_dragging = false;
+            self.scrollbar_hovered = false;
+            return false;
+        }
+        self.transcript_selection.clear();
+        self.scrollbar_hovered = true;
+        self.scrollbar_pressed = true;
+        match scrollbar_hit_part(mouse.row, self.transcript_area) {
+            ScrollbarHit::Begin => self.scroll_transcript_up(self.transcript_page_step()),
+            ScrollbarHit::End => self.scroll_transcript_down(self.transcript_page_step()),
+            ScrollbarHit::Track => {
+                self.scrollbar_dragging = true;
+                self.drag_scrollbar_to(mouse.row);
+            }
+        }
+        true
+    }
+
+    /// Moves transcript scroll to the track position under `row`.
+    fn drag_scrollbar_to(&mut self, row: u16) {
+        let position =
+            scroll_position_for_pointer(row, self.transcript_area, self.transcript_max_scroll);
+        self.transcript_scroll = position;
+        self.follow_transcript = position >= self.transcript_max_scroll;
+        self.scrollbar_hovered = true;
+    }
+
+    /// Tracks whether the pointer is resting on the visible scrollbar.
+    fn update_scrollbar_hover(&mut self, column: u16, row: u16) {
+        self.scrollbar_hovered = self.transcript_max_scroll > 0
+            && pointer_hits_scrollbar(column, row, self.transcript_area);
     }
 
     fn copy_transcript_selection(&mut self) -> bool {
@@ -601,17 +1502,38 @@ impl OperitTui {
         if text.is_empty() {
             return false;
         }
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => match clipboard.set_text(text) {
-                Ok(()) => {
-                    self.status_message = self.text().selection_copied().to_string();
-                    true
-                }
+        self.copy_text_to_clipboard(text)
+    }
+
+    /// Copies the current modal popup selection, if any.
+    fn copy_popup_selection(&mut self) -> bool {
+        let Some(text) = popup_selected_text(&self.popup_copy_rows, &self.popup_selection) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        self.copy_text_to_clipboard(text)
+    }
+
+    fn copy_text_to_clipboard(&mut self, text: String) -> bool {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
                 Err(error) => {
                     self.status_message = self.text().copy_failed(&error.to_string());
-                    true
+                    return true;
                 }
-            },
+            }
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return false;
+        };
+        match clipboard.set_text(text) {
+            Ok(()) => {
+                self.status_message = self.text().selection_copied().to_string();
+                true
+            }
             Err(error) => {
                 self.status_message = self.text().copy_failed(&error.to_string());
                 true
@@ -619,8 +1541,39 @@ impl OperitTui {
         }
     }
 
+    /// Snapshots the topmost popup's rendered cells and paints the live selection
+    /// highlight; called once per frame after all overlays have rendered.
+    pub(super) fn finish_popup_selection(&mut self, buffer: &mut Buffer) {
+        let Some(area) = self
+            .popup_selection_rect
+            .filter(|area| area.width > 0 && area.height > 0)
+        else {
+            self.popup_selection_rect = None;
+            if !self.popup_copy_rows.is_empty() {
+                self.popup_copy_rows.clear();
+            }
+            self.popup_selection.clear();
+            return;
+        };
+        let rows = popup_rows_from_buffer(buffer, area);
+        // Content changed under the selection (refilter, list move, …) — drop it.
+        if rows != self.popup_copy_rows {
+            self.popup_selection.clear();
+        }
+        self.popup_copy_rows = rows;
+        apply_popup_selection_highlight(buffer, area, &self.popup_selection);
+    }
+
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), String> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return Ok(());
+        }
+
+        // Popup selection copies win over popup key routing.
+        if matches!(key.code, KeyCode::Char('c'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.copy_popup_selection()
+        {
             return Ok(());
         }
 
@@ -649,6 +1602,29 @@ impl OperitTui {
 
         self.ctrl_c_pending = false;
 
+        if self.compose.editor.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.compose.editor = None;
+                }
+                KeyCode::Enter => {
+                    if let Err(error) = self.compose.commit_editor(&mut self.core).await {
+                        self.status_message = error;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.compose.editor.as_mut().unwrap().value.pop();
+                }
+                KeyCode::Char(ch)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.compose.editor.as_mut().unwrap().value.push(ch);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.startup_install_prompt.is_some() {
             self.handle_startup_install_prompt_key(key).await?;
             return Ok(());
@@ -664,13 +1640,54 @@ impl OperitTui {
             return Ok(());
         }
 
-        if self.approval_bridge.current().is_some() {
-            self.handle_approval_key(key);
+        if !self.current_tool_permission_requests.is_empty() {
+            self.handle_approval_key(key).await;
+            return Ok(());
+        }
+
+        if self.join_decision.is_some() {
+            self.handle_join_decision_key(key).await?;
+            return Ok(());
+        }
+
+        if self.device_manager.is_some() {
+            self.handle_device_manager_key(key).await?;
+            return Ok(());
+        }
+
+        if self.pair_wizard.is_some() {
+            self.handle_pair_wizard_key(key).await?;
+            return Ok(());
+        }
+
+        // List popups opened from the hub render above it, so they must also
+        // receive keys first; otherwise a hub key would fire under the popup
+        // (the hub's discover, audit, policy, token and leave shortcuts).
+        if self.show_list_popup
+            && self.discover_select_pending
+            && key.code == KeyCode::Enter
+        {
+            self.start_pair_wizard_from_discovery().await;
+            return Ok(());
+        }
+
+        if self.show_list_popup && self.leave_confirm_pending {
+            self.handle_leave_confirm_key(key).await;
+            return Ok(());
+        }
+
+        if self.show_list_popup && self.unpair_confirm.is_some() {
+            self.handle_unpair_confirm_key(key).await;
             return Ok(());
         }
 
         if self.show_list_popup {
             return self.handle_list_popup_key(key);
+        }
+
+        if self.network_hub.is_some() {
+            self.handle_network_hub_key(key).await?;
+            return Ok(());
         }
 
         if self.show_help {
@@ -718,11 +1735,11 @@ impl OperitTui {
                 self.scroll_transcript_half_page_down();
                 return Ok(());
             }
-            (KeyCode::Up, KeyModifiers::NONE) if self.should_arrow_scroll_transcript() => {
+            (KeyCode::Up, KeyModifiers::CONTROL) => {
                 self.scroll_transcript_up(self.terminal_wheel_step());
                 return Ok(());
             }
-            (KeyCode::Down, KeyModifiers::NONE) if self.should_arrow_scroll_transcript() => {
+            (KeyCode::Down, KeyModifiers::CONTROL) => {
                 self.scroll_transcript_down(self.terminal_wheel_step());
                 return Ok(());
             }
@@ -829,10 +1846,6 @@ impl OperitTui {
 
     fn terminal_wheel_step(&self) -> u16 {
         (self.transcript_viewport_height / 6).max(3)
-    }
-
-    fn should_arrow_scroll_transcript(&self) -> bool {
-        self.focus == FocusArea::Input && self.command_suggestions().is_empty()
     }
 
     async fn handle_chat_list_key(&mut self, key: KeyEvent) -> Result<(), String> {
@@ -1136,15 +2149,21 @@ impl OperitTui {
     }
 
     async fn accept_startup_workspace_prompt(&mut self) -> Result<(), String> {
-        let Some(prompt) = self.startup_workspace_prompt.take() else {
+        let Some(prompt) = self.startup_workspace_prompt.clone() else {
             return Ok(());
         };
         let chat_id = self.current_chat_id()?;
-        self.core
+        let bind_result = self
+            .core
             .chat_runtime_holder_main()
             .bindChatToWorkspace(chat_id.clone(), prompt.path.clone())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
+        if let Err(error) = bind_result {
+            self.set_status_message(error);
+            return Ok(());
+        }
+        self.startup_workspace_prompt = None;
         self.refresh_core_snapshot().await?;
         self.refresh_chats().await;
         self.select_chat_by_id(&chat_id);
@@ -1169,9 +2188,14 @@ impl OperitTui {
     pub(super) async fn submit_input(&mut self) -> Result<(), String> {
         let input = self.input.trim_end().to_string();
         if input.starts_with('/') {
+            self.input_history.record(&input);
             self.input.clear();
             self.input_cursor = 0;
-            self.handle_local_command(&input).await?;
+            // Slash-command failures (bad arguments, rejected core calls) are
+            // status-line material, never reasons to tear down the TUI loop.
+            if let Err(error) = self.handle_local_command(&input).await {
+                self.status_message = status_error_line(&error);
+            }
             return Ok(());
         }
 
@@ -1194,6 +2218,7 @@ impl OperitTui {
         let inline_attachments = std::mem::take(&mut self.queued_inline_attachments);
         let attachment_tokens = std::mem::take(&mut self.queued_attachment_tokens);
         let message = strip_attachment_tokens(input, &attachment_tokens);
+        self.input_history.record(&message);
         self.follow_transcript = true;
         self.status_message = self.text().connecting().to_string();
         self.input.clear();
@@ -1274,7 +2299,9 @@ impl OperitTui {
             return Ok(());
         }
         let command = parts[0].trim_start_matches('/');
-        match command {
+        // Builtin dispatch is case-insensitive to match the completion popup;
+        // plugin commands still receive the original spelling.
+        match command.to_ascii_lowercase().as_str() {
             "help" => {
                 self.show_help = true;
             }
@@ -1282,7 +2309,8 @@ impl OperitTui {
                 self.should_quit = true;
             }
             "new" => {
-                let shell_args = parse_shell_args(&parts[1..])?;
+                let shell_args = Self::parse_new_chat_args(&parts[1..])
+                    .map_err(|()| self.text().usage_new().to_string())?;
                 self.create_new_chat(shell_args).await?;
             }
             "switch" => {
@@ -1291,11 +2319,13 @@ impl OperitTui {
             "resume" => {
                 self.resume_previous_chat().await?;
             }
-            "max" => {
-                self.toggle_max_context_mode().await?;
-            }
             "language" => {
                 self.handle_language_command(&parts[1..])?;
+            }
+            "network" => {
+                if let Err(error) = self.handle_network_command(&parts[1..]).await {
+                    self.status_message = error;
+                }
             }
             "model" => {
                 self.handle_model_command(&parts[1..]).await?;
@@ -1353,10 +2383,600 @@ impl OperitTui {
                 self.handle_update_command().await?;
             }
             _ => {
-                self.status_message = self.text().unknown_command(command);
+                self.handle_plugin_core_command(command, &parts[1..]).await;
             }
         }
         Ok(())
+    }
+
+    /// `/new` takes repeatable `keyword value` pairs (`character`,
+    /// `group-card`, `group`); translate them into the shared shell flags so
+    /// `parse_shell_args` stays the single option parser. Legacy `--keyword`
+    /// spellings are still accepted.
+    fn parse_new_chat_args(args: &[String]) -> Result<ShellArgs, ()> {
+        let options = keyword_options_for("new").ok_or(())?;
+        let mut translated = Vec::with_capacity(args.len());
+        let mut index = 0;
+        while index < args.len() {
+            let keyword = args[index].trim_start_matches("--").to_ascii_lowercase();
+            if !options.contains(&keyword.as_str()) {
+                return Err(());
+            }
+            let Some(value) = args.get(index + 1) else {
+                return Err(());
+            };
+            translated.push(format!("--{keyword}"));
+            translated.push(value.clone());
+            index += 2;
+        }
+        parse_shell_args(&translated).map_err(|_| ())
+    }
+
+    /// Executes a ToolPkg slash command through the shared Core command dispatcher.
+    async fn handle_plugin_core_command(&mut self, command: &str, args: &[String]) {
+        let mut command_args = vec![
+            "plugin".to_string(),
+            "exec".to_string(),
+            command.to_string(),
+        ];
+        command_args.extend_from_slice(args);
+        match self.core.runCoreCommand(&command_args).await {
+            Ok(output) => {
+                let lines = output
+                    .stdout
+                    .lines()
+                    .chain(output.stderr.lines())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if lines.len() > 1 {
+                    self.open_list_popup(format!("/{command}"), lines);
+                } else {
+                    self.status_message = lines.join("");
+                }
+            }
+            Err(error) => {
+                self.status_message = error.to_string();
+            }
+        }
+    }
+
+    /// Executes a Space control command through the runtime-owned authorization service.
+    async fn handle_network_command(&mut self, args: &[String]) -> Result<(), String> {
+        const USAGE: &str = "network opens the hub panel; subcommands: <show|bootstrap|audit|doctor|devices|identities|identity|admit|remove|disconnect|policy|token|prompts|requests|approve|reject|discover|pair|pair-confirm|pair-cancel|peers|unpair|join|joins|join-cancel|leave>";
+        match args.first().map(String::as_str) {
+            None if args.is_empty() => {
+                self.open_network_hub().await;
+            }
+            Some("show") if args.len() == 1 => {
+                let state = self.networkControl.deviceSpaceControl()?;
+                let topology = self.networkControl.deviceSpaceTopology()?;
+                // Read-only views share the list popup so output persists
+                // until Esc instead of competing for the status line.
+                let items = vec![
+                    format!(
+                        "state: {}",
+                        if state.initialized {
+                            "ready"
+                        } else {
+                            "not initialized"
+                        }
+                    ),
+                    format!("devices: {}", topology.devices.len()),
+                    format!("identities: {}", state.roles.len()),
+                    format!("policies: {}", state.policies.len()),
+                ];
+                self.open_list_popup("Network".to_string(), items);
+            }
+            Some("bootstrap") if args.len() == 1 => {
+                self.networkControl.bootstrapDeviceSpaceControl()?;
+                self.status_message = "network control initialized".to_string();
+            }
+            Some("audit") if args.len() == 1 => {
+                self.network_audit_popup().await?;
+            }
+            Some("doctor") if args.len() == 1 => {
+                self.network_doctor_popup()?;
+            }
+            Some("devices") if args.len() == 1 => {
+                self.open_device_manager().await;
+            }
+            Some("identities") if args.len() == 1 => {
+                let state = self.networkControl.deviceSpaceControl()?;
+                let items = state
+                    .roles
+                    .values()
+                    .map(network_role_summary)
+                    .collect::<Vec<_>>();
+                self.open_list_popup("Network identities".to_string(), items);
+            }
+            Some("identity") if args.len() >= 2 => {
+                if args[1] == "list" && args.len() == 2 {
+                    let state = self.networkControl.deviceSpaceControl()?;
+                    let items = state
+                        .roles
+                        .values()
+                        .map(network_role_summary)
+                        .collect::<Vec<_>>();
+                    self.open_list_popup("Network identities".to_string(), items);
+                    return Ok(());
+                }
+                if args[1] == "define" && args.len() >= 4 {
+                    let role_id = new_network_control_id("identity");
+                    self.networkControl
+                        .defineDeviceSpaceRole(NetworkControlRole {
+                            roleId: role_id,
+                            displayName: args[2].clone(),
+                            capabilities: network_capabilities(&args[3..])?,
+                        })?;
+                    self.status_message = format!("network identity defined: {}", args[2]);
+                    return Ok(());
+                }
+                if args[1] == "set" && args.len() == 4 {
+                    self.status_message = self.network_assign_identity(&args[2], &args[3]).await?;
+                    return Ok(());
+                }
+                if args[1] == "clear" && args.len() == 3 {
+                    self.status_message = self.network_clear_device_identity(&args[2]).await?;
+                    return Ok(());
+                }
+                Err(USAGE.to_string())?
+            }
+            Some("admit") if args.len() == 2 => {
+                self.status_message = self.network_admit_device(&args[1]).await?;
+            }
+            Some("remove") if args.len() == 2 => {
+                self.status_message = self.network_remove_device(&args[1]).await?;
+            }
+            Some("disconnect") if args.len() == 2 => {
+                self.status_message = self.network_disconnect_device(&args[1]).await?;
+            }
+            Some("policy") if args.len() == 2 && args[1] == "list" => {
+                self.network_policy_popup()?;
+            }
+            Some("policy") if args.len() == 4 && args[1] == "set" => {
+                self.networkControl
+                    .updateDeviceSpacePolicy(args[2].clone(), args[3].clone())?;
+                self.status_message = format!("network policy updated: {}", args[2]);
+            }
+            Some("token") if args.len() == 1 => {
+                self.network_token_popup()?;
+            }
+            Some("prompts") if args.len() == 1 => {
+                let prompts = self.networkControl.pairingPrompts()?;
+                if prompts.is_empty() {
+                    self.status_message = self.text().network_prompts_none().to_string();
+                } else {
+                    self.open_pairing_prompts_popup(&prompts);
+                }
+            }
+            Some("requests") if args.len() == 1 => {
+                let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+                if requests.is_empty() {
+                    self.status_message = self.text().network_requests_none().to_string();
+                } else {
+                    self.open_join_decision_modal(requests);
+                    if self.join_decision.is_none() {
+                        self.status_message = self.text().network_requests_none().to_string();
+                    }
+                }
+            }
+            Some("approve" | "reject") if args.len() == 3 => {
+                let assignment_version = args[2]
+                    .parse::<u64>()
+                    .map_err(|_| "assignment-version must be a non-negative integer".to_string())?;
+                let request_id = self.resolve_join_request_argument(&args[1]).await?;
+                let request = self
+                    .networkControl
+                    .decideDeviceSpaceJoin(request_id, assignment_version, args[0] == "approve")
+                    .await?;
+                self.status_message = format!(
+                    "network join request {} {}: {:?}",
+                    args[1],
+                    if args[0] == "approve" { "approved" } else { "rejected" },
+                    request.status,
+                );
+            }
+            Some("discover") if args.len() == 1 => {
+                self.start_peer_discovery();
+            }
+            Some("pair") if args.len() >= 3 => {
+                self.network_pair(&args[1..]).await?;
+            }
+            Some("pair-confirm") if (2..=3).contains(&args.len()) => {
+                self.status_message = self.network_pair_confirm(&args[1..]).await?;
+            }
+            Some("pair-cancel") if args.len() <= 2 => {
+                self.status_message = self.network_pair_cancel(&args[1..]).await?;
+            }
+            Some("peers") if args.len() == 1 => {
+                self.network_peers().await?;
+            }
+            Some("unpair") if args.len() == 2 => {
+                self.status_message = self.network_unpair(&args[1]).await?;
+            }
+            Some("join") if args.len() == 2 => {
+                self.status_message = self.network_join(&args[1]).await?;
+            }
+            Some("joins") if args.len() == 1 => {
+                self.network_joins().await?;
+            }
+            Some("join-cancel") if args.len() == 2 => {
+                self.status_message = self.network_join_cancel(&args[1]).await?;
+            }
+            Some("leave") if args.len() == 1 => {
+                self.network_leave().await?;
+            }
+            _ => {
+                self.status_message = USAGE.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared device-action layer for the `/network` slash commands and the
+    /// device management window: each helper resolves the human-facing
+    /// device reference, performs exactly one control operation, and returns
+    /// the status text so both entry points cannot drift apart.
+    async fn network_admit_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl.admitDeviceSpaceMember(device_id)?;
+        Ok(format!("network member admitted: {device_label}"))
+    }
+
+    async fn network_remove_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl.removeDeviceSpaceMember(device_id).await?;
+        Ok(format!("network member removed: {device_label}"))
+    }
+
+    async fn network_disconnect_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.networkControl
+            .disconnectDeviceSpaceNode(device_id)
+            .await?;
+        Ok(self.text().network_devices_disconnected(device_label))
+    }
+
+    async fn network_assign_identity(
+        &mut self,
+        device: &str,
+        identity: &str,
+    ) -> Result<String, String> {
+        let state = self.networkControl.deviceSpaceControl()?;
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        let identity_id = network_role_id(&state, identity)?;
+        let identity_label = state
+            .roles
+            .get(&identity_id)
+            .map(|role| role.displayName.clone())
+            .ok_or_else(|| format!("network identity does not exist: {identity}"))?;
+        self.networkControl.setDeviceSpaceIdentity(
+            NetworkControlIdentityAssignment {
+                nodeId: device_id,
+                roleId: identity_id,
+            },
+        )?;
+        Ok(format!("network identity set: {device_label} · {identity_label}"))
+    }
+
+    async fn network_clear_device_identity(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        self.networkControl.clearDeviceSpaceIdentity(device_id)?;
+        Ok(format!("network identity reset to default: {device}"))
+    }
+
+    /// Lists unpaired LAN discovery candidates so `/network pair` has an
+    /// address to dial. The result stays in the popup because the address is
+    /// typed into the next command.
+    /// Starts an outbound pairing toward an explicit address. The pairing id
+    /// must stay on screen for the confirmation step, so it goes to the popup
+    /// and is remembered for id-less `/network pair-confirm <code>`.
+    /// `/network pair` funnels into the wizard and dials immediately: the
+    /// command keeps working for muscle memory, but its UX is the wizard's
+    /// code-entry screen instead of an id to copy around.
+    async fn network_pair(&mut self, args: &[String]) -> Result<(), String> {
+        let (address, transport, token) = parse_pair_arguments(args)?;
+        let transport_index = PAIR_WIZARD_TRANSPORTS
+            .iter()
+            .position(|candidate| {
+                peer_transport_label(candidate) == peer_transport_label(&transport)
+            })
+            .unwrap_or(2);
+        self.open_pair_wizard(address, transport_index, token.unwrap_or_default(), true, None);
+        self.pair_wizard_start().await;
+        Ok(())
+    }
+
+    /// Confirms an outbound pairing with the code shown on the other device.
+    /// With exactly one pending pairing the id can be omitted. A failed
+    /// confirmation keeps the pairing pending so the code can be retried.
+    async fn network_pair_confirm(&mut self, args: &[String]) -> Result<String, String> {
+        const USAGE: &str = "usage: network pair-confirm [pairing-id] <code>";
+        let (pairing_id, code) = match args {
+            [code] => (
+                resolve_pending_pairing(&self.pending_pairings, None)?
+                    .pairingId
+                    .clone(),
+                code.clone(),
+            ),
+            [pairing_id, code] => (pairing_id.clone(), code.clone()),
+            _ => return Err(USAGE.to_string()),
+        };
+        let peer = self
+            .networkControl
+            .finishPairing(pairing_id.clone(), code)
+            .await?;
+        self.pending_pairings
+            .retain(|pending| pending.pairingId != pairing_id);
+        // An admitted member needs only the direct link: the join submission
+        // would be rejected as a duplicate membership, so pairing ends here.
+        if self.network_peer_is_member(&peer.nodeId) {
+            return Ok(self
+                .text()
+                .network_direct_link_established(&paired_peer_label(&peer)));
+        }
+        // A finished pairing naturally continues into the join offer: the
+        // applicant side (this device) is the one holding outbound trust.
+        self.pair_wizard = Some(PairWizardModal {
+            stage: PairStage::JoinOffer,
+            field: PairField::Address,
+            address: String::new(),
+            transportIndex: 2,
+            token: String::new(),
+            expectedNode: None,
+            expectedLabel: None,
+            pairing: None,
+            code: String::new(),
+            peer: Some(peer.clone()),
+            error: None,
+        });
+        Ok(format!(
+            "network pairing confirmed: {} ({})",
+            peer.displayName, peer.nodeId
+        ))
+    }
+
+    /// Cancels a pending pairing this session started (id omitted) or any
+    /// pairing by id. Cancelling never removes an established pairing.
+    async fn network_pair_cancel(&mut self, args: &[String]) -> Result<String, String> {
+        const USAGE: &str = "usage: network pair-cancel [pairing-id]";
+        let pairing_id = match args {
+            [] => resolve_pending_pairing(&self.pending_pairings, None)?
+                .pairingId
+                .clone(),
+            [pairing_id] => pairing_id.clone(),
+            _ => return Err(USAGE.to_string()),
+        };
+        self.networkControl
+            .cancelPairing(pairing_id.clone())
+            .await?;
+        self.pending_pairings
+            .retain(|pending| pending.pairingId != pairing_id);
+        Ok(format!("network pairing cancelled: {pairing_id}"))
+    }
+
+    /// Lists paired devices with their authorization directions. The node id
+    /// is required input for `/network unpair` and `/network join`.
+    async fn network_peers(&mut self) -> Result<(), String> {
+        let peers = self.networkControl.pairedDevicesSnapshot()?;
+        if peers.is_empty() {
+            self.set_transient_status_message(self.text().network_peers_none().to_string());
+            return Ok(());
+        }
+        let text = self.text();
+        let mut items = Vec::new();
+        for (device_id, peer) in peers {
+            let status = self
+                .networkControl
+                .pairedDeviceStatus(device_id.clone())
+                .await?;
+            items.push(format!(
+                "{} · {} · {} · {}",
+                paired_device_label(&device_id, &peer),
+                device_id,
+                paired_device_direction(peer.inbound, peer.outbound),
+                paired_status_label(text, &status),
+            ));
+        }
+        self.open_list_popup(text.network_peers_title().to_string(), items);
+        Ok(())
+    }
+
+    /// Removes one pairing credential without touching Space membership;
+    /// `/network remove` is the full forget for Space members.
+    async fn network_unpair(&mut self, device: &str) -> Result<String, String> {
+        let (device_id, label) = self.resolve_paired_device_argument(device, false).await?;
+        self.networkControl.removePairedDevice(device_id).await?;
+        Ok(format!("network pairing removed: {label}"))
+    }
+
+    /// Requests to join the paired device's Space. Approval happens on the
+    /// target device; this session pulls the decision in the background.
+    async fn network_join(&mut self, device: &str) -> Result<String, String> {
+        let (device_id, label) = self.resolve_paired_device_argument(device, true).await?;
+        self.network_join_target(&device_id, &label).await
+    }
+
+    /// Join entry for callers that already hold the node id (hub rows,
+    /// pairing wizard): validates the outbound direction, then submits.
+    async fn network_join_target(
+        &mut self,
+        device_id: &str,
+        label: &str,
+    ) -> Result<String, String> {
+        let peers = self.networkControl.pairedDevicesSnapshot()?;
+        let Some(peer) = peers.get(device_id) else {
+            return Err(format!("no paired device matches {device_id}"));
+        };
+        if !peer.outbound {
+            return Err(format!("network join requires an outbound pairing with {label}"));
+        }
+        let request = self
+            .networkControl
+            .requestDeviceSpaceJoin(device_id.to_string())
+            .await?;
+        if request.status == SpaceJoinStatus::Joined {
+            return Ok(format!(
+                "network join completed: now a member of {}",
+                request.spaceName
+            ));
+        }
+        Ok(format!(
+            "network join request submitted: {label} must approve it; \
+             this TUI refreshes the status automatically"
+        ))
+    }
+
+    /// Shows the local pairing token in a popup; it must stay on screen for
+    /// transfer to the other device.
+    fn network_token_popup(&mut self) -> Result<(), String> {
+        let token = self.networkControl.localPairingToken()?;
+        self.open_list_popup(self.text().network_token_title().to_string(), vec![token]);
+        Ok(())
+    }
+
+    /// Lists this device's outgoing join requests with their live status.
+    async fn network_joins(&mut self) -> Result<(), String> {
+        let requests = self.networkControl.outgoingDeviceSpaceJoins()?;
+        if requests.is_empty() {
+            self.set_transient_status_message(self.text().network_joins_none().to_string());
+            return Ok(());
+        }
+        let text = self.text();
+        let items = requests
+            .iter()
+            .map(|request| {
+                format!(
+                    "{} · {} · {} · {}",
+                    request.targetDeviceId,
+                    request.spaceName,
+                    join_status_label(text, &request.status),
+                    request.requestId,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.open_list_popup(text.network_joins_title().to_string(), items);
+        Ok(())
+    }
+
+    /// Withdraws an outgoing join request by id or by its target device.
+    async fn network_join_cancel(&mut self, value: &str) -> Result<String, String> {
+        let requests = self.networkControl.outgoingDeviceSpaceJoins()?;
+        let request_id = if requests.iter().any(|request| request.requestId == value) {
+            value.to_string()
+        } else {
+            let matches = requests
+                .iter()
+                .filter(|request| {
+                    request.targetDeviceId == value && space_join_is_active(&request.status)
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [request] => request.requestId.clone(),
+                _ => return Err(format!(
+                    "no outgoing join request matches \"{value}\"; list them with /network joins"
+                )),
+            }
+        };
+        let request = self
+            .networkControl
+            .cancelDeviceSpaceJoin(request_id.clone())
+            .await?;
+        Ok(format!(
+            "network join request cancelled: {} ({})",
+            join_status_label(self.text(), &request.status),
+            request_id
+        ))
+    }
+
+    /// Opens the Y/N confirm popup for leaving the current device space, the
+    /// quick way out of tangled connection state. The leave itself only runs
+    /// on confirmation, and the popup quotes the space being exited.
+    async fn network_leave(&mut self) -> Result<(), String> {
+        let space = self.networkControl.deviceSpace()?;
+        let text = self.text();
+        let items = vec![
+            format!("{}: {}", text.network_leave_space_label(), space.spaceName),
+            format!("{}: {}", text.network_leave_members_label(), space.members.len()),
+            text.network_leave_warning().to_string(),
+        ];
+        self.open_list_popup(text.network_leave_title().to_string(), items);
+        self.leave_confirm_pending = true;
+        Ok(())
+    }
+
+    /// Resolves a `/network unpair|join` argument against paired devices:
+    /// exact node id, or a unique display-name match. Join additionally
+    /// requires the outbound authorization direction.
+    async fn resolve_paired_device_argument(
+        &self,
+        value: &str,
+        require_outbound: bool,
+    ) -> Result<(String, String), String> {
+        let peers = self.networkControl.pairedDevicesSnapshot()?;
+        let (device_id, peer) = match peers.get(value) {
+            Some(peer) => (value.to_string(), peer.clone()),
+            None => {
+                let matches = peers
+                    .iter()
+                    .filter(|(_, peer)| peer.deviceInfo.model == value)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [(device_id, peer)] => ((*device_id).clone(), (*peer).clone()),
+                    [] => {
+                        return Err(format!(
+                            "no paired device matches \"{value}\"; list them with /network peers"
+                        ))
+                    }
+                    _ => {
+                        return Err(format!(
+                            "paired device name is ambiguous: {value}; use the node id from /network peers"
+                        ))
+                    }
+                }
+            }
+        };
+        let label = paired_device_label(&device_id, &peer);
+        if require_outbound && !peer.outbound {
+            return Err(format!(
+                "network join requires an outbound pairing with {label}"
+            ));
+        }
+        Ok((device_id, label))
+    }
+
+    /// Resolves a `/network approve|reject` argument into the pending join
+    /// request id. Accepts the exact request id, device id, or applicant name;
+    /// ambiguous names are rejected so a decision never hits the wrong request.
+    async fn resolve_join_request_argument(&self, value: &str) -> Result<String, String> {
+        let requests = self.networkControl.incomingDeviceSpaceJoins().await?;
+        if requests.iter().any(|request| request.requestId == value) {
+            return Ok(value.to_string());
+        }
+        let matches = requests
+            .iter()
+            .filter(|request| {
+                request.applicantDeviceId == value || request.applicantName == value
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [request] => Ok(request.requestId.clone()),
+            [] => Err(format!(
+                "no pending join request matches \"{value}\"; list them with /network requests"
+            )),
+            _ => Err(format!(
+                "join request name is ambiguous: {value}; use the request id from /network requests"
+            )),
+        }
     }
 
     fn handle_language_command(&mut self, args: &[String]) -> Result<(), String> {
@@ -1381,23 +3001,1127 @@ impl OperitTui {
         }
     }
 
-    fn handle_approval_key(&mut self, key: KeyEvent) {
+    async fn handle_approval_key(&mut self, key: KeyEvent) {
+        let result = match key.code {
+            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => "allow",
+            KeyCode::Char('2') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => "deny",
+            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => "allow_session",
+            _ => return,
+        };
+        let Some(request) = self.current_tool_permission_requests.first().cloned() else {
+            return;
+        };
+        if let Err(error) = self
+            .core
+            .respondToolPermission(
+                request.chatId.clone(),
+                request.requestId.clone(),
+                result.to_string(),
+            )
+            .await
+        {
+            self.status_message = error;
+            return;
+        }
+        // The chat state watch confirms the removal; drop it locally so a
+        // second keypress cannot answer the same request twice.
+        self.current_tool_permission_requests.remove(0);
+        self.status_message = match result {
+            "allow" => self.text().tool_approved_once().to_string(),
+            "allow_session" => self.text().tool_approved_remembered().to_string(),
+            _ => self.text().tool_denied().to_string(),
+        };
+    }
+
+    /// Handles keys for the Space join decision popup. Y/N decide the
+    /// selected request in place, Up/Down move between queued requests, and
+    /// Esc defers everything - rejection has side effects for the applicant,
+    /// so only an explicit N rejects.
+    async fn handle_join_decision_key(&mut self, key: KeyEvent) -> Result<(), String> {
         match key.code {
-            KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.approval_bridge.respond(PermissionRequestResult::ALLOW);
-                self.status_message = self.text().tool_approved_once().to_string();
+            KeyCode::Up => {
+                if let Some(modal) = self.join_decision.as_mut() {
+                    modal.selected = modal.selected.saturating_sub(1);
+                }
             }
-            KeyCode::Char('2') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                self.approval_bridge.respond(PermissionRequestResult::DENY);
-                self.status_message = self.text().tool_denied().to_string();
+            KeyCode::Down => {
+                if let Some(modal) = self.join_decision.as_mut() {
+                    if modal.selected + 1 < modal.requests.len() {
+                        modal.selected += 1;
+                    }
+                }
             }
-            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.approval_bridge
-                    .respond(PermissionRequestResult::ALLOW_SESSION);
-                self.status_message = self.text().tool_approved_remembered().to_string();
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                self.decide_selected_join(true).await;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') => {
+                self.decide_selected_join(false).await;
+            }
+            KeyCode::Esc => {
+                self.join_decision = None;
+                self.status_message = self.text().network_join_decision_deferred().to_string();
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Decides the selected join request through the runtime link service.
+    /// Decision failures keep the popup open so the request can be retried;
+    /// success drops the request from the queue and closes the popup when
+    /// nothing remains.
+    async fn decide_selected_join(&mut self, approve: bool) {
+        let Some(modal) = self.join_decision.as_ref() else {
+            return;
+        };
+        let Some(request) = modal.requests.get(modal.selected) else {
+            self.join_decision = None;
+            return;
+        };
+        let request_id = request.requestId.clone();
+        let decision = self
+            .networkControl
+            .decideDeviceSpaceJoin(request_id.clone(), request.assignmentVersion, approve)
+            .await;
+        let modal = self.join_decision.as_mut().expect("join modal checked above");
+        match decision {
+            Ok(updated) => {
+                self.status_message = format!(
+                    "network join request {}: {:?}",
+                    updated.applicantName, updated.status
+                );
+                modal.requests.remove(modal.selected);
+                if modal.selected >= modal.requests.len() {
+                    modal.selected = modal.requests.len().saturating_sub(1);
+                }
+                if modal.requests.is_empty() {
+                    self.join_decision = None;
+                }
+            }
+            Err(error) => {
+                self.status_message = status_error_line(&error);
+                // A rejected decision usually means the assignment moved under
+                // the cached entry; re-pull so the retry targets the current
+                // version instead of failing forever.
+                if let Ok(fresh) = self.networkControl.incomingDeviceSpaceJoins().await {
+                    self.refresh_join_decision_modal(&fresh);
+                    let still_pending = self.join_decision.as_ref().is_some_and(|modal| {
+                        modal
+                            .requests
+                            .iter()
+                            .any(|request| request.requestId == request_id)
+                    });
+                    if !still_pending {
+                        self.status_message =
+                            self.text().network_join_decision_refreshed().to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens the device management window over a fresh control snapshot.
+    /// The window is keyboard-driven like the join decision modal; the
+    /// mouse overlay flag only keeps clicks from leaking into the
+    /// transcript underneath.
+    /// Lists accepted and rejected Space authorization commands.
+    async fn network_audit_popup(&mut self) -> Result<(), String> {
+        let audit = self.networkControl.deviceSpaceControlAudit()?;
+        let items = audit
+            .into_iter()
+            .map(|record| {
+                format!(
+                    "{} {}",
+                    if record.accepted {
+                        "accepted"
+                    } else {
+                        "rejected"
+                    },
+                    record.summary,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.open_list_popup("Network audit".to_string(), items);
+        Ok(())
+    }
+
+    /// Lists the current Space policy settings.
+    fn network_policy_popup(&mut self) -> Result<(), String> {
+        let items = self
+            .networkControl
+            .deviceSpaceControl()?
+            .policies
+            .into_iter()
+            .map(|(policyId, value)| format!("{policyId}={value}"))
+            .collect::<Vec<_>>();
+        self.open_list_popup("Network policies".to_string(), items);
+        Ok(())
+    }
+
+    /// Runs the read-only shared-Space doctor and lists its report, including
+    /// the reconciliation counters. Repair stays a CLI action
+    /// (`operit2 cli link doctor --repair`); the TUI only observes health.
+    fn network_doctor_popup(&mut self) -> Result<(), String> {
+        let report = space_diagnose(&self.networkControl, false)
+            .map_err(|error| format!("space diagnosis failed: {error}"))?;
+        let items = space_health_report_lines(self.text(), &report);
+        let title = self.text().network_doctor_title().to_string();
+        self.open_list_popup(title, items);
+        Ok(())
+    }
+
+    /// Opens the network hub: the persistent `/network` panel answering
+    /// who-this-node-is, what-is-waiting, and what-is-managed in one place.
+    async fn open_network_hub(&mut self) {
+        self.network_hub = Some(NetworkHubModal {
+            topology: RuntimeDeviceSpaceTopology {
+                currentDeviceId: String::new(),
+                devices: Vec::new(),
+                connections: Vec::new(),
+            },
+            spaceName: String::new(),
+            initialized: false,
+            listening: None,
+            paired: BTreeMap::new(),
+            prompts: Vec::new(),
+            outgoingJoins: Vec::new(),
+            blocked: BTreeSet::new(),
+            selected: 0,
+        });
+        self.refresh_network_hub();
+    }
+
+    /// Re-pulls every hub snapshot, keeping the selection on the same row.
+    fn refresh_network_hub(&mut self) {
+        let selected_id = self
+            .network_hub
+            .as_ref()
+            .map(|hub| {
+                network_hub_rows(&hub.topology, &hub.paired)
+                    .get(hub.selected)
+                    .map(|row| row.id().to_string())
+            })
+            .flatten();
+        let Ok(state) = self.networkControl.deviceSpaceControl() else {
+            return;
+        };
+        let Ok(topology) = self.networkControl.deviceSpaceTopology() else {
+            return;
+        };
+        let space_name = self.networkControl.deviceSpace().map(|space| space.spaceName);
+        let listening = self
+            .networkControl
+            .localHostConfig()
+            .ok()
+            .flatten()
+            .map(|config| {
+                format!(
+                    "{} · {}",
+                    config.bindAddress,
+                    config
+                        .transports
+                        .iter()
+                        .map(|transport| peer_transport_label(transport))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+        let Ok(paired) = self.networkControl.pairedDevicesSnapshot() else {
+            return;
+        };
+        let prompts = self.networkControl.pairingPrompts().unwrap_or_default();
+        let outgoing_joins = self
+            .networkControl
+            .outgoingDeviceSpaceJoins()
+            .unwrap_or_default();
+        let Some(hub) = self.network_hub.as_mut() else {
+            return;
+        };
+        hub.initialized = state.initialized;
+        hub.blocked = state.disconnectedNodeIds;
+        hub.topology = topology;
+        if let Ok(name) = space_name {
+            hub.spaceName = name;
+        }
+        hub.listening = listening;
+        hub.paired = paired;
+        hub.prompts = prompts;
+        hub.outgoingJoins = outgoing_joins;
+        let rows = network_hub_rows(&hub.topology, &hub.paired);
+        if let Some(selected_id) = selected_id {
+            if let Some(position) = rows.iter().position(|row| row.id() == selected_id) {
+                hub.selected = position;
+            }
+        }
+        hub.selected = hub.selected.min(rows.len().saturating_sub(1));
+    }
+
+    /// Routes keys inside the network hub: rows select with Up/Down, Enter
+    /// manages members and joins paired peers, single letters open flows.
+    async fn handle_network_hub_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let row_count = self
+            .network_hub
+            .as_ref()
+            .map(|hub| network_hub_rows(&hub.topology, &hub.paired).len())
+            .unwrap_or(0);
+        let selected_row = self.network_hub.as_ref().and_then(|hub| {
+            network_hub_rows(&hub.topology, &hub.paired)
+                .into_iter()
+                .nth(hub.selected)
+        });
+        match key.code {
+            KeyCode::Up => {
+                if let Some(hub) = self.network_hub.as_mut() {
+                    hub.selected = hub.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(hub) = self.network_hub.as_mut() {
+                    if hub.selected + 1 < row_count {
+                        hub.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('j') | KeyCode::Char('J') => {
+                match selected_row {
+                    Some(NetworkHubRow::Member(device)) if key.code == KeyCode::Enter => {
+                        // The local device never offers management actions, so
+                        // opening the manager on it would be a dead window.
+                        let is_self = self
+                            .network_hub
+                            .as_ref()
+                            .is_some_and(|hub| hub.topology.currentDeviceId == device.deviceId);
+                        if is_self {
+                            self.set_transient_status_message(
+                                self.text().network_hub_self_no_actions().to_string(),
+                            );
+                        } else {
+                            self.open_device_manager_for(&device.deviceId).await;
+                        }
+                    }
+                    Some(NetworkHubRow::Peer { deviceId, label, .. }) => {
+                        // A rejected join is ordinary peer feedback; it must
+                        // never tear down the TUI loop.
+                        match self.network_join_target(&deviceId, &label).await {
+                            Ok(message) => self.status_message = message,
+                            Err(error) => self.status_message = status_error_line(&error),
+                        }
+                    }
+                    Some(NetworkHubRow::Member(device)) => {
+                        self.status_message = format!(
+                            "{} ({}) is already a member of this space",
+                            device.deviceName, device.deviceId
+                        );
+                    }
+                    None => {}
+                }
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                if let Some(NetworkHubRow::Peer { deviceId, label, .. }) = selected_row {
+                    self.network_unpair_confirm(&deviceId, &label);
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers.is_empty() => {
+                self.open_pair_wizard(String::new(), 0, String::new(), false, None);
+            }
+            KeyCode::Char('P') => {
+                if let Err(error) = self.network_policy_popup() {
+                    self.status_message = error;
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.start_peer_discovery();
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                if let Err(error) = self.network_leave().await {
+                    self.status_message = status_error_line(&error);
+                }
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                match self.networkControl.localPairingToken() {
+                    Ok(token) => {
+                        self.open_list_popup(
+                            self.text().network_token_title().to_string(),
+                            vec![token],
+                        );
+                    }
+                    Err(error) => self.status_message = error,
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if let Err(error) = self.network_audit_popup().await {
+                    self.status_message = error;
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                if let Err(error) = self.network_doctor_popup() {
+                    self.status_message = error;
+                }
+            }
+            KeyCode::Esc => {
+                self.network_hub = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Opens the pairing wizard. `autostart` immediately dials the address -
+    /// the wizard then lands on code entry, which is the only step left.
+    /// `expected` binds the handshake to a known node id and shows it while
+    /// dialing, which is how the device window pairs one specific member.
+    fn open_pair_wizard(
+        &mut self,
+        address: String,
+        transport_index: usize,
+        token: String,
+        autostart: bool,
+        expected: Option<(String, String)>,
+    ) {
+        let (expectedNode, expectedLabel) = match expected {
+            Some((node_id, label)) => (Some(node_id), Some(label)),
+            None => (None, None),
+        };
+        self.pair_wizard = Some(PairWizardModal {
+            stage: if autostart { PairStage::Code } else { PairStage::Address },
+            field: PairField::Address,
+            address,
+            transportIndex: transport_index.min(PAIR_WIZARD_TRANSPORTS.len() - 1),
+            token,
+            expectedNode,
+            expectedLabel,
+            pairing: None,
+            code: String::new(),
+            peer: None,
+            error: None,
+        });
+        self.network_hub = None;
+    }
+
+    /// Dials the wizard's address form and advances to code entry. The
+    /// pending pairing is remembered app-level so Esc never loses it.
+    async fn pair_wizard_start(&mut self) {
+        let Some(wizard) = self.pair_wizard.as_ref() else {
+            return;
+        };
+        if wizard.address.trim().is_empty() {
+            let message = self.text().network_pair_wizard_address_required().to_string();
+            if let Some(wizard) = self.pair_wizard.as_mut() {
+                wizard.error = Some(message);
+            }
+            return;
+        }
+        let address = wizard.address.trim().to_string();
+        let transport = PAIR_WIZARD_TRANSPORTS[wizard.transportIndex];
+        let token = if wizard.token.trim().is_empty() {
+            None
+        } else {
+            Some(wizard.token.trim().to_string())
+        };
+        let expectedNode = wizard.expectedNode.clone().unwrap_or_default();
+        match self
+            .networkControl
+            .startPairing(expectedNode, address, transport, token)
+            .await
+        {
+            Ok(pending) => {
+                if let Some(wizard) = self.pair_wizard.as_mut() {
+                    wizard.stage = PairStage::Code;
+                    wizard.pairing = Some(pending.clone());
+                    wizard.code.clear();
+                    wizard.error = None;
+                }
+                self.pending_pairings.push(pending);
+            }
+            Err(error) => {
+                if let Some(wizard) = self.pair_wizard.as_mut() {
+                    wizard.stage = PairStage::Address;
+                    wizard.error = Some(error);
+                }
+            }
+        }
+    }
+
+    /// Submits the six-digit code for the wizard's pending pairing. Failure
+    /// keeps the code stage open for a retry, exactly like the command path.
+    async fn pair_wizard_confirm(&mut self) {
+        let (pairing_id, code) = match self.pair_wizard.as_ref() {
+            Some(wizard) => match &wizard.pairing {
+                Some(pending) => (pending.pairingId.clone(), wizard.code.clone()),
+                None => return,
+            },
+            None => return,
+        };
+        if code.len() != 6 {
+            let message = self.text().network_pair_wizard_code_invalid().to_string();
+            if let Some(wizard) = self.pair_wizard.as_mut() {
+                wizard.error = Some(message);
+            }
+            return;
+        }
+        match self
+            .networkControl
+            .finishPairing(pairing_id.clone(), code)
+            .await
+        {
+            Ok(peer) => {
+                self.pending_pairings
+                    .retain(|pending| pending.pairingId != pairing_id);
+                // An admitted member needs only the direct link: the join
+                // submission would be rejected as a duplicate membership.
+                if self.network_peer_is_member(&peer.nodeId) {
+                    self.pair_wizard = None;
+                    self.set_transient_status_message(
+                        self.text()
+                            .network_direct_link_established(&paired_peer_label(&peer)),
+                    );
+                    return;
+                }
+                if let Some(wizard) = self.pair_wizard.as_mut() {
+                    wizard.stage = PairStage::JoinOffer;
+                    wizard.peer = Some(peer);
+                    wizard.error = None;
+                }
+            }
+            Err(error) => {
+                if let Some(wizard) = self.pair_wizard.as_mut() {
+                    wizard.error = Some(error);
+                }
+            }
+        }
+    }
+
+    /// Sends the join request for the freshly paired peer and closes the
+    /// wizard; the background refresher reports the reviewer's decision.
+    async fn pair_wizard_join(&mut self) {
+        let Some(peer) = self.pair_wizard.as_ref().and_then(|wizard| wizard.peer.clone()) else {
+            return;
+        };
+        let label = paired_peer_label(&peer);
+        let result = self.network_join_target(&peer.nodeId, &label).await;
+        self.pair_wizard = None;
+        match result {
+            Ok(message) => self.set_transient_status_message(message),
+            Err(error) => self.status_message = error,
+        }
+    }
+
+    /// Routes keys inside the pairing wizard by stage.
+    async fn handle_pair_wizard_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let stage = self
+            .pair_wizard
+            .as_ref()
+            .map(|wizard| wizard.stage)
+            .unwrap_or(PairStage::Address);
+        match stage {
+            PairStage::Address => {
+                let field = self
+                    .pair_wizard
+                    .as_ref()
+                    .map(|wizard| wizard.field)
+                    .unwrap_or(PairField::Address);
+                match (key.code, field) {
+                    (KeyCode::Esc, _) => self.pair_wizard = None,
+                    (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+                        if let Some(wizard) = self.pair_wizard.as_mut() {
+                            wizard.field = match wizard.field {
+                                PairField::Address => PairField::Transport,
+                                PairField::Transport => PairField::Token,
+                                PairField::Token => PairField::Address,
+                            };
+                            wizard.error = None;
+                        }
+                    }
+                    (KeyCode::Left, PairField::Transport) => self.cycle_pair_transport(false),
+                    (KeyCode::Right, PairField::Transport) => self.cycle_pair_transport(true),
+                    (KeyCode::Enter, _) => self.pair_wizard_start().await,
+                    (KeyCode::Backspace, PairField::Address | PairField::Token) => {
+                        if let Some(wizard) = self.pair_wizard.as_mut() {
+                            match wizard.field {
+                                PairField::Address => {
+                                    wizard.address.pop();
+                                }
+                                PairField::Token => {
+                                    wizard.token.pop();
+                                }
+                                PairField::Transport => {}
+                            }
+                        }
+                    }
+                    (
+                        KeyCode::Char(ch),
+                        PairField::Address | PairField::Token,
+                    ) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                        if let Some(wizard) = self.pair_wizard.as_mut() {
+                            match wizard.field {
+                                PairField::Address => wizard.address.push(ch),
+                                PairField::Token => wizard.token.push(ch),
+                                PairField::Transport => {}
+                            }
+                            wizard.error = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            PairStage::Code => match key.code {
+                KeyCode::Esc => self.pair_wizard = None,
+                KeyCode::Backspace => {
+                    if let Some(wizard) = self.pair_wizard.as_mut() {
+                        wizard.code.pop();
+                    }
+                }
+                KeyCode::Char(ch) => {
+                    if let Some(wizard) = self.pair_wizard.as_mut() {
+                        wizard.code = pair_code_push(&wizard.code, ch);
+                        wizard.error = None;
+                    }
+                }
+                KeyCode::Enter => self.pair_wizard_confirm().await,
+                _ => {}
+            },
+            PairStage::JoinOffer => match key.code {
+                KeyCode::Enter => self.pair_wizard_join().await,
+                KeyCode::Esc => self.pair_wizard = None,
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    /// Cycles the wizard transport selector; Tab walks fields while the
+    /// arrows walk transports, so one hand never leaves the home row.
+    fn cycle_pair_transport(&mut self, forward: bool) {
+        let Some(wizard) = self.pair_wizard.as_mut() else {
+            return;
+        };
+        let len = PAIR_WIZARD_TRANSPORTS.len();
+        wizard.transportIndex = if forward {
+            (wizard.transportIndex + 1) % len
+        } else {
+            (wizard.transportIndex + len - 1) % len
+        };
+    }
+
+    /// Starts a background LAN scan; the selectable candidate list opens from
+    /// its result event (Enter pairs with the selection). A scan blocks for its
+    /// whole timeout, so it never runs on the terminal loop; pressing `d` again
+    /// while one is in flight only re-states the status.
+    fn start_peer_discovery(&mut self) {
+        if !self.discover_in_flight {
+            self.discover_in_flight = true;
+            spawn_peer_discovery(self.networkControl.clone(), self.network_event_sender.clone());
+        }
+        self.set_transient_status_message(self.text().network_discover_running().to_string());
+    }
+
+    /// Feeds the discovery candidate under the popup cursor into the wizard
+    /// and dials it right away - selecting a device is already consent.
+    async fn start_pair_wizard_from_discovery(&mut self) {
+        let selected = self
+            .list_popup_filtered_indices
+            .get(self.list_popup_selected_index)
+            .copied();
+        let candidate = selected.and_then(|index| self.discovered_peers.get(index).cloned());
+        self.close_list_popup();
+        self.discover_select_pending = false;
+        let Some(candidate) = candidate else {
+            return;
+        };
+        let transport_index = PAIR_WIZARD_TRANSPORTS
+            .iter()
+            .position(|transport| matches!(transport, PeerTransport::Tcp))
+            .unwrap_or(2);
+        // The candidate carries its node id, so the handshake binds to it.
+        self.open_pair_wizard(
+            candidate.address.clone(),
+            transport_index,
+            String::new(),
+            false,
+            Some((candidate.nodeId.clone(), candidate.displayName.clone())),
+        );
+        self.pair_wizard_start().await;
+    }
+
+    /// Opens the device manager focused on one device and jumps straight
+    /// into its action menu: the hub row already was the selection step.
+    async fn open_device_manager_for(&mut self, device_id: &str) {
+        self.open_device_manager().await;
+        let Some(modal) = self.device_manager.as_mut() else {
+            return;
+        };
+        let Some(position) = modal.rows().iter().position(|row| row.id() == device_id) else {
+            return;
+        };
+        modal.selected = position;
+        // Mirror the browse-Enter rule: no applicable action (the local
+        // device with no roles defined) means no menu to open.
+        if !modal.menu_actions(device_id).is_empty() {
+            modal.mode = DeviceManagerMode::ActionMenu;
+            modal.menu_device_id = Some(device_id.to_string());
+            modal.menu_index = 0;
+        }
+    }
+
+    async fn open_device_manager(&mut self) {
+        let state = match self.networkControl.deviceSpaceControl() {
+            Ok(state) => state,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        let topology = match self.networkControl.deviceSpaceTopology() {
+            Ok(topology) => topology,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        let requests = self
+            .networkControl
+            .incomingDeviceSpaceJoins()
+            .await
+            .unwrap_or_default();
+        self.device_manager = Some(DeviceManagerModal {
+            initialized: state.initialized,
+            topology,
+            blocked: state.disconnectedNodeIds,
+            paired: self.paired_device_ids(),
+            requests: requests
+                .into_iter()
+                .filter(|request| request.canApprove)
+                .collect(),
+            roles: state.roles,
+            selected: 0,
+            mode: DeviceManagerMode::Browsing,
+            menu_device_id: None,
+            menu_index: 0,
+        });
+    }
+
+    /// Node ids this device currently holds a pairing (edge) for.
+    fn paired_device_ids(&self) -> BTreeSet<String> {
+        self.networkControl
+            .pairedDevicesSnapshot()
+            .map(|snapshot| snapshot.into_keys().collect())
+            .unwrap_or_default()
+    }
+
+    /// Reports whether one device is already a member of the local Space.
+    ///
+    /// Membership is the join contract's own criterion: a request from an
+    /// admitted device is rejected as a duplicate, so the pairing flows must
+    /// not offer that join step.
+    fn network_peer_is_member(&self, device_id: &str) -> bool {
+        self.networkControl
+            .deviceSpace()
+            .map(|space| space.members.iter().any(|member| member == device_id))
+            .unwrap_or(false)
+    }
+
+    /// Opens the pairing wizard for one device picked in the device window.
+    ///
+    /// Pairing leads the device menu because it is the only link-layer action:
+    /// the expected node id binds the handshake, and an admitted device needs
+    /// no join afterwards.
+    async fn network_pair_device(&mut self, device: &str) -> Result<String, String> {
+        let topology = self.networkControl.deviceSpaceTopology()?;
+        let device_id = network_device_id(&topology, device)?;
+        let device_label = network_device_label_by_id(&topology, &device_id)?;
+        self.open_pair_wizard(
+            String::new(),
+            0,
+            String::new(),
+            false,
+            Some((device_id, device_label.clone())),
+        );
+        Ok(self.text().network_pair_device_hint(&device_label))
+    }
+
+    /// Re-pulls the control snapshot into an open device window, keeping
+    /// the selection on the same row identity. A device whose action menu
+    /// is open disappears from the topology, the window drops back to
+    /// browsing instead of managing a ghost row.
+    async fn refresh_device_manager_snapshot(&mut self) {
+        let requests = self
+            .networkControl
+            .incomingDeviceSpaceJoins()
+            .await
+            .unwrap_or_default();
+        self.apply_device_manager_snapshot(requests);
+    }
+
+    fn apply_device_manager_snapshot(&mut self, requests: Vec<SpaceJoinRequest>) {
+        let selected_id = self
+            .device_manager
+            .as_ref()
+            .and_then(|modal| modal.selected_row())
+            .map(|row| row.id().to_string());
+        let Ok(state) = self.networkControl.deviceSpaceControl() else {
+            return;
+        };
+        let Ok(topology) = self.networkControl.deviceSpaceTopology() else {
+            return;
+        };
+        let paired = self.paired_device_ids();
+        let Some(modal) = self.device_manager.as_mut() else {
+            return;
+        };
+        modal.initialized = state.initialized;
+        modal.blocked = state.disconnectedNodeIds;
+        modal.paired = paired;
+        modal.roles = state.roles;
+        modal.topology = topology;
+        modal.requests = requests
+            .into_iter()
+            .filter(|request| request.canApprove)
+            .collect();
+        if let Some(menu_device_id) = modal.menu_device_id.clone() {
+            if !modal
+                .topology
+                .devices
+                .iter()
+                .any(|device| device.deviceId == menu_device_id)
+            {
+                modal.mode = DeviceManagerMode::Browsing;
+                modal.menu_device_id = None;
+                modal.menu_index = 0;
+            }
+        }
+        if let Some(selected_id) = selected_id {
+            if let Some(position) = modal
+                .rows()
+                .iter()
+                .position(|row| row.id() == selected_id)
+            {
+                modal.selected = position;
+            }
+        }
+        modal.selected = modal.selected.min(modal.rows().len().saturating_sub(1));
+    }
+
+    /// Routes keys inside the device management window by mode.
+    async fn handle_device_manager_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let mode = self
+            .device_manager
+            .as_ref()
+            .expect("device window checked above")
+            .mode;
+        match mode {
+            DeviceManagerMode::Browsing => self.handle_device_manager_browse_key(key).await,
+            DeviceManagerMode::ActionMenu => self.handle_device_manager_menu_key(key).await,
+            DeviceManagerMode::ConfirmRemove => self.handle_device_manager_confirm_key(key).await,
+            DeviceManagerMode::ConfirmUnpair => {
+                self.handle_device_manager_confirm_unpair_key(key).await
+            }
+            DeviceManagerMode::AssignIdentity => self.handle_device_manager_assign_key(key).await,
+        }
+    }
+
+    async fn handle_device_manager_browse_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let row_count = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.rows().len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.selected = modal.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.selected + 1 < row_count {
+                        modal.selected += 1;
+                    }
+                }
+            }
+            // Only offered while the Space control is uninitialized; boot-
+            // strapping an initialized Space again is the slash command's job.
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                let initialized = self
+                    .device_manager
+                    .as_ref()
+                    .is_some_and(|modal| modal.initialized);
+                if !initialized {
+                    match self.networkControl.bootstrapDeviceSpaceControl() {
+                        Ok(_) => self.refresh_device_manager_snapshot().await,
+                        Err(error) => self.status_message = error,
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some(row) = self
+                    .device_manager
+                    .as_ref()
+                    .and_then(|modal| modal.selected_row())
+                else {
+                    return Ok(());
+                };
+                match row {
+                    DeviceManagerRow::Request(request) => {
+                        self.open_join_decision_modal(vec![request]);
+                        if self.join_decision.is_none() {
+                            self.status_message = self.text().network_requests_none().to_string();
+                        }
+                    }
+                    DeviceManagerRow::Device(device) => {
+                        // A device without any applicable action (the local
+                        // device with no roles defined) must not open an
+                        // empty, unhighlightable menu.
+                        if self
+                            .device_manager
+                            .as_ref()
+                            .is_some_and(|modal| !modal.menu_actions(&device.deviceId).is_empty())
+                        {
+                            if let Some(modal) = self.device_manager.as_mut() {
+                                modal.mode = DeviceManagerMode::ActionMenu;
+                                modal.menu_device_id = Some(device.deviceId.clone());
+                                modal.menu_index = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.device_manager = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_device_manager_menu_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let Some((device_id, actions)) = self.device_manager.as_ref().and_then(|modal| {
+            let device_id = modal.menu_device_id.clone()?;
+            let actions = modal.menu_actions(&device_id);
+            Some((device_id, actions))
+        }) else {
+            return Ok(());
+        };
+        let menu_index = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.menu_index)
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.menu_index = modal.menu_index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.menu_index + 1 < actions.len() {
+                        modal.menu_index += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some(action) = actions.get(menu_index).copied() else {
+                    return Ok(());
+                };
+                if action == DeviceManagerAction::AssignIdentity {
+                    if let Some(modal) = self.device_manager.as_mut() {
+                        modal.mode = DeviceManagerMode::AssignIdentity;
+                        modal.menu_index = 0;
+                    }
+                    return Ok(());
+                }
+                // Removal is destructive and irreversible; everything else
+                // runs immediately.
+                if action == DeviceManagerAction::Remove {
+                    if let Some(modal) = self.device_manager.as_mut() {
+                        modal.mode = DeviceManagerMode::ConfirmRemove;
+                        modal.menu_index = 0;
+                    }
+                    return Ok(());
+                }
+                // Unpairing severs the link the same way the hub's `u` does, so
+                // both paths ask for the same explicit Y.
+                if action == DeviceManagerAction::Unpair {
+                    if let Some(modal) = self.device_manager.as_mut() {
+                        modal.mode = DeviceManagerMode::ConfirmUnpair;
+                        modal.menu_index = 0;
+                    }
+                    return Ok(());
+                }
+                self.run_device_manager_action(&device_id, action).await;
+            }
+            KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Removal is the only destructive action, so it keeps the join
+    /// decision modal's "no side effects on a stray key" rule: only an
+    /// explicit Y removes.
+    async fn handle_device_manager_confirm_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let Some(device_id) = self
+            .device_manager
+            .as_ref()
+            .and_then(|modal| modal.menu_device_id.clone())
+        else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                self.run_device_manager_action(&device_id, DeviceManagerAction::Remove)
+                    .await;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Y/N confirm for unpairing from the device window: the same explicit Y
+    /// the hub's `u` shortcut requires, so neither path severs a pairing on a
+    /// stray key.
+    async fn handle_device_manager_confirm_unpair_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Result<(), String> {
+        let Some(device_id) = self
+            .device_manager
+            .as_ref()
+            .and_then(|modal| modal.menu_device_id.clone())
+        else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                self.run_device_manager_action(&device_id, DeviceManagerAction::Unpair)
+                    .await;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_device_manager_assign_key(&mut self, key: KeyEvent) -> Result<(), String> {
+        let role_count = self
+            .device_manager
+            .as_ref()
+            .map(|modal| modal.sorted_roles().len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.menu_index = modal.menu_index.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    if modal.menu_index + 1 < role_count {
+                        modal.menu_index += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let Some((device_id, role_id)) = self.device_manager.as_ref().and_then(|modal| {
+                    let device_id = modal.menu_device_id.clone()?;
+                    modal
+                        .sorted_roles()
+                        .get(modal.menu_index)
+                        .map(|role| (device_id, role.roleId.clone()))
+                }) else {
+                    return Ok(());
+                };
+                self.run_device_manager_assign(&device_id, &role_id).await;
+            }
+            KeyCode::Esc => {
+                if let Some(modal) = self.device_manager.as_mut() {
+                    modal.mode = DeviceManagerMode::Browsing;
+                    modal.menu_device_id = None;
+                    modal.menu_index = 0;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Runs one confirmed device action through the shared action layer.
+    /// Failures keep the window open so the action can be retried. The
+    /// admit feedback deliberately avoids promising a reconnection: admit
+    /// only lifts the policy restriction, the link returns on its own.
+    async fn run_device_manager_action(&mut self, device_id: &str, action: DeviceManagerAction) {
+        let result = match action {
+            DeviceManagerAction::Pair => self.network_pair_device(device_id).await,
+            DeviceManagerAction::Admit => self.network_admit_device(device_id).await,
+            DeviceManagerAction::Disconnect => self.network_disconnect_device(device_id).await,
+            DeviceManagerAction::Unpair => self.network_unpair(device_id).await,
+            DeviceManagerAction::Remove => self.network_remove_device(device_id).await,
+            DeviceManagerAction::ClearIdentity => {
+                self.network_clear_device_identity(device_id).await
+            }
+            DeviceManagerAction::AssignIdentity => return,
+        };
+        if let Some(modal) = self.device_manager.as_mut() {
+            modal.mode = DeviceManagerMode::Browsing;
+            modal.menu_device_id = None;
+            modal.menu_index = 0;
+        }
+        match result {
+            Ok(message) => {
+                self.status_message = if action == DeviceManagerAction::Admit {
+                    let label = self
+                        .device_manager
+                        .as_ref()
+                        .and_then(|modal| {
+                            modal
+                                .topology
+                                .devices
+                                .iter()
+                                .find(|device| device.deviceId == device_id)
+                        })
+                        .map(|device| device.deviceName.clone())
+                        .unwrap_or_else(|| device_id.to_string());
+                    self.text().network_devices_admitted(&label)
+                } else {
+                    message
+                };
+            }
+            Err(error) => self.status_message = error,
+        }
+        self.refresh_device_manager_snapshot().await;
+    }
+
+    async fn run_device_manager_assign(&mut self, device_id: &str, role_id: &str) {
+        let result = self.network_assign_identity(device_id, role_id).await;
+        if let Some(modal) = self.device_manager.as_mut() {
+            modal.mode = DeviceManagerMode::Browsing;
+            modal.menu_device_id = None;
+            modal.menu_index = 0;
+        }
+        match result {
+            Ok(message) => self.status_message = message,
+            Err(error) => self.status_message = error,
+        }
+        self.refresh_device_manager_snapshot().await;
     }
 
     async fn handle_approval_command(&mut self, args: &[String]) -> Result<(), String> {
@@ -1576,6 +4300,9 @@ impl OperitTui {
         self.list_popup_selected_index = 0;
         self.update_list_popup_filter();
         self.show_list_popup = true;
+        self.leave_confirm_pending = false;
+        self.unpair_confirm = None;
+        self.discover_select_pending = false;
         self.focus = FocusArea::Input;
     }
 
@@ -1586,6 +4313,9 @@ impl OperitTui {
         self.list_popup_search.clear();
         self.list_popup_filtered_indices.clear();
         self.list_popup_selected_index = 0;
+        self.leave_confirm_pending = false;
+        self.unpair_confirm = None;
+        self.discover_select_pending = false;
     }
 
     fn update_list_popup_filter(&mut self) {
@@ -1604,6 +4334,71 @@ impl OperitTui {
         if self.list_popup_selected_index >= self.list_popup_filtered_indices.len() {
             self.list_popup_selected_index =
                 self.list_popup_filtered_indices.len().saturating_sub(1);
+        }
+    }
+
+    /// Y/N confirm for `/network leave`: Y leaves the current device space,
+    /// N/Esc cancels; every other key is consumed so the warning cannot be
+    /// searched or Enter-closed into an accidental state.
+    async fn handle_leave_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.leave_confirm_pending = false;
+                self.close_list_popup();
+                match self.networkControl.leaveDeviceSpace() {
+                    Ok(space) => {
+                        self.set_transient_status_message(
+                            self.text().network_leave_done(&space.spaceName),
+                        );
+                        // Re-seed the network snapshots for the new singleton
+                        // space so ids from the old one cannot replay.
+                        self.refresh_network_snapshots().await;
+                    }
+                    Err(error) => self.status_message = error,
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.leave_confirm_pending = false;
+                self.close_list_popup();
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the Y/N confirm for unpairing a peer from the hub: one stray key
+    /// must never sever a pairing, so removal waits for an explicit Y.
+    fn network_unpair_confirm(&mut self, device_id: &str, label: &str) {
+        let text = self.text();
+        let items = vec![
+            format!("{}: {}", text.network_unpair_device_label(), label),
+            text.network_unpair_warning(label),
+        ];
+        self.open_list_popup(text.network_unpair_title().to_string(), items);
+        self.unpair_confirm = Some((device_id.to_string(), label.to_string()));
+    }
+
+    /// Y/N confirm for the hub's `u`: Y removes the pairing, N/Esc cancels;
+    /// every other key is consumed so it cannot reach the hub underneath.
+    async fn handle_unpair_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let Some((device_id, label)) = self.unpair_confirm.take() else {
+                    return;
+                };
+                self.close_list_popup();
+                match self.networkControl.removePairedDevice(device_id).await {
+                    Ok(()) => self.set_transient_status_message(
+                        self.text().network_unpair_done(&label),
+                    ),
+                    Err(error) => self.status_message = status_error_line(&error),
+                }
+                self.refresh_network_hub();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.unpair_confirm = None;
+                self.close_list_popup();
+            }
+            _ => {}
         }
     }
 
@@ -1761,38 +4556,6 @@ impl OperitTui {
         Ok(())
     }
 
-    async fn toggle_max_context_mode(&mut self) -> Result<(), String> {
-        let model_ref = self.editable_chat_model_ref().await?;
-        let current = self
-            .core
-            .preferences_model_config_manager()
-            .getResolvedModelConfig(&model_ref.provider_id, &model_ref.model_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut context = current.context;
-        context.enableMaxContextMode = !context.enableMaxContextMode;
-        let updated = self
-            .core
-            .preferences_model_config_manager()
-            .updateContextForModel(&model_ref.provider_id, &model_ref.model_id, context.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        let updated_context = updated
-            .contextOverride
-            .ok_or_else(|| format!("model context not saved: {}", model_ref.model_id))?;
-        let effective_context_length = if updated_context.enableMaxContextMode {
-            updated_context.maxContextLength
-        } else {
-            updated_context.maxContextLength * 0.4
-        };
-        self.status_message = self.text().context_model_status(
-            &model_ref.model_id,
-            &format_context_length(effective_context_length),
-        );
-        self.refresh_context_usage_label().await;
-        Ok(())
-    }
-
     async fn create_new_chat(&mut self, shell_args: ShellArgs) -> Result<(), String> {
         if self.current_chat_is_loading() {
             self.status_message = self.text().wait_for_current_request().to_string();
@@ -1930,6 +4693,7 @@ impl OperitTui {
             .currentWindowSizeFlowSnapshot()
             .await
             .map_err(|error| error.to_string())?;
+        self.route_permission_error = None;
         Ok(())
     }
 
@@ -1984,10 +4748,11 @@ impl OperitTui {
         self.apply_full_update_download_events();
         let mut should_refresh_messages = false;
         let mut should_sync_content_streams = false;
-        for event in self.core.drainEvents() {
+        let drainedEvents = self.core.drainEvents();
+        for event in drainedEvents {
             match event.propertyName.as_str() {
                 "currentChatIdFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<Option<String>>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<Option<String>>(&event)? {
                         if self.current_chat_id_cache != value {
                             self.current_chat_id_cache = value;
                             should_refresh_messages = true;
@@ -1996,9 +4761,42 @@ impl OperitTui {
                 }
                 "chatMessagesFlow" => {
                     if self.core.isActiveMainChatMessagesEvent(&event) {
-                        if let Ok(value) =
-                            operit_link::fromCoreValue::<Vec<ChatMessage>>(event.value)
+                        if let Some(value) =
+                            self.core.decodeStateFlowEvent::<Vec<ChatMessage>>(&event)?
                         {
+                            let streamIds = value
+                                .iter()
+                                .filter_map(|message| {
+                                    message
+                                        .contentStream
+                                        .as_ref()
+                                        .map(|stream| stream.descriptor.streamId.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            let last = value.last().map(|message| {
+                                format!(
+                                    "ts={} sender={} chars={} stream={}",
+                                    message.timestamp,
+                                    message.sender,
+                                    message.displayText().chars().count(),
+                                    message
+                                        .contentStream
+                                        .as_ref()
+                                        .map(|stream| stream.descriptor.streamId.as_str())
+                                        .unwrap_or("none")
+                                )
+                            });
+                            AppLogger::trace(
+                                "TuiStreamTrace",
+                                &format!(
+                                    "messages_watch.applied requestId={} eventKind={:?} messages={} streams={} last={}",
+                                    event.requestId.as_ref().map(|id| id.0.as_str()).unwrap_or("none"),
+                                    event.kind,
+                                    value.len(),
+                                    streamIds.join(","),
+                                    last.as_deref().unwrap_or("none")
+                                ),
+                            );
                             self.current_messages_cache = value;
                             self.apply_existing_content_stream_parts_to_cache();
                             should_sync_content_streams = true;
@@ -2007,13 +4805,13 @@ impl OperitTui {
                 }
                 "chatStateFlow" => {
                     if self.core.isActiveMainChatStateEvent(&event) {
-                        if let Ok(value) = operit_link::fromCoreValue::<ChatState>(event.value) {
+                        if let Some(value) = self.core.decodeStateFlowEvent::<ChatState>(&event)? {
                             self.apply_chat_state(value);
                         }
                     }
                 }
                 "chatHistoriesFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<Vec<ChatHistory>>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<Vec<ChatHistory>>(&event)? {
                         self.chats = chat_histories_to_list(value);
                         if let Some(chat_id) = self.current_chat_id_cache.clone() {
                             self.select_chat_by_id(&chat_id);
@@ -2021,7 +4819,7 @@ impl OperitTui {
                     }
                 }
                 "currentWindowSizeFlow" => {
-                    if let Ok(value) = operit_link::fromCoreValue::<i64>(event.value) {
+                    if let Some(value) = self.core.decodeStateFlowEvent::<i64>(&event)? {
                         self.current_window_size_cache = value;
                     }
                 }
@@ -2063,10 +4861,22 @@ impl OperitTui {
     ) -> Result<(), String> {
         let markdown: MarkdownStreamEvent =
             operit_link::fromCoreValue(event.value).map_err(|error| error.to_string())?;
+        let eventKind = event.kind.clone();
+        let streamId = info.streamId.clone();
+        let messageTimestamp = info.messageTimestamp;
+        let traceFingerprint = if tui_sync_trace_enabled() {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&serde_json::to_vec(&markdown).map_err(|error| error.to_string())?, &mut hash);
+            Some(std::hash::Hasher::finish(&hash))
+        } else {
+            None
+        };
         let state = self
             .content_stream_states
-            .entry(info.streamId)
+            .entry(streamId.clone())
             .or_insert_with(TuiMessageContentStreamState::new);
+        state.eventCount += 1;
+        let eventSequence = state.eventCount;
         let parts = match markdown.eventType.as_str() {
             "reset" => {
                 state.reset();
@@ -2094,8 +4904,29 @@ impl OperitTui {
             "completed" => Some(state.finish()?),
             _ => None,
         };
+        let partCount = parts.as_ref().map(Vec::len);
         if let Some(parts) = parts {
-            self.update_cached_content_stream_message(info.messageTimestamp, parts);
+            self.update_cached_content_stream_message(messageTimestamp, parts);
+        }
+        if let Some(fingerprint) = traceFingerprint {
+            AppLogger::trace("TuiSyncMeasure", &format!(
+                "event.applied streamId={} sequence={} fingerprint={:016x} eventType={}",
+                streamId, eventSequence, fingerprint, markdown.eventType
+            ));
+        }
+        if is_content_stream_boundary_event(&markdown.eventType) {
+            AppLogger::trace(
+                "TuiStreamTrace",
+                &format!(
+                    "content_event.applied streamId={} messageTimestamp={} kind={:?} eventType={} resultingParts={} cachedMessages={}",
+                    streamId,
+                    messageTimestamp,
+                    eventKind,
+                    markdown.eventType,
+                    partCount.map(|count| count.to_string()).unwrap_or_else(|| "unchanged".to_string()),
+                    self.current_messages_cache.len()
+                ),
+            );
         }
         Ok(())
     }
@@ -2132,6 +4963,7 @@ impl OperitTui {
     fn apply_chat_state(&mut self, state: ChatState) {
         self.current_chat_is_loading_cache = state.isLoading;
         self.current_chat_input_processing_state_cache = state.inputProcessingState;
+        self.current_tool_permission_requests = state.toolPermissionRequests;
     }
 
     fn apply_startup_install_events(&mut self) {
@@ -2290,12 +5122,66 @@ impl OperitTui {
             self.last_runtime_status_refresh_at = Some(now);
             self.refresh_runtime_status().await;
         }
+        if self
+            .last_space_membership_check_at
+            .map(|last| now.saturating_duration_since(last) >= SPACE_MEMBERSHIP_REFRESH_INTERVAL)
+            .unwrap_or(true)
+        {
+            self.last_space_membership_check_at = Some(now);
+            self.check_space_membership_changes();
+        }
+    }
+
+    /// Notices local Space membership changes (a device joined, left, or was
+    /// removed) on the status line. A Space identity change re-seeds silently:
+    /// leaving and joining already report themselves, and the member set
+    /// changes wholesale with them.
+    fn check_space_membership_changes(&mut self) {
+        let Ok(space) = self.networkControl.deviceSpace() else {
+            return;
+        };
+        let members = space.members.iter().cloned().collect::<BTreeSet<_>>();
+        let identity_changed = self
+            .space_identity
+            .as_ref()
+            .is_some_and(|(space_id, _)| space_id != &space.spaceId);
+        let previous = std::mem::replace(&mut self.space_members, members.clone());
+        let seeded = self
+            .space_identity
+            .replace((space.spaceId.clone(), space.spaceName.clone()));
+        if seeded.is_none() || identity_changed {
+            return;
+        }
+        let name_for = self
+            .networkControl
+            .deviceSpaceTopology()
+            .map(|topology| {
+                topology
+                    .devices
+                    .into_iter()
+                    .map(|device| (device.deviceId, device.deviceName))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        if let Some(message) =
+            space_membership_notice(self.text(), &previous, &members, &name_for)
+        {
+            self.set_transient_status_message(message);
+        }
     }
 
     async fn refresh_runtime_status(&mut self) {
+        if let Some(error) = self.route_permission_error.clone() {
+            self.set_status_message(error);
+            return;
+        }
         self.refresh_context_usage_label().await;
         let is_loading = self.raw_current_chat_is_loading();
         let state = self.current_chat_input_processing_state();
+        // Loading transitions only refresh the status line. They must never
+        // re-engage transcript following: this runs every 250ms while a
+        // response streams, and a reader who scrolled into history keeps
+        // their place until they return to the newest line themselves.
         if self.awaiting_runtime_loading && !is_loading {
             match &state {
                 InputProcessingState::Error { message } => {
@@ -2306,15 +5192,15 @@ impl OperitTui {
                 InputProcessingState::Idle | InputProcessingState::Completed => {
                     self.awaiting_runtime_loading = false;
                     self.last_current_chat_loading = false;
-                    self.follow_transcript = true;
                     self.refresh_chats().await;
+                    // Model binding now lives in the persistent right footer
+                    // segment; reset the left status for command feedback.
                     match self.current_chat_model_status_label().await {
-                        Ok(label) => self.set_status_message(label),
+                        Ok(_) => self.status_message.clear(),
                         Err(error) => self.set_status_message(error),
                     }
                 }
                 _ => {
-                    self.follow_transcript = true;
                     self.set_runtime_status_message(
                         self.text().connecting_ai_service().to_string(),
                         &state,
@@ -2326,7 +5212,6 @@ impl OperitTui {
         }
         if is_loading {
             self.awaiting_runtime_loading = false;
-            self.follow_transcript = true;
             let status = match &state {
                 InputProcessingState::Idle => match self.current_chat_model_status_label().await {
                     Ok(label) => label,
@@ -2338,18 +5223,11 @@ impl OperitTui {
             self.set_runtime_status_message(status, &state, is_loading);
         } else if self.last_current_chat_loading {
             self.awaiting_runtime_loading = false;
-            self.follow_transcript = true;
             self.refresh_chats().await;
+            // Loading just finished; reset the status line for command
+            // feedback instead of rewriting the model binding label.
             match self.current_chat_model_status_label().await {
-                Ok(label) => self.set_status_message(label),
-                Err(error) => self.set_status_message(error),
-            }
-        } else if matches!(
-            state,
-            InputProcessingState::Idle | InputProcessingState::Completed
-        ) {
-            match self.current_chat_model_status_label().await {
-                Ok(label) => self.set_status_message(label),
+                Ok(_) => self.status_message.clear(),
                 Err(error) => self.set_status_message(error),
             }
         }
@@ -2380,7 +5258,17 @@ impl OperitTui {
         }
     }
 
+    /// Persistent right footer segment: chat model binding plus context
+    /// usage. The model label used to live in the left status segment,
+    /// which the runtime refresher rewrote periodically and clobbered
+    /// command feedback.
     async fn current_context_usage_label(&mut self) -> Result<String, String> {
+        let model_label = self.current_chat_model_status_label().await?;
+        let usage = self.current_context_usage_text().await?;
+        Ok(format!("{model_label} | {usage}"))
+    }
+
+    async fn current_context_usage_text(&mut self) -> Result<String, String> {
         let model_ref = self.editable_chat_model_ref().await?;
         let config = self
             .core
@@ -2388,11 +5276,7 @@ impl OperitTui {
             .getResolvedModelConfig(&model_ref.provider_id, &model_ref.model_id)
             .await
             .map_err(|error| error.to_string())?;
-        let effective_context_length = if config.context.enableMaxContextMode {
-            config.context.maxContextLength
-        } else {
-            config.context.maxContextLength * 0.4
-        };
+        let effective_context_length = config.context.maxContextLength;
         let max_tokens = (effective_context_length * 1024.0) as i64;
         let current_window_size = self.current_window_size_cache;
         if max_tokens <= 0 {
@@ -2458,7 +5342,7 @@ impl OperitTui {
         if args.first().map(String::as_str) == Some("toggle") {
             let name = args
                 .get(1)
-                .ok_or_else(|| self.text().usage_approval_tool().to_string())?;
+                .ok_or_else(|| self.text().usage_skill_toggle().to_string())?;
             self.status_message = self.text().skill_toggled(name, "toggled");
             return Ok(());
         }
@@ -2486,7 +5370,7 @@ impl OperitTui {
         if args.first().map(String::as_str) == Some("toggle") {
             let name = args
                 .get(1)
-                .ok_or_else(|| self.text().usage_approval_tool().to_string())?;
+                .ok_or_else(|| self.text().usage_package_toggle().to_string())?;
             self.status_message = self.text().package_toggled(name, "toggled");
             return Ok(());
         }
@@ -2512,7 +5396,7 @@ impl OperitTui {
         if args.first().map(String::as_str) == Some("toggle") {
             let name = args
                 .get(1)
-                .ok_or_else(|| self.text().usage_approval_tool().to_string())?;
+                .ok_or_else(|| self.text().usage_plugin_toggle().to_string())?;
             self.status_message = self.text().plugin_toggled(name, "toggled");
             return Ok(());
         }
@@ -2539,7 +5423,7 @@ impl OperitTui {
         if args.first().map(String::as_str) == Some("toggle") {
             let name = args
                 .get(1)
-                .ok_or_else(|| self.text().usage_approval_tool().to_string())?;
+                .ok_or_else(|| self.text().usage_mcp_toggle().to_string())?;
             self.status_message = self.text().mcp_toggled(name, "toggled");
             return Ok(());
         }
@@ -2650,6 +5534,17 @@ impl OperitTui {
     }
 }
 
+/// Returns whether a Markdown stream event should be logged as a lifecycle boundary.
+fn is_content_stream_boundary_event(eventType: &str) -> bool {
+    matches!(eventType, "reset" | "savepoint" | "rollback" | "completed")
+}
+
+/// Enables explicit per-event synchronization measurements without logging message content.
+fn tui_sync_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("OPERIT_TUI_SYNC_TRACE").as_deref() == Ok("1"))
+}
+
 fn parse_permission_level(value: Option<&str>) -> Result<AiPermissionMode, String> {
     match value {
         Some("allow") | Some("ALLOW") => Ok(AiPermissionMode::Full),
@@ -2719,11 +5614,511 @@ fn format_context_length(value: f32) -> String {
     }
 }
 
+/// Parses the transport spelling shared by TUI startup (`--link-listen`) and
+/// `/network pair`.
+pub(super) fn parse_peer_transport(value: &str) -> Result<PeerTransport, String> {
+    match value {
+        "http" => Ok(PeerTransport::Http),
+        "ws" => Ok(PeerTransport::WebSocket),
+        "tcp" => Ok(PeerTransport::Tcp),
+        "serial" => Ok(PeerTransport::Serial),
+        "bluetooth" => Ok(PeerTransport::Bluetooth),
+        _ => Err(format!(
+            "unknown transport: {value}; expected http, ws, tcp, serial or bluetooth"
+        )),
+    }
+}
+
+/// Parses `/network pair <address> <transport> [--token <token>]`; the token
+/// flag matches the headless CLI spelling. The node id is left empty like the
+/// Flutter manual pairing dialog: the handshake learns the real identity.
+fn parse_pair_arguments(
+    args: &[String],
+) -> Result<(String, PeerTransport, Option<String>), String> {
+    const USAGE: &str =
+        "usage: network pair <address> <http|ws|tcp|serial|bluetooth> [--token <token>]";
+    let [address, transport, tail @ ..] = args else {
+        return Err(USAGE.to_string());
+    };
+    let token = match tail {
+        [] => None,
+        [flag, token] if flag == "--token" => Some(token.clone()),
+        _ => return Err(USAGE.to_string()),
+    };
+    Ok((address.clone(), parse_peer_transport(transport)?, token))
+}
+
+/// Resolves the pairing a `/network pair-confirm|pair-cancel` refers to: an
+/// exact pairing id when given, otherwise the only pairing this session
+/// started. Several pending pairings require an explicit id.
+fn resolve_pending_pairing<'a>(
+    pending: &'a [PendingPairing],
+    pairing_id: Option<&str>,
+) -> Result<&'a PendingPairing, String> {
+    match (pairing_id, pending) {
+        (Some(pairing_id), _) => pending
+            .iter()
+            .find(|pending| pending.pairingId == pairing_id)
+            .ok_or_else(|| {
+                format!("no pending pairing \"{pairing_id}\"; start one with /network pair")
+            }),
+        (None, [only]) => Ok(only),
+        (None, []) => Err("no pending pairing; start one with /network pair".to_string()),
+        (None, _) => {
+            Err("several pending pairings; name the pairing id from /network pair".to_string())
+        }
+    }
+}
+
+/// Localized label for a join request's lifecycle state; the hub, the joins
+/// list and the decision popup all render the same word for the same state.
+pub(super) fn join_status_label(text: TuiText, status: &SpaceJoinStatus) -> &'static str {
+    match status {
+        SpaceJoinStatus::Pending => text.network_join_status_pending(),
+        SpaceJoinStatus::Approving => text.network_join_status_approving(),
+        SpaceJoinStatus::Approved => text.network_join_status_approved(),
+        SpaceJoinStatus::Rejected => text.network_join_status_rejected(),
+        SpaceJoinStatus::Cancelled => text.network_join_status_cancelled(),
+        SpaceJoinStatus::Expired => text.network_join_status_expired(),
+        SpaceJoinStatus::Joined => text.network_join_status_joined(),
+    }
+}
+
+/// Selectable lines for the discovery popup: one entry per candidate plus the
+/// trailing select hint. Pure so the popup content is testable without a scan.
+pub(super) fn discovery_popup_items(text: TuiText, candidates: &[DiscoveredPeer]) -> Vec<String> {
+    let mut items = candidates
+        .iter()
+        .map(|peer| format!("{} · {} · {}", peer.displayName, peer.nodeId, peer.address))
+        .collect::<Vec<_>>();
+    items.push(text.network_discover_select_hint().to_string());
+    items
+}
+
+/// Rebuilds an open join decision queue from the freshest decidable set:
+/// matching requests are replaced in place (a reviewer reassignment bumps the
+/// assignment version), entries the fetch no longer reports are dropped, and
+/// the selected row follows its request id. Without this a retry would keep
+/// presenting a stale version that the runtime rejects forever.
+pub(super) fn refreshed_decision_queue(
+    current: &[SpaceJoinRequest],
+    fresh: &[SpaceJoinRequest],
+    selected: usize,
+) -> (Vec<SpaceJoinRequest>, usize) {
+    let selected_id = current.get(selected).map(|request| request.requestId.clone());
+    let requests = fresh
+        .iter()
+        .filter(|request| request.canApprove)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected = selected_id
+        .and_then(|id| requests.iter().position(|request| request.requestId == id))
+        .unwrap_or_else(|| selected.min(requests.len().saturating_sub(1)));
+    (requests, selected)
+}
+
+/// Status suffix for one hub member row. A policy restriction outranks
+/// reachability: a restricted device will not come back on its own, so
+/// "offline; waiting for it to come back" would be a lie there.
+pub(super) fn hub_member_status_label(
+    text: TuiText,
+    blocked: bool,
+    online: bool,
+) -> Option<&'static str> {
+    if blocked {
+        Some(text.network_hub_member_restricted())
+    } else if !online {
+        Some(text.network_devices_offline())
+    } else {
+        None
+    }
+}
+
+/// Localized label for one paired device's status as listed by `/network peers`;
+/// `RemovedFromSpace` is the only way a user learns a peer is paired but no
+/// longer shares this Space.
+pub(super) fn paired_status_label(
+    text: TuiText,
+    status: &RuntimePairedDeviceStatus,
+) -> &'static str {
+    match status {
+        RuntimePairedDeviceStatus::Online => text.network_peer_status_online(),
+        RuntimePairedDeviceStatus::Offline => text.network_peer_status_offline(),
+        RuntimePairedDeviceStatus::Invalid => text.network_peer_status_invalid(),
+        RuntimePairedDeviceStatus::RemovedFromSpace => text.network_peer_status_removed(),
+    }
+}
+
+/// One-line notice for a local Space membership change: who left (or was
+/// removed) and who joined. `None` when the member set is unchanged. Device
+/// names fall back to node ids for members the topology no longer lists.
+pub(super) fn space_membership_notice(
+    text: TuiText,
+    previous: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+    name_for: &BTreeMap<String, String>,
+) -> Option<String> {
+    let render = |ids: &[String]| {
+        ids.iter()
+            .map(|id| name_for.get(id).cloned().unwrap_or_else(|| id.clone()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let left = previous.difference(current).cloned().collect::<Vec<_>>();
+    let joined = current.difference(previous).cloned().collect::<Vec<_>>();
+    let mut notices = Vec::new();
+    if !left.is_empty() {
+        notices.push(text.network_space_members_removed(render(&left)));
+    }
+    if !joined.is_empty() {
+        notices.push(text.network_space_members_added(render(&joined)));
+    }
+    if notices.is_empty() {
+        None
+    } else {
+        Some(notices.join(" · "))
+    }
+}
+
+/// Renders the doctor report as popup lines. Multi-placeholder lines go
+/// through named `render` args: the generated per-key methods take their
+/// placeholders in alphabetical order, which must never be confused with
+/// reading order.
+pub(super) fn space_health_report_lines(text: TuiText, report: &SpaceHealthReport) -> Vec<String> {
+    let flag = |value: bool| {
+        if value {
+            text.network_doctor_yes().to_string()
+        } else {
+            text.network_doctor_no().to_string()
+        }
+    };
+    let policy_state = if report.policyReadable {
+        text.network_doctor_policy_readable()
+    } else {
+        text.network_doctor_policy_unreadable()
+    };
+    let mut items = vec![
+        text.render(
+            TuiTextKey::NetworkDoctorSpace,
+            &[
+                ("space_name", report.spaceName.clone()),
+                ("space_id", report.spaceId.clone()),
+                ("revision", report.spaceRevision.to_string()),
+            ],
+        ),
+        text.render(
+            TuiTextKey::NetworkDoctorPolicy,
+            &[
+                ("state", policy_state.to_string()),
+                ("records", report.recordMembers.len().to_string()),
+                ("replay", report.replayMembers.len().to_string()),
+            ],
+        ),
+    ];
+    for journal in &report.journals {
+        items.push(text.render(
+            TuiTextKey::NetworkDoctorJournal,
+            &[
+                ("device", journal.deviceId.clone()),
+                ("lines", journal.totalLines.to_string()),
+                ("decoded", journal.decodedLines.to_string()),
+                ("findings", journal.findings.len().to_string()),
+            ],
+        ));
+    }
+    items.push(text.render(
+        TuiTextKey::NetworkDoctorProjection,
+        &[
+            ("entries", report.projection.projectionEntries.to_string()),
+            (
+                "journal_only",
+                report.projection.journalOnlyOperationIds.len().to_string(),
+            ),
+            (
+                "projection_only",
+                report.projection.projectionOnlyOperationIds.len().to_string(),
+            ),
+        ],
+    ));
+    for pair in &report.pairs {
+        items.push(text.render(
+            TuiTextKey::NetworkDoctorPeer,
+            &[
+                ("device", pair.deviceId.clone()),
+                ("member", flag(pair.member)),
+                ("online", flag(pair.online)),
+                ("inbound", flag(pair.pairedInbound)),
+                ("outbound", flag(pair.pairedOutbound)),
+            ],
+        ));
+    }
+    // D3 join review state: committed/recoverable/reassignable are the
+    // Approving-exit signals, and only recoverable records are not findings.
+    for join in &report.joins {
+        items.push(text.render(
+            TuiTextKey::NetworkDoctorJoin,
+            &[
+                ("request", join.requestId.clone()),
+                (
+                    "status",
+                    join_status_label(text, &join.status).to_string(),
+                ),
+                (
+                    "reviewer",
+                    join.reviewerDeviceId.clone().unwrap_or_else(|| "-".to_string()),
+                ),
+                ("version", join.assignmentVersion.to_string()),
+                ("committed", flag(join.committed)),
+                ("recoverable", flag(join.recoverable)),
+                ("reassignable", flag(join.reassignable)),
+            ],
+        ));
+    }
+    if report.findings.is_empty() {
+        items.push(text.network_doctor_findings_none().to_string());
+    } else {
+        for finding in &report.findings {
+            items.push(text.render(
+                TuiTextKey::NetworkDoctorFinding,
+                &[
+                    ("severity", finding.severity.clone()),
+                    ("check", finding.check.clone()),
+                    ("summary", finding.summary.clone()),
+                ],
+            ));
+        }
+    }
+    let counters = &report.counters;
+    items.push(text.render(
+        TuiTextKey::NetworkDoctorCounters,
+        &[
+            ("divergences", counters.divergencesDetected.to_string()),
+            ("quarantined", counters.linesQuarantined.to_string()),
+            ("repairs", counters.repairsRun.to_string()),
+            ("failed", counters.repairsFailed.to_string()),
+            ("reconciles", counters.reconcileExchanges.to_string()),
+            ("rounds", counters.reconcileRounds.to_string()),
+            ("incomplete", counters.reconcileIncomplete.to_string()),
+            ("oversize", counters.oversizeOffersRefused.to_string()),
+        ],
+    ));
+    items.push(text.network_doctor_repair_hint().to_string());
+    items
+}
+
+/// Display label for a paired device; the projection carries the human name
+/// in the device-info model slot and may leave it empty.
+fn paired_device_label(device_id: &str, peer: &RuntimePairedDevice) -> String {
+    if peer.deviceInfo.model.is_empty() {
+        device_id.to_string()
+    } else {
+        peer.deviceInfo.model.clone()
+    }
+}
+
+/// One-line error text for the status line: peer failures arrive as
+/// CoreLinkError text whose extra lines are a location and backtrace dump.
+fn status_error_line(error: &str) -> String {
+    error.lines().next().unwrap_or_default().to_string()
+}
+
+/// Display label of a finished pairing, falling back to its node id.
+fn paired_peer_label(peer: &PairedPeer) -> String {
+    if peer.displayName.is_empty() {
+        peer.nodeId.clone()
+    } else {
+        peer.displayName.clone()
+    }
+}
+
+fn paired_device_direction(inbound: bool, outbound: bool) -> &'static str {
+    match (inbound, outbound) {
+        (true, true) => "inbound+outbound",
+        (true, false) => "inbound",
+        (false, true) => "outbound",
+        (false, false) => "no authorization direction",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use operit_model::MessagePart::MessagePartKind;
     use operit_model::MessagePartCodec::MessagePartCodec;
+    use operit_node_runtime::RuntimeRemoteLinkService::{
+        RuntimeDeviceSpaceIdentity, SpaceJoinStatus,
+    };
+    use operit_node_runtime::SpaceDoctor::JoinHealth;
+    use std::collections::BTreeSet;
+
+    /// Builds a device window fixture: self plus two foreign devices, one
+    /// restricted, one carrying an identity, and one pending join request.
+    fn device_manager_fixture() -> DeviceManagerModal {
+        let device = |device_id: &str, online: bool, identity: Option<&str>| {
+            RuntimeDeviceSpaceDevice {
+                deviceId: device_id.to_string(),
+                userName: "alice".to_string(),
+                deviceName: device_id.to_string(),
+                platform: "linux".to_string(),
+                model: String::new(),
+                coreVersion: None,
+                online,
+                relayHops: None,
+                relayPath: None,
+                currentIdentity: identity.map(|display_name| RuntimeDeviceSpaceIdentity {
+                    displayName: display_name.to_string(),
+                    capabilities: Vec::new(),
+                }),
+            }
+        };
+        DeviceManagerModal {
+            topology: RuntimeDeviceSpaceTopology {
+                currentDeviceId: "self".to_string(),
+                devices: vec![
+                    device("self", true, Some("admin")),
+                    device("phone", true, Some("user")),
+                    device("tablet", false, None),
+                ],
+                connections: Vec::new(),
+            },
+            blocked: ["tablet".to_string()].into_iter().collect(),
+            paired: BTreeSet::new(),
+            requests: vec![SpaceJoinRequest {
+                requestId: "req-1".to_string(),
+                targetDeviceId: "self".to_string(),
+                applicantDeviceId: "applicant".to_string(),
+                applicantName: "carol".to_string(),
+                spaceName: "Space".to_string(),
+                status: SpaceJoinStatus::Pending,
+                createdAt: 0,
+                expiresAt: 0,
+                canApprove: true,
+                reviewerDeviceId: None,
+                reviewerName: None,
+                reviewerHops: None,
+                assignmentVersion: 0,
+                decisionApprove: None,
+            }],
+            roles: BTreeMap::new(),
+            initialized: true,
+            selected: 0,
+            mode: DeviceManagerMode::Browsing,
+            menu_device_id: None,
+            menu_index: 0,
+        }
+    }
+
+    /// Verifies pending join requests list before devices in the window.
+    #[test]
+    fn device_manager_rows_list_requests_before_devices() {
+        let rows = device_manager_fixture().rows();
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], DeviceManagerRow::Request(_)));
+        assert!(rows[1..].iter().all(|row| matches!(row, DeviceManagerRow::Device(_))));
+    }
+
+    /// The connection axis is a single state-derived slot: restricted
+    /// devices get admit, unrestricted foreign devices get disconnect, and
+    /// the local device never offers actions at all - identity changes on
+    /// self would drop the capabilities the local UI depends on.
+    #[test]
+    fn device_manager_menu_derives_connection_action_from_restriction() {
+        let modal = device_manager_fixture();
+        let actions = modal.menu_actions("tablet");
+        assert!(actions.contains(&DeviceManagerAction::Admit));
+        assert!(!actions.contains(&DeviceManagerAction::Disconnect));
+
+        let actions = modal.menu_actions("phone");
+        assert!(actions.contains(&DeviceManagerAction::Disconnect));
+        assert!(!actions.contains(&DeviceManagerAction::Admit));
+
+        assert!(modal.menu_actions("self").is_empty());
+    }
+
+    /// Direct-link pairing is link-level: it leads the menu for a member
+    /// without a local pairing, and disappears once the edge exists or the
+    /// device is restricted from connections.
+    #[test]
+    fn device_manager_menu_offers_pairing_only_for_unpaired_members() {
+        let modal = device_manager_fixture();
+        let actions = modal.menu_actions("phone");
+        assert_eq!(actions.first(), Some(&DeviceManagerAction::Pair));
+        assert!(!modal
+            .menu_actions("tablet")
+            .contains(&DeviceManagerAction::Pair));
+
+        let mut paired = device_manager_fixture();
+        paired.paired = ["phone".to_string()].into_iter().collect();
+        assert!(!paired
+            .menu_actions("phone")
+            .contains(&DeviceManagerAction::Pair));
+    }
+
+    /// Identity actions appear only when they can apply, and only for
+    /// foreign devices: assignment needs a defined role, clearing needs an
+    /// assigned identity.
+    #[test]
+    fn device_manager_menu_offers_identity_actions_only_when_applicable() {
+        let mut modal = device_manager_fixture();
+        assert!(
+            !modal
+                .menu_actions("phone")
+                .contains(&DeviceManagerAction::AssignIdentity)
+        );
+        assert!(
+            modal
+                .menu_actions("phone")
+                .contains(&DeviceManagerAction::ClearIdentity)
+        );
+        assert!(
+            !modal
+                .menu_actions("tablet")
+                .contains(&DeviceManagerAction::ClearIdentity)
+        );
+        modal.roles.insert(
+            "role-1".to_string(),
+            NetworkControlRole {
+                roleId: "role-1".to_string(),
+                displayName: "user".to_string(),
+                capabilities: BTreeSet::new(),
+            },
+        );
+        assert!(
+            modal
+                .menu_actions("tablet")
+                .contains(&DeviceManagerAction::AssignIdentity)
+        );
+        // The local row stays read-only even with roles defined.
+        assert!(modal.menu_actions("self").is_empty());
+    }
+
+    /// Verifies `/new` keyword options translate into the shared shell flags.
+    #[test]
+    fn new_chat_args_translate_keywords_into_shell_flags() {
+        let args = OperitTui::parse_new_chat_args(&[
+            "character".to_string(),
+            "Alice".to_string(),
+            "group-card".to_string(),
+            "42".to_string(),
+            "group".to_string(),
+            "Heroes".to_string(),
+        ])
+        .expect("keyword options must translate");
+        assert_eq!(args.characterCardName.as_deref(), Some("Alice"));
+        assert_eq!(args.characterGroupId.as_deref(), Some("42"));
+        assert_eq!(args.group.as_deref(), Some("Heroes"));
+    }
+
+    /// Verifies legacy `--` spellings still parse and bad input is rejected.
+    #[test]
+    fn new_chat_args_accept_legacy_flags_and_reject_unknowns() {
+        let args = OperitTui::parse_new_chat_args(&["--group".to_string(), "Heroes".to_string()])
+            .expect("legacy flag spelling must translate");
+        assert_eq!(args.group.as_deref(), Some("Heroes"));
+
+        assert!(OperitTui::parse_new_chat_args(&["chat".to_string(), "x".to_string()]).is_err());
+        assert!(OperitTui::parse_new_chat_args(&["character".to_string()]).is_err());
+    }
 
     /// Verifies TUI embedded stream projection preserves split tool markup.
     #[test]
@@ -2789,5 +6184,419 @@ mod tests {
             .iter()
             .any(|part| part.kind == MessagePartKind::Thinking));
         assert_eq!(MessagePartCodec::visibleText(&parts), "visible");
+    }
+
+    fn pending_pairing(pairing_id: &str, display_name: &str) -> PendingPairing {
+        PendingPairing {
+            pairingId: pairing_id.to_string(),
+            peerNodeId: format!("node-{pairing_id}"),
+            displayName: display_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_peer_transport_accepts_listener_transports() {
+        assert!(matches!(
+            parse_peer_transport("http"),
+            Ok(PeerTransport::Http)
+        ));
+        assert!(matches!(
+            parse_peer_transport("ws"),
+            Ok(PeerTransport::WebSocket)
+        ));
+        assert!(matches!(
+            parse_peer_transport("tcp"),
+            Ok(PeerTransport::Tcp)
+        ));
+        assert!(matches!(
+            parse_peer_transport("serial"),
+            Ok(PeerTransport::Serial)
+        ));
+        assert!(matches!(
+            parse_peer_transport("bluetooth"),
+            Ok(PeerTransport::Bluetooth)
+        ));
+        assert!(parse_peer_transport("quic").is_err());
+    }
+
+    #[test]
+    fn parse_pair_arguments_reads_address_transport_and_optional_token() {
+        let args = |values: &[&str]| values.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+        let (address, transport, token) = parse_pair_arguments(&args(&["192.168.1.8:4835", "ws"]))
+            .expect("pair arguments must parse");
+        assert_eq!(address, "192.168.1.8:4835");
+        assert!(matches!(transport, PeerTransport::WebSocket));
+        assert_eq!(token, None);
+
+        let (address, transport, token) =
+            parse_pair_arguments(&args(&["192.168.1.8:4835", "tcp", "--token", "secret"]))
+                .expect("pair arguments with token must parse");
+        assert_eq!(address, "192.168.1.8:4835");
+        assert!(matches!(transport, PeerTransport::Tcp));
+        assert_eq!(token.as_deref(), Some("secret"));
+
+        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835"])).is_err());
+        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "quic"])).is_err());
+        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "ws", "--token"])).is_err());
+    }
+
+    #[test]
+    fn resolve_pending_pairing_auto_picks_a_single_session_pairing() {
+        let pending = vec![pending_pairing("pair-1", "phone")];
+
+        let resolved = resolve_pending_pairing(&pending, None)
+            .expect("a single pending pairing resolves without id");
+        assert_eq!(resolved.pairingId, "pair-1");
+
+        let resolved = resolve_pending_pairing(&pending, Some("pair-1"))
+            .expect("an exact pairing id resolves");
+        assert_eq!(resolved.displayName, "phone");
+
+        assert!(resolve_pending_pairing(&pending, Some("pair-2")).is_err());
+        assert!(resolve_pending_pairing(&[], None).is_err());
+
+        let several = vec![
+            pending_pairing("pair-1", "phone"),
+            pending_pairing("pair-2", "server"),
+        ];
+        assert!(resolve_pending_pairing(&several, None).is_err());
+        let resolved = resolve_pending_pairing(&several, Some("pair-2"))
+            .expect("an explicit id resolves among several pending pairings");
+        assert_eq!(resolved.displayName, "server");
+    }
+
+    #[test]
+    fn space_join_active_states_cover_every_decision_pending_status() {
+        assert!(space_join_is_active(&SpaceJoinStatus::Pending));
+        assert!(space_join_is_active(&SpaceJoinStatus::Approving));
+        assert!(space_join_is_active(&SpaceJoinStatus::Approved));
+        assert!(!space_join_is_active(&SpaceJoinStatus::Joined));
+        assert!(!space_join_is_active(&SpaceJoinStatus::Rejected));
+        assert!(!space_join_is_active(&SpaceJoinStatus::Cancelled));
+        assert!(!space_join_is_active(&SpaceJoinStatus::Expired));
+    }
+
+    #[test]
+    fn paired_device_label_falls_back_to_node_id_when_the_name_is_missing() {
+        let mut peer = RuntimePairedDevice {
+            deviceId: "node-1".to_string(),
+            deviceInfo: operit_link::protocol::LinkDeviceInfo {
+                platform: String::new(),
+                model: "phone".to_string(),
+            pairingIncarnation: None,
+        },
+            inbound: true,
+            outbound: false,
+        };
+        assert_eq!(paired_device_label("node-1", &peer), "phone");
+
+        peer.deviceInfo.model = String::new();
+        assert_eq!(paired_device_label("node-1", &peer), "node-1");
+        assert_eq!(
+            paired_device_direction(peer.inbound, peer.outbound),
+            "inbound"
+        );
+    }
+
+    #[test]
+    fn status_error_line_keeps_only_the_message_from_diagnostics() {
+        assert_eq!(
+            status_error_line(
+                "INTERNAL_ERROR: An active join request already exists\nRust error location: core/src/ops/function.rs:250:5\nRust backtrace:\n   0: 0x1 - <unknown>"
+            ),
+            "INTERNAL_ERROR: An active join request already exists"
+        );
+        assert_eq!(status_error_line("plain failure"), "plain failure");
+        assert_eq!(status_error_line(""), "");
+    }
+
+    fn hub_topology_fixture() -> RuntimeDeviceSpaceTopology {
+        let device = |device_id: &str, online: bool| RuntimeDeviceSpaceDevice {
+            deviceId: device_id.to_string(),
+            userName: "alice".to_string(),
+            deviceName: device_id.to_string(),
+            platform: "linux".to_string(),
+            model: String::new(),
+            coreVersion: None,
+            online,
+            relayHops: None,
+            relayPath: None,
+            currentIdentity: None,
+        };
+        RuntimeDeviceSpaceTopology {
+            currentDeviceId: "self".to_string(),
+            devices: vec![device("self", true), device("phone", true)],
+            connections: Vec::new(),
+        }
+    }
+
+    fn hub_paired_fixture() -> BTreeMap<String, RuntimePairedDevice> {
+        let peer = |device_id: &str, model: &str, outbound: bool| {
+            (
+                device_id.to_string(),
+                RuntimePairedDevice {
+                    deviceId: device_id.to_string(),
+                    deviceInfo: operit_link::protocol::LinkDeviceInfo {
+                        platform: String::new(),
+                        model: model.to_string(),
+                    pairingIncarnation: None,
+                },
+                    inbound: true,
+                    outbound,
+                },
+            )
+        };
+        BTreeMap::from([
+            peer("phone", "phone", true),
+            peer("server", "server", true),
+            peer("watch", "watch", false),
+        ])
+    }
+
+    #[test]
+    fn network_hub_rows_list_members_then_paired_non_members() {
+        let topology = hub_topology_fixture();
+        let paired = hub_paired_fixture();
+        let rows = network_hub_rows(&topology, &paired);
+
+        let ids = rows.iter().map(|row| row.id().to_string()).collect::<Vec<_>>();
+        // Members come first in topology order; paired non-members follow in
+        // stable id order; an existing member never appears twice.
+        assert_eq!(ids, vec!["self", "phone", "server", "watch"]);
+        assert!(matches!(&rows[0], NetworkHubRow::Member(_)));
+        assert!(matches!(&rows[2], NetworkHubRow::Peer { outbound: true, .. }));
+        assert!(matches!(&rows[3], NetworkHubRow::Peer { outbound: false, .. }));
+        if let NetworkHubRow::Peer { label, .. } = &rows[2] {
+            assert_eq!(label, "server");
+        } else {
+            panic!("third hub row must be a paired non-member");
+        }
+    }
+
+    #[test]
+    fn pair_code_push_accepts_digits_only_up_to_six() {
+        assert_eq!(pair_code_push("", '4'), "4");
+        assert_eq!(pair_code_push("123", '4'), "1234");
+        assert_eq!(pair_code_push("123456", '7'), "123456");
+        assert_eq!(pair_code_push("123", 'a'), "123");
+        assert_eq!(pair_code_push("123", '*'), "123");
+    }
+
+    #[test]
+    fn peer_transport_label_matches_listener_spellings() {
+        let round_trip = |label: &str, expected: PeerTransport| {
+            let parsed = parse_peer_transport(label)
+                .expect("listener spelling must parse back");
+            assert!(
+                std::mem::discriminant(&parsed) == std::mem::discriminant(&expected),
+                "{label} must round-trip"
+            );
+        };
+        round_trip("http", PeerTransport::Http);
+        round_trip("ws", PeerTransport::WebSocket);
+        round_trip("tcp", PeerTransport::Tcp);
+        round_trip("serial", PeerTransport::Serial);
+        round_trip("bluetooth", PeerTransport::Bluetooth);
+        assert_eq!(peer_transport_label(&PeerTransport::Tcp), "tcp");
+    }
+
+    /// Builds one join request fixture for decision-queue refresh tests.
+    fn join_request_fixture(id: &str, version: u64, can_approve: bool) -> SpaceJoinRequest {
+        SpaceJoinRequest {
+            requestId: id.to_string(),
+            targetDeviceId: "self".to_string(),
+            applicantDeviceId: format!("applicant-{id}"),
+            applicantName: format!("name-{id}"),
+            spaceName: "Space".to_string(),
+            status: SpaceJoinStatus::Pending,
+            createdAt: 0,
+            expiresAt: i64::MAX,
+            canApprove: can_approve,
+            reviewerDeviceId: Some("self".to_string()),
+            reviewerName: None,
+            reviewerHops: None,
+            assignmentVersion: version,
+            decisionApprove: None,
+        }
+    }
+
+    /// A reviewer reassignment bumps the assignment version; the refreshed
+    /// queue must present the new version, because the runtime rejects a
+    /// decision on the cached one forever.
+    #[test]
+    fn decision_queue_refresh_replaces_stale_versions() {
+        let current = vec![
+            join_request_fixture("req", 1, true),
+            join_request_fixture("gone", 1, true),
+        ];
+        let fresh = vec![join_request_fixture("req", 2, true)];
+        let (requests, selected) = refreshed_decision_queue(&current, &fresh, 0);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].requestId, "req");
+        assert_eq!(requests[0].assignmentVersion, 2);
+        assert_eq!(selected, 0);
+    }
+
+    /// The selected row follows its request id across the refresh, withdrawn
+    /// or no-longer-decidable requests disappear, and an empty result lets
+    /// the popup close instead of holding a ghost entry.
+    #[test]
+    fn decision_queue_refresh_keeps_selection_and_drops_withdrawn() {
+        let current = vec![
+            join_request_fixture("a", 1, true),
+            join_request_fixture("b", 1, true),
+        ];
+        let fresh = vec![
+            join_request_fixture("b", 3, true),
+            join_request_fixture("c", 1, true),
+            join_request_fixture("not-mine", 1, false),
+        ];
+        let (requests, selected) = refreshed_decision_queue(&current, &fresh, 1);
+        let ids = requests
+            .iter()
+            .map(|request| request.requestId.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["b", "c"]);
+        assert_eq!(selected, 0);
+
+        let (empty, selected) = refreshed_decision_queue(&current, &[], 1);
+        assert!(empty.is_empty());
+        assert_eq!(selected, 0);
+    }
+
+    /// The discovery popup lists every candidate and keeps the select hint
+    /// as the trailing (unselectable by count) line.
+    #[test]
+    fn discovery_items_end_with_the_select_hint() {
+        let text = TuiLanguage::English.text();
+        let candidates = vec![
+            DiscoveredPeer {
+                nodeId: "n1".to_string(),
+                address: "10.0.0.2:8080".to_string(),
+                displayName: "phone".to_string(),
+            },
+            DiscoveredPeer {
+                nodeId: "n2".to_string(),
+                address: "10.0.0.3:8080".to_string(),
+                displayName: "tablet".to_string(),
+            },
+        ];
+        let items = discovery_popup_items(text, &candidates);
+        assert_eq!(items.len(), 3);
+        assert!(items[0].contains("phone") && items[0].contains("n1"));
+        assert!(items[1].contains("tablet") && items[1].contains("n2"));
+        assert_eq!(items[2], text.network_discover_select_hint());
+    }
+
+    /// The health report renders the D3 signals that carry the Approving
+    /// exit - committed/recoverable/reassignable - plus the reconciliation
+    /// counters, so the TUI can observe the new core behavior.
+    #[test]
+    fn doctor_lines_report_join_health_and_counters() {
+        let text = TuiLanguage::English.text();
+        let report = SpaceHealthReport {
+            localNodeId: "self".to_string(),
+            spaceId: "space-1".to_string(),
+            spaceName: "Home".to_string(),
+            spaceRevision: 7,
+            policyReadable: true,
+            policyError: None,
+            recordMembers: vec!["self".to_string()],
+            replayMembers: vec!["self".to_string(), "phone".to_string()],
+            pairs: Vec::new(),
+            joins: vec![JoinHealth {
+                requestId: "req-1".to_string(),
+                applicantDeviceId: "phone".to_string(),
+                status: SpaceJoinStatus::Approving,
+                reviewerDeviceId: Some("tab".to_string()),
+                assignmentVersion: 2,
+                approvedDecision: Some(true),
+                committed: true,
+                recoverable: true,
+                reassignable: false,
+            }],
+            journals: Vec::new(),
+            projection: Default::default(),
+            clockAnomalies: Vec::new(),
+            findings: Vec::new(),
+            counters: Default::default(),
+            repair: None,
+        };
+        let lines = space_health_report_lines(text, &report);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Home"), "space identity must render: {joined}");
+        assert!(joined.contains("readable"), "policy state must render: {joined}");
+        assert!(
+            joined.contains("req-1") && joined.contains("recoverable=yes"),
+            "join health must render: {joined}"
+        );
+        assert!(joined.contains("reconciles=0"), "counters must render: {joined}");
+        assert!(joined.contains("Findings: none"), "findings must render: {joined}");
+        assert!(joined.contains("--repair"), "the CLI repair hint must render: {joined}");
+    }
+
+    /// The hub status tag must call out a policy restriction instead of
+    /// pretending the device is merely offline: it will not return by itself.
+    #[test]
+    fn hub_status_prefers_restricted_over_offline() {
+        let text = TuiLanguage::English.text();
+        assert_eq!(
+            hub_member_status_label(text, true, true),
+            Some(text.network_hub_member_restricted())
+        );
+        assert_eq!(
+            hub_member_status_label(text, false, false),
+            Some(text.network_devices_offline())
+        );
+        assert_eq!(hub_member_status_label(text, false, true), None);
+    }
+
+    /// `/network peers` names every status, including the pairing-only case
+    /// where the peer is no longer in this Space.
+    #[test]
+    fn paired_status_labels_cover_every_state() {
+        let text = TuiLanguage::English.text();
+        assert_eq!(
+            paired_status_label(text, &RuntimePairedDeviceStatus::Online),
+            text.network_peer_status_online()
+        );
+        assert_eq!(
+            paired_status_label(text, &RuntimePairedDeviceStatus::Offline),
+            text.network_peer_status_offline()
+        );
+        assert_eq!(
+            paired_status_label(text, &RuntimePairedDeviceStatus::Invalid),
+            text.network_peer_status_invalid()
+        );
+        assert_eq!(
+            paired_status_label(text, &RuntimePairedDeviceStatus::RemovedFromSpace),
+            text.network_peer_status_removed()
+        );
+    }
+
+    /// A membership change names the devices that left and joined; a departed
+    /// device keeps its node id because the topology no longer lists it.
+    #[test]
+    fn space_membership_notice_names_changed_members() {
+        let text = TuiLanguage::English.text();
+        let previous = BTreeSet::from(["self".to_string(), "old".to_string()]);
+        let current = BTreeSet::from(["self".to_string(), "new".to_string()]);
+        let names = BTreeMap::from([("new".to_string(), "phone".to_string())]);
+        assert_eq!(
+            space_membership_notice(text, &previous, &previous, &names),
+            None
+        );
+        let notice = space_membership_notice(text, &previous, &current, &names)
+            .expect("a changed member set must produce a notice");
+        assert!(notice.contains("old"), "departed id must be named: {notice}");
+        assert!(
+            notice.contains("phone"),
+            "joined device must use its name: {notice}"
+        );
+        assert!(
+            notice.contains(" · "),
+            "both sides must share one notice: {notice}"
+        );
     }
 }

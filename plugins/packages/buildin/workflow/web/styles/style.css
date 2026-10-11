@@ -1,0 +1,636 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Keeps every scroll surface aligned with Material's quiet, rounded scrollbar. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--operit-outline) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  background: var(--operit-outline);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--operit-onSurfaceVariant);
+  border-width: 1px;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--operit-primary);
+  border-width: 1px;
+}
+
+*::-webkit-scrollbar-button,
+*::-webkit-scrollbar-button:single-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.app {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.toolbar {
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 20px !important;
+  min-height: 76px !important;
+}
+
+.title-block {
+  flex: 1;
+  min-width: 80px;
+  overflow: hidden;
+}
+
+.toolbar-actions {
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.list {
+  padding: 16px 20px 24px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.workflow-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--operit-outlineVariant) !important;
+  border-radius: 14px !important;
+  background: var(--operit-surfaceContainer);
+  box-shadow: 0 4px 14px rgba(47, 76, 89, 0.07);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.workflow-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(47, 76, 89, 0.12);
+}
+
+.workflow-card-content {
+  min-width: 0;
+  cursor: pointer;
+  outline: none;
+  padding: 14px 14px 12px !important;
+}
+
+.workflow-card-content:focus-visible {
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
+.workflow-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workflow-card-icon {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--operit-primary);
+  background: var(--operit-primaryContainer);
+}
+
+.workflow-card-name {
+  min-width: 0;
+  flex: 1;
+  font-size: 16px !important;
+}
+
+.workflow-card-status {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.workflow-card-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.workflow-card-status.is-enabled {
+  color: var(--operit-primary);
+}
+
+.workflow-card-status.is-disabled {
+  color: var(--operit-onSurfaceVariant);
+}
+
+.workflow-card-description {
+  min-height: 20px;
+  margin: 8px 0 10px !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-card-meta {
+  align-items: center;
+}
+
+.workflow-card-meta .MuiChip-root {
+  height: 22px;
+  font-size: 11px;
+  color: var(--operit-onSurfaceVariant);
+  background: var(--operit-surfaceContainerHigh);
+}
+
+.workflow-card-actions {
+  min-height: 46px;
+  padding: 4px 10px 6px !important;
+  border-top: 1px solid var(--operit-outlineVariant);
+  background: var(--operit-surfaceContainerHigh);
+}
+
+.workflow-card-toggle {
+  margin: 0 0 0 auto !important;
+}
+
+.workflow-card-toggle .MuiFormControlLabel-label {
+  font-size: 12px;
+}
+
+.workflow-list-item,
+.workflow-list-summary,
+.workflow-list-heading,
+.workflow-list-name,
+.workflow-enabled-status,
+.workflow-list-description,
+.workflow-list-meta,
+.workflow-list-actions,
+.workflow-enabled-toggle {
+  display: none;
+}
+
+.workflow-card-content:focus-visible {
+  box-shadow: 0 0 0 2px currentColor;
+}
+
+.template-option {
+  justify-content: flex-start !important;
+  padding: 12px 14px !important;
+  text-align: left;
+}
+
+.template-option .MuiTypography-caption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.empty {
+  text-align: center;
+  padding: 80px 24px;
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+}
+
+.editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette {
+  padding: 12px 20px;
+  overflow: auto;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.palette button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.hint {
+  margin-left: auto !important;
+  white-space: nowrap;
+  color: var(--operit-onSurfaceVariant);
+}
+
+.canvas {
+  --xy-background-color: var(--operit-surface);
+  --xy-background-pattern-dots-color: var(--operit-outlineVariant);
+  --xy-edge-stroke: var(--operit-outline);
+  --xy-edge-stroke-selected: var(--operit-primary);
+  --xy-controls-button-background-color: var(--operit-surfaceContainer);
+  --xy-controls-button-background-color-hover: var(--operit-surfaceContainerHigh);
+  --xy-controls-button-color: var(--operit-onSurface);
+  --xy-controls-button-border-color: var(--operit-outlineVariant);
+  --xy-minimap-background-color: var(--operit-surfaceContainer);
+  --xy-minimap-node-background-color: var(--operit-primaryContainer);
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.canvas-empty {
+  position: absolute;
+  left: 50%;
+  top: 45%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+}
+
+.graph-node {
+  width: 180px;
+  background: var(--operit-surfaceContainer);
+  color: var(--operit-onSurface);
+  border: 1.5px solid;
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 2px 5px #00000012;
+}
+
+.graph-node.selected {
+  box-shadow: 0 0 0 3px var(--operit-primaryContainer);
+}
+
+.graph-node.is-pending {
+  border-color: var(--operit-outline) !important;
+  opacity: 0.68;
+}
+
+.graph-node.is-running {
+  border-color: var(--operit-primary) !important;
+  box-shadow: 0 0 0 3px var(--operit-primaryContainer);
+}
+
+.graph-node.is-success {
+  border-color: #43a047 !important;
+}
+
+.graph-node.is-failed {
+  border-color: var(--operit-error) !important;
+}
+
+.graph-node.is-skipped {
+  border-color: var(--operit-outline) !important;
+  opacity: 0.52;
+}
+
+.node-kind {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+
+.node-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--operit-onSurfaceVariant);
+}
+
+.node-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.is-running .node-status {
+  color: var(--operit-primary);
+}
+
+.is-running .node-status::before {
+  animation: workflow-node-pulse 900ms ease-in-out infinite;
+}
+
+.is-success .node-status {
+  color: #43a047;
+}
+
+.is-failed .node-status {
+  color: var(--operit-error);
+}
+
+@keyframes workflow-node-pulse {
+  50% {
+    opacity: 0.25;
+    transform: scale(1.8);
+  }
+}
+
+.workflow-edge.edge-running .react-flow__edge-path {
+  stroke: var(--operit-primary);
+  stroke-width: 2.5px;
+}
+
+.workflow-edge.edge-success .react-flow__edge-path {
+  stroke: #43a047;
+  stroke-width: 2px;
+}
+
+.workflow-edge.edge-failed .react-flow__edge-path {
+  stroke: var(--operit-error);
+  stroke-width: 2px;
+}
+
+.workflow-edge.edge-skipped .react-flow__edge-path {
+  opacity: 0.35;
+  stroke-dasharray: 5 4;
+}
+
+.graph-node strong {
+  display: block;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.node-description {
+  font-size: 11px;
+  opacity: 0.65;
+  margin-top: 4px;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.react-flow__handle {
+  width: 12px;
+  height: 12px;
+  background: var(--operit-primary);
+  border: 2px solid var(--operit-surface);
+}
+
+.log {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px !important;
+}
+
+.react-flow__controls {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.react-flow__minimap {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+@media (max-width: 650px) {
+  .toolbar {
+    min-height: 64px !important;
+    height: 64px;
+    padding: 6px 10px !important;
+    gap: 2px;
+    flex-wrap: nowrap;
+  }
+
+  .title-block {
+    min-width: 64px;
+    padding-inline: 4px;
+  }
+
+  .title-block h6 {
+    font-size: 18px;
+    line-height: 24px;
+  }
+
+  .title-block .MuiTypography-caption {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 18px;
+  }
+
+  .toolbar-back,
+  .toolbar-secondary {
+    min-width: 40px !important;
+    width: 40px;
+    height: 40px;
+    padding: 8px !important;
+    border-radius: 50% !important;
+  }
+
+  .toolbar-back .MuiButton-startIcon,
+  .toolbar-secondary .MuiButton-startIcon {
+    margin: 0 !important;
+  }
+
+  .toolbar-back .action-label,
+  .toolbar-secondary .action-label {
+    display: none;
+  }
+
+  .run-action,
+  .new-action {
+    min-width: 0 !important;
+    height: 40px;
+    padding: 8px 12px !important;
+    border-radius: 20px !important;
+  }
+
+  .run-action .MuiButton-startIcon,
+  .new-action .MuiButton-startIcon {
+    margin-right: 3px;
+  }
+
+  .hint,
+  .react-flow__minimap {
+    display: none;
+  }
+
+  .list {
+    padding: 0 16px 16px;
+  }
+
+  .workflow-list-item {
+    display: flex;
+    gap: 4px 8px;
+    min-height: 0;
+    padding: 16px 0;
+  }
+
+  .workflow-list-summary {
+    grid-column: 1 / -1;
+  }
+
+  .workflow-list-actions {
+    justify-content: flex-end;
+    margin-top: 0;
+  }
+
+  .workflow-enabled-toggle .MuiFormControlLabel-label {
+    display: none;
+  }
+
+  .workflow-list-name {
+    font-size: 16px !important;
+  }
+
+  .workflow-list-meta {
+    margin-top: 7px;
+  }
+
+  .empty {
+    padding: 56px 20px;
+  }
+
+  .canvas-empty {
+    width: 85%;
+    top: 42%;
+  }
+
+  .graph-node {
+    width: 164px;
+    border-radius: 10px;
+    padding: 9px 11px;
+  }
+
+  .node-description {
+    max-width: 136px;
+  }
+
+  .react-flow__controls {
+    left: 12px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    flex-direction: row;
+    box-shadow: 0 2px 10px #0000001a;
+  }
+
+  .react-flow__controls-button {
+    width: 40px;
+    height: 40px;
+    border-bottom: 0;
+    border-right: 1px solid var(--xy-controls-button-border-color-default);
+  }
+
+  .react-flow__controls-button:last-child {
+    border-right: 0;
+  }
+
+  .mobile-node-bar {
+    position: absolute;
+    z-index: 6;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    display: flex;
+    gap: 8px;
+    padding: 6px;
+    border-radius: 22px;
+    background: var(--operit-surfaceContainer);
+    box-shadow: 0 4px 18px #00000024;
+    backdrop-filter: blur(12px);
+  }
+
+  .mobile-node-bar button {
+    height: 44px;
+    border-radius: 17px;
+  }
+
+  .MuiDialog-paperFullScreen {
+    border-radius: 0 !important;
+  }
+
+  .MuiDialog-paperFullScreen .MuiDialogTitle-root {
+    padding: 18px 20px 12px;
+  }
+
+  .MuiDialog-paperFullScreen .MuiDialogContent-root {
+    padding: 12px 20px;
+  }
+
+  .MuiDialog-paperFullScreen .MuiDialogActions-root {
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--operit-outlineVariant);
+  }
+}
+body {
+  font-family:
+    "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+.edit-selected {
+  position: fixed !important;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+}
+
+.node-picker-sheet {
+  border-radius: 24px 24px 0 0;
+  padding: 12px 16px calc(20px + env(safe-area-inset-bottom));
+}
+
+.node-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 16px;
+}
+
+.node-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.node-picker-item {
+  min-height: 56px;
+  justify-content: flex-start !important;
+  border-radius: 14px !important;
+}
+
+.node-picker-item:last-child {
+  grid-column: 1 / -1;
+}
+

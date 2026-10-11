@@ -1,13 +1,17 @@
 package app.operit
 
 object OperitRuntimeNative {
+    /** Accepts borrowed pipe handles from the Plugin SDK Binder endpoint. */
+    @JvmStatic external fun acceptPluginSdkPipes(reader: Int, writer: Int)
     init {
         System.loadLibrary("operit_flutter_bridge")
     }
 
+    /** Creates the Android-owned runtime with its required startup device model. */
     @JvmStatic external fun create(
         runtimeRoot: String,
         workspaceRoot: String,
+        deviceModel: String,
         host: AndroidRuntimeHost,
     ): Long
     @JvmStatic external fun createError(): String
@@ -17,27 +21,9 @@ object OperitRuntimeNative {
     @JvmStatic
     external fun runtimeBootstrapWrite(defaultRuntimeRoot: String, content: String): String
     @JvmStatic external fun destroy(handle: Long)
-    @JvmStatic external fun call(handle: Long, request: ByteArray): ByteArray
-    @JvmStatic external fun pushOpen(handle: Long, request: ByteArray): ByteArray
-    @JvmStatic external fun pushItem(handle: Long, item: ByteArray): ByteArray
-    @JvmStatic external fun pushClose(handle: Long, pushId: String): ByteArray
-    @JvmStatic external fun watchSnapshot(handle: Long, request: ByteArray): ByteArray
-    @JvmStatic external fun watchStream(handle: Long, request: ByteArray): ByteArray
-    @JvmStatic external fun nextWatchChannelEvent(handle: Long): ByteArray?
-    @JvmStatic external fun closeWatchStream(handle: Long, subscriptionId: String): ByteArray
-    @JvmStatic
-    external fun startWebAccessServer(
-        handle: Long,
-        bindAddress: String,
-        token: String,
-        shutdownToken: String,
-        webRoot: String,
-        deviceInfoJson: String,
-        enableWebAccess: String,
-        enableDiscovery: String,
-    ): String
+    /** Creates a retained direct FFI connection to the host runtime. */
+    @JvmStatic external fun connectCoreFfi(handle: Long): String
 
-    @JvmStatic external fun stopWebAccessServer(handle: Long): String
 
     @JvmStatic external fun emitRuntimeEvent(handle: Long, eventJson: String): String
 

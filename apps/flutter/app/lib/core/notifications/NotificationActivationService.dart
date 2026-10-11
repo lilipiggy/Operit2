@@ -6,7 +6,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import '../bridge/MethodChannelCoreProxy.dart';
+import '../bridge/RuntimeChannelInboundDispatch.dart';
 import '../logging/ClientLogger.dart';
 import '../runtime/RuntimeChannelInboundGateway.dart';
 

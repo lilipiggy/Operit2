@@ -19,34 +19,37 @@ class RuntimeBrowserOwnerSurfaceHost extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sessions = RuntimeBrowserOwner.instance;
+    final keepsOffstageOwnerViews =
+        !kIsWeb && defaultTargetPlatform != TargetPlatform.macOS;
     return Stack(
       clipBehavior: Clip.none,
       fit: StackFit.expand,
       children: <Widget>[
         child,
-        Positioned(
-          left: -4096,
-          top: -4096,
-          width: 1,
-          height: 1,
-          child: IgnorePointer(
-            child: AnimatedBuilder(
-              animation: sessions,
-              builder: (context, child) {
-                return Stack(
-                  children: <Widget>[
-                    for (final tab in sessions.tabs)
-                      if (!sessions.isWorkspaceSurfaceSession(tab.id))
-                        RuntimeBrowserOwnerWebView(
-                          tab: tab,
-                          layoutControlsSurfaceSize: false,
-                        ),
-                  ],
-                );
-              },
+        if (keepsOffstageOwnerViews)
+          Positioned(
+            left: -4096,
+            top: -4096,
+            width: 1,
+            height: 1,
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                animation: sessions,
+                builder: (context, child) {
+                  return Stack(
+                    children: <Widget>[
+                      for (final tab in sessions.tabs)
+                        if (!sessions.isWorkspaceSurfaceSession(tab.id))
+                          RuntimeBrowserOwnerWebView(
+                            tab: tab,
+                            layoutControlsSurfaceSize: false,
+                          ),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
-        ),
       ],
     );
   }

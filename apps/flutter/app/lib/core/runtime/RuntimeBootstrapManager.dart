@@ -3,7 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 
 import '../bridge/PlatformCoreProxy.dart';
@@ -69,9 +69,11 @@ class RuntimeBootstrapManager extends ChangeNotifier {
 
   static final RuntimeBootstrapManager instance = RuntimeBootstrapManager._();
   static const String _logTag = 'RuntimeBootstrap';
+  static const String _startupThemeModeKey = 'startupThemeMode';
 
   LocalRuntimeStorageConfig _config =
       LocalRuntimeStorageConfig.platformDefault();
+  ThemeMode _startupThemeMode = ThemeMode.system;
 
   /// Returns the current local bootstrap configuration.
   LocalRuntimeStorageConfig get config => _config;
@@ -85,6 +87,9 @@ class RuntimeBootstrapManager extends ChangeNotifier {
   /// Returns the identity selected for this application process.
   RuntimeIdentity get activeIdentity => _config.activeIdentity;
 
+  /// Returns the client-cached theme mode used during startup rendering.
+  ThemeMode get startupThemeMode => _startupThemeMode;
+
   /// Loads persisted runtime storage configuration and applies local roots.
   Future<void> initialize() async {
     final stopwatch = Stopwatch()..start();
@@ -94,12 +99,15 @@ class RuntimeBootstrapManager extends ChangeNotifier {
       final encoded = await platformCoreProxy.runtimeBootstrapRead();
       final LocalRuntimeStorageConfig storedConfig;
       if (encoded == null) {
+        _startupThemeMode = ThemeMode.system;
         storedConfig = LocalRuntimeStorageConfig.platformDefault();
         await _writeBootstrapConfig(storedConfig);
       } else {
-        storedConfig = LocalRuntimeStorageConfig.fromJson(
-          jsonDecode(encoded) as Map<String, Object?>,
+        final decoded = jsonDecode(encoded) as Map<String, Object?>;
+        _startupThemeMode = _decodeStartupThemeMode(
+          decoded[_startupThemeModeKey],
         );
+        storedConfig = LocalRuntimeStorageConfig.fromJson(decoded);
       }
       ClientLogger.i(
         'config read done localConfirmed=${storedConfig.confirmed} elapsedMs=${readStopwatch.elapsedMilliseconds}',
@@ -131,6 +139,23 @@ class RuntimeBootstrapManager extends ChangeNotifier {
       );
       rethrow;
     }
+  }
+
+  /// Loads persisted bootstrap state for a secondary Flutter engine.
+  ///
+  /// Detached windows share the native Rust runtime with the main engine, so
+  /// they must not apply storage roots or start the process-owned runtime a
+  /// second time. They still need the persisted configuration in order to
+  /// render the normal themed UI instead of the unconfigured bootstrap view.
+  Future<void> initializeForDetachedWindow() async {
+    final encoded = await platformCoreProxy.runtimeBootstrapRead();
+    if (encoded == null) {
+      await _apply(LocalRuntimeStorageConfig.platformDefault(), persist: false);
+      return;
+    }
+    final decoded = jsonDecode(encoded) as Map<String, Object?>;
+    _startupThemeMode = _decodeStartupThemeMode(decoded[_startupThemeModeKey]);
+    await _apply(LocalRuntimeStorageConfig.fromJson(decoded), persist: false);
   }
 
   /// Returns native storage paths for the stored local runtime config.
@@ -254,6 +279,10 @@ class RuntimeBootstrapManager extends ChangeNotifier {
     );
     await LocalRuntimeStorageBridge.apply(localStorage);
     await _apply(localStorage, persist: true);
+    // Startup logs were kept in memory while onboarding was unconfigured.
+    // Attach only after the native bridge has accepted the confirmed roots so
+    // the queued entries can be flushed safely.
+    ClientLogger.attachPersistentStorage();
     ClientLogger.i(
       'confirm local runtime storage done elapsedMs=${stopwatch.elapsedMilliseconds}',
       tag: _logTag,
@@ -279,10 +308,20 @@ class RuntimeBootstrapManager extends ChangeNotifier {
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
     await _apply(localStorage, persist: true);
+    ClientLogger.attachPersistentStorage();
     ClientLogger.i(
       'persist migrated local runtime storage done elapsedMs=${stopwatch.elapsedMilliseconds}',
       tag: _logTag,
     );
+  }
+
+  /// Persists the theme mode needed before Core preferences become available.
+  Future<void> saveStartupThemeMode(ThemeMode themeMode) async {
+    if (_startupThemeMode == themeMode) {
+      return;
+    }
+    await _writeBootstrapConfig(_config, startupThemeMode: themeMode);
+    _startupThemeMode = themeMode;
   }
 
   /// Applies one local runtime storage configuration.
@@ -296,6 +335,9 @@ class RuntimeBootstrapManager extends ChangeNotifier {
     if (persist) {
       await _writeBootstrapConfig(config);
     }
+    if (config.confirmed) {
+      ClientLogger.attachPersistentStorage();
+    }
     notifyListeners();
     ClientLogger.i(
       'apply done persist=$persist elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -304,8 +346,31 @@ class RuntimeBootstrapManager extends ChangeNotifier {
   }
 
   /// Serializes one validated bootstrap configuration through the platform Host.
-  Future<void> _writeBootstrapConfig(LocalRuntimeStorageConfig config) async {
+  Future<void> _writeBootstrapConfig(
+    LocalRuntimeStorageConfig config, {
+    ThemeMode? startupThemeMode,
+  }) async {
     config.validate();
-    await platformCoreProxy.runtimeBootstrapWrite(jsonEncode(config.toJson()));
+    final encodedConfig = <String, Object?>{
+      ...config.toJson(),
+      _startupThemeModeKey: (startupThemeMode ?? _startupThemeMode).name,
+    };
+    await platformCoreProxy.runtimeBootstrapWrite(jsonEncode(encodedConfig));
   }
+}
+
+/// Decodes the persisted client startup theme mode.
+ThemeMode _decodeStartupThemeMode(Object? value) {
+  if (value == null) {
+    return ThemeMode.system;
+  }
+  if (value is! String) {
+    throw const FormatException('startup theme mode must be a string');
+  }
+  return switch (value) {
+    'system' => ThemeMode.system,
+    'light' => ThemeMode.light,
+    'dark' => ThemeMode.dark,
+    _ => throw FormatException('invalid startup theme mode: $value'),
+  };
 }

@@ -1,4 +1,6 @@
+use operit_host_api::AtomicCounter::AtomicU64;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,7 @@ impl Default for PoolState {
 }
 
 static STATE: OnceLock<Mutex<PoolState>> = OnceLock::new();
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn state() -> &'static Mutex<PoolState> {
     STATE.get_or_init(|| Mutex::new(PoolState::default()))
@@ -269,7 +272,8 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
 
 fn new_id() -> String {
     let millis = operit_host_api::TimeUtils::currentTimeMillisU128();
-    format!("{millis:x}")
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{millis:x}-{sequence:x}")
 }
 
 pub(crate) fn encode_base64(bytes: &[u8]) -> String {

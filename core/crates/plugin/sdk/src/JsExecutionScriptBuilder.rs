@@ -76,6 +76,7 @@ pub fn buildExecutionPreludeSource() -> String {
         var _ = globalThis._;
         var dataUtils = globalThis.dataUtils;
         var toolCall = globalThis.toolCall;
+        var getToolCatalog = globalThis.getToolCatalog;
     "#
     .to_string()
 }

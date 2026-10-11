@@ -403,11 +403,16 @@ impl ToolPkgManager {
             self.isToolPkgContainer(normalizedContainer),
             "ToolPkg execution context requires a registered container"
         );
+        let apiVersion = self
+            .getToolPkgContainerRuntime(normalizedContainer)
+            .expect("registered ToolPkg execution context requires a container runtime")
+            .apiVersion;
         let engine =
             self.executionEngineFactory
                 .createToolPkgExecutionEngine(ToolPkgExecutionContext {
                     context_key: normalizedKey.to_string(),
                     container_package_name: normalizedContainer.to_string(),
+                    api_version: apiVersion,
                     text_resource_host: Arc::new(self.clone()),
                 });
         engines.insert(
@@ -450,11 +455,16 @@ impl ToolPkgManager {
             self.isToolPkgContainer(normalizedContainer),
             "ToolPkg execution context requires a registered container"
         );
+        let apiVersion = self
+            .getToolPkgContainerRuntime(normalizedContainer)
+            .expect("registered ToolPkg execution context requires a container runtime")
+            .apiVersion;
         let engine =
             self.executionEngineFactory
                 .createToolPkgExecutionEngine(ToolPkgExecutionContext {
                     context_key: normalizedKey.to_string(),
                     container_package_name: normalizedContainer.to_string(),
+                    api_version: apiVersion,
                     text_resource_host: Arc::new(self.clone()),
                 });
         engines.insert(
@@ -646,7 +656,7 @@ impl ToolPkgTextResourceHost for ToolPkgManager {
         &self,
         package_name_or_subpackage_id: &str,
         resource_path: &str,
-    ) -> Result<String, String> {
+    ) -> Result<Option<String>, String> {
         let normalizedPackageName = package_name_or_subpackage_id.trim();
         let runtime = self
             .getToolPkgContainerRuntime(normalizedPackageName)
@@ -656,10 +666,7 @@ impl ToolPkgTextResourceHost for ToolPkgManager {
                 self.getToolPkgContainerRuntime(&subpackage.containerPackageName)
             })
             .ok_or_else(|| format!("ToolPkg container not found: {normalizedPackageName}"))?;
-        self.readToolPkgResourceText(&runtime, resource_path)
-            .ok_or_else(|| {
-                format!("ToolPkg text resource not found: {normalizedPackageName}/{resource_path}")
-            })
+        Ok(self.readToolPkgResourceText(&runtime, resource_path))
     }
 }
 
@@ -675,7 +682,56 @@ impl ToolPkgHookDispatcher for ToolPkgManager {
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
+    ) -> crate::javascript::JsExecutionCompletion<Result<Option<String>, String>> {
+        let prepared = self.prepareToolPkgHook(enabledPackageNames, &invocation);
+        Box::pin(async move {
+            let (engine, script, params) = prepared?;
+            engine
+                .execute_script_function_with_timeout_millis(
+                    &script,
+                    &invocation.functionName,
+                    &params,
+                    &invocation.envOverrides,
+                    invocation.onIntermediateResult,
+                    invocation.dispatchIntermediateOnMain,
+                    invocation.timeoutMillis,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl ToolPkgManager {
+    /// Invokes a ToolPkg hook through the host-owned asynchronous execution boundary.
+    #[allow(non_snake_case)]
+    pub async fn dispatchToolPkgHookAsync(
+        &self,
+        enabledPackageNames: &[String],
+        invocation: ToolPkgHookInvocation,
     ) -> Result<Option<String>, String> {
+        let (engine, script, params) = self.prepareToolPkgHook(enabledPackageNames, &invocation)?;
+        engine
+            .execute_script_function_async(
+                script,
+                invocation.functionName,
+                params,
+                invocation.envOverrides,
+                invocation.onIntermediateResult,
+                invocation.dispatchIntermediateOnMain,
+                invocation.timeoutMillis,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Resolves the engine, script, and event parameters shared by hook execution APIs.
+    #[allow(non_snake_case)]
+    fn prepareToolPkgHook(
+        &self,
+        enabledPackageNames: &[String],
+        invocation: &ToolPkgHookInvocation,
+    ) -> Result<(Arc<dyn JsExecutionEngine>, String, BTreeMap<String, Value>), String> {
         let containerPackageName = invocation.containerPackageName.trim();
         let runtime = self
             .getToolPkgContainerRuntime(containerPackageName)
@@ -717,6 +773,10 @@ impl ToolPkgHookDispatcher for ToolPkgManager {
         params.insert(
             "containerPackageName".to_string(),
             Value::String(runtime.packageName.clone()),
+        );
+        params.insert(
+            "__operit_toolpkg_api_version".to_string(),
+            Value::String(runtime.apiVersion.clone()),
         );
         params.insert(
             "__operit_ui_package_name".to_string(),
@@ -786,17 +846,7 @@ impl ToolPkgHookDispatcher for ToolPkgManager {
 
         let contextKey = resolveToolPkgExecutionContextKey(&runtime.packageName, &params);
         let engine = self.getToolPkgExecutionEngine(&contextKey, &runtime.packageName);
-        engine
-            .execute_script_function_with_timeout_millis(
-                &script,
-                &invocation.functionName,
-                &params,
-                &invocation.envOverrides,
-                invocation.onIntermediateResult,
-                invocation.dispatchIntermediateOnMain,
-                invocation.timeoutMillis,
-            )
-            .map_err(|error| error.to_string())
+        Ok((engine, script, params))
     }
 }
 
@@ -836,6 +886,15 @@ fn normalizeToolPkgEntryPath(rawPath: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Asserts that an immediate mock completion is ready on its first poll.
+    fn pollReadyCompletion<T>(mut completion: crate::javascript::JsExecutionCompletion<T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(completion.as_mut(), &mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("immediate mock completion must be ready"),
+        }
+    }
+
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -969,6 +1028,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingExecutionEngine {
         destroyed: AtomicBool,
+        asyncHookParams: Mutex<Option<BTreeMap<String, Value>>>,
     }
 
     impl JsExecutionEngine for RecordingExecutionEngine {
@@ -982,8 +1042,9 @@ mod tests {
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
             _timeout_sec: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no script result for exact-deadline registry tests.
@@ -996,22 +1057,35 @@ mod tests {
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
             _timeout_millis: u64,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
-        /// Returns no script result asynchronously for registry tests.
+        /// Records hook parameters and yields once before completing asynchronous execution.
         fn execute_script_function_async(
             &self,
             _script: String,
             _function_name: String,
-            _params: BTreeMap<String, Value>,
+            params: BTreeMap<String, Value>,
             _env_overrides: BTreeMap<String, String>,
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
             _dispatch_intermediate_on_main: bool,
             _timeout_millis: u64,
         ) -> crate::javascript::JsExecutionFuture<JsExecutionResult<Option<String>>> {
-            Box::pin(async { Ok(None) })
+            *self
+                .asyncHookParams
+                .lock()
+                .expect("async hook params mutex poisoned") = Some(params);
+            let mut yielded = false;
+            Box::pin(std::future::poll_fn(move |context| {
+                if yielded {
+                    return std::task::Poll::Ready(Ok(Some("hook completed".to_string())));
+                }
+                yielded = true;
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }))
         }
 
         /// Returns an empty ToolPkg registration capture for registry tests.
@@ -1032,8 +1106,9 @@ mod tests {
             _runtime_options: &BTreeMap<String, Value>,
             _env_overrides: &BTreeMap<String, String>,
             _text_resources: Arc<BTreeMap<String, String>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no Compose DSL result asynchronously for registry tests.
@@ -1055,8 +1130,9 @@ mod tests {
             _runtime_options: &BTreeMap<String, Value>,
             _env_overrides: &BTreeMap<String, String>,
             _on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
-        ) -> JsExecutionResult<Option<String>> {
-            Ok(None)
+        ) -> crate::javascript::JsExecutionCompletion<JsExecutionResult<Option<String>>> {
+            let result = (|| Ok(None))();
+            Box::pin(std::future::ready(result))
         }
 
         /// Returns no Compose DSL action result asynchronously for registry tests.
@@ -1278,6 +1354,67 @@ mod tests {
         worker.join().expect("runtime view worker must finish");
     }
 
+    /// Verifies navigation hooks yield to the caller and preserve their event payload.
+    #[test]
+    fn asyncNavigationHookYieldsUntilHostExecutionCompletes() {
+        let (mut manager, factory) = snapshotRecordingManager();
+        manager.registerToolPkg(ToolPkgLoadResult {
+            containerPackage: ToolPackage {
+                name: "snapshot_package".to_string(),
+                ..ToolPackage::default()
+            },
+            containerRuntime: ToolPkgContainerRuntime {
+                packageName: "snapshot_package".to_string(),
+                mainEntry: "dist/main.js".to_string(),
+                sourceType: ToolPkgSourceType::ASSET,
+                sourcePath: "snapshot-package.toolpkg".to_string(),
+                ..ToolPkgContainerRuntime::default()
+            },
+            ..ToolPkgLoadResult::default()
+        });
+        let enabled = vec!["snapshot_package".to_string()];
+        let payload = serde_json::json!({"entryId": "open_bing_with_action"});
+        let mut execution = Box::pin(manager.dispatchToolPkgHookAsync(
+            &enabled,
+            ToolPkgHookInvocation {
+                containerPackageName: "snapshot_package".to_string(),
+                functionName: "openBingFromSidebar".to_string(),
+                event: "toolpkg_navigation_entry_action".to_string(),
+                eventName: Some("navigation_entry_action".to_string()),
+                pluginId: Some("open_bing_with_action".to_string()),
+                inlineFunctionSource: None,
+                eventPayload: payload.clone(),
+                executionContextKey: None,
+                runtimeKind: None,
+                envOverrides: BTreeMap::new(),
+                timestampMs: 1,
+                timeoutMillis: 60_000,
+                dispatchIntermediateOnMain: true,
+                onIntermediateResult: None,
+            },
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(execution.as_mut(), &mut context).is_pending());
+        assert_eq!(
+            std::future::Future::poll(execution.as_mut(), &mut context),
+            std::task::Poll::Ready(Ok(Some("hook completed".to_string())))
+        );
+        let engines = factory
+            .engines
+            .lock()
+            .expect("recording engine mutex poisoned");
+        let params = engines[0]
+            .asyncHookParams
+            .lock()
+            .expect("async hook params mutex poisoned");
+        let params = params
+            .as_ref()
+            .expect("hook must use asynchronous host execution");
+        assert_eq!(params["eventPayload"], payload);
+        assert_eq!(params["event"], "navigation_entry_action");
+        assert_eq!(params["functionName"], "openBingFromSidebar");
+    }
+
     /// Verifies ToolPkg contexts resolve modules through their bound resource host.
     #[test]
     fn createsToolPkgExecutionEngineWithResourceHost() {
@@ -1297,27 +1434,26 @@ mod tests {
             ..ToolPkgLoadResult::default()
         });
 
-        manager
-            .dispatchToolPkgHook(
-                &["snapshot_package".to_string()],
-                ToolPkgHookInvocation {
-                    containerPackageName: "snapshot_package".to_string(),
-                    functionName: "onInputMenuToggle".to_string(),
-                    event: "input_menu_toggle".to_string(),
-                    eventName: None,
-                    pluginId: Some("snapshot_hook".to_string()),
-                    inlineFunctionSource: None,
-                    eventPayload: Value::Object(Default::default()),
-                    executionContextKey: None,
-                    runtimeKind: None,
-                    envOverrides: BTreeMap::new(),
-                    timestampMs: 1,
-                    timeoutMillis: 1_000,
-                    dispatchIntermediateOnMain: true,
-                    onIntermediateResult: None,
-                },
-            )
-            .expect("snapshot ToolPkg hook dispatch must succeed");
+        pollReadyCompletion(manager.dispatchToolPkgHook(
+            &["snapshot_package".to_string()],
+            ToolPkgHookInvocation {
+                containerPackageName: "snapshot_package".to_string(),
+                functionName: "onInputMenuToggle".to_string(),
+                event: "input_menu_toggle".to_string(),
+                eventName: None,
+                pluginId: Some("snapshot_hook".to_string()),
+                inlineFunctionSource: None,
+                eventPayload: Value::Object(Default::default()),
+                executionContextKey: None,
+                runtimeKind: None,
+                envOverrides: BTreeMap::new(),
+                timestampMs: 1,
+                timeoutMillis: 1_000,
+                dispatchIntermediateOnMain: true,
+                onIntermediateResult: None,
+            },
+        ))
+        .expect("snapshot ToolPkg hook dispatch must succeed");
 
         let contexts = factory
             .contexts
@@ -1332,11 +1468,13 @@ mod tests {
             .text_resource_host
             .read_toolpkg_text_resource("snapshot_package", "dist/main.js")
             .expect("bound host must read the main module")
+            .expect("main module must exist")
             .contains("onInputMenuToggle"));
         assert!(context
             .text_resource_host
             .read_toolpkg_text_resource("snapshot_package", "dist/shared.js")
             .expect("bound host must read the shared module")
+            .expect("shared module must exist")
             .contains("createDefinition"));
     }
 }

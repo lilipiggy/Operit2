@@ -9,16 +9,12 @@ from pathlib import Path
 from common import (
     DIST_DIR,
     FLUTTER_APP_DIR,
-    build_env_with_typescript,
-    ensure_node_and_npm,
     flutter_command,
     flutter_pub_get,
     generate_dart_proxy_artifacts,
     prepare_python_command,
     require_command,
-    prepare_web_access_embedded_assets,
     run,
-    staged_non_ohos_flutter_dependencies,
 )
 
 
@@ -52,31 +48,22 @@ def parse_args() -> argparse.Namespace:
 # Builds the macOS Flutter app and writes a release archive.
 def main() -> int:
     args = parse_args()
-    prepare_web_access_embedded_assets()
     os.environ.setdefault("RUSTFLAGS", "-Awarnings")
-    typescript_version = os.environ.get("TYPESCRIPT_VERSION", "5.9.3")
-
     require_command("cargo")
     flutter = flutter_command()
-    ensure_node_and_npm()
-
-    env = build_env_with_typescript(typescript_version)
     if not args.skip_proxy_generation:
         generate_dart_proxy_artifacts()
 
     prepare_python_command()
-    with staged_non_ohos_flutter_dependencies():
-        flutter_pub_get(env=env)
-        if args.enforce_lockfile:
-            flutter_pub_get(enforce_lockfile=True, env=env)
+    flutter_pub_get(enforce_lockfile=args.enforce_lockfile)
 
-        command = [flutter, "build", "macos", "--release", "--no-pub"]
-        if args.build_name:
-            command.extend(["--build-name", args.build_name])
-        if args.build_number:
-            command.extend(["--build-number", args.build_number])
-        command.append("-v")
-        run(command, cwd=FLUTTER_APP_DIR, env=env)
+    command = [flutter, "build", "macos", "--release", "--no-pub"]
+    if args.build_name:
+        command.extend(["--build-name", args.build_name])
+    if args.build_number:
+        command.extend(["--build-number", args.build_number])
+    command.append("-v")
+    run(command, cwd=FLUTTER_APP_DIR)
 
     if not args.skip_package:
         archive_path = package_macos_app(args.archive_path)

@@ -1,0 +1,24 @@
+// ignore_for_file: file_names
+import 'dart:typed_data';
+
+/// Defines the version-one direct Core transport operation numbers.
+enum CoreTransportOperation {
+  call,
+  pushOpen,
+  pushItem,
+  pushClose,
+  watchSnapshot,
+  watchStream,
+  closeWatchStream,
+}
+
+abstract interface class CoreByteTransport {
+  /// Sends an encoded operation and returns its protocol response.
+  Future<Uint8List> request(
+    CoreTransportOperation operation,
+    Uint8List payload,
+  );
+
+  /// Opens one independently cancellable watch and returns its encoded frames.
+  Stream<Uint8List> watch(String subscriptionId, Uint8List payload);
+}

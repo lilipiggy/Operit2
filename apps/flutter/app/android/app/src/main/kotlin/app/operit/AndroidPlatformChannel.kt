@@ -2,6 +2,7 @@ package app.operit
 
 import android.Manifest
 import android.app.AppOpsManager
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,11 +10,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
-import app.operit.core.tools.system.AndroidPrivilegedCommandExecutor
-import app.operit.core.tools.system.AndroidPrivilegedCommandTarget
+import app.operit.core.tools.system.AndroidRootExecutionMode
+import app.operit.core.tools.system.AndroidRootExecutionSettings
+import app.operit.core.tools.system.AndroidRootShell
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
+import java.util.Locale
 import rikka.shizuku.Shizuku
 
 class AndroidPlatformChannel(
@@ -33,12 +38,64 @@ class AndroidPlatformChannel(
             "localRuntimeStoragePaths" -> localRuntimeStoragePaths(call, result)
             "setLocalRuntimeStorage" -> setLocalRuntimeStorage(call, result)
             "startLocalCoreService" -> startLocalCoreService(result)
+            "restartApplication",
+            "terminateApplication" -> terminateApplication(result)
             "localRuntimeStartupStatus" -> localRuntimeStartupStatus(result)
+            "readClipboardImages" -> readClipboardImages(result)
             "hostOnboardingPermissionSnapshot" -> hostOnboardingPermissionSnapshot(call, result)
             "hostOnboardingRequestPermission" -> hostOnboardingRequestPermission(call, result)
             else -> return false
         }
         return true
+    }
+
+    /** Reads image byte payloads from the Android clipboard. */
+    private fun readClipboardImages(result: MethodChannel.Result) {
+        try {
+            val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip
+            val images = mutableListOf<Map<String, Any>>()
+            if (clip != null) {
+                for (index in 0 until clip.itemCount) {
+                    val uri = clip.getItemAt(index).uri
+                    if (uri != null) {
+                        val mimeType = imageMimeTypeForUri(uri)
+                        if (mimeType != null) {
+                            images.add(
+                                mapOf(
+                                    "mimeType" to mimeType,
+                                    "bytes" to readUriBytes(uri),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            result.success(images)
+        } catch (error: Throwable) {
+            result.error("CLIPBOARD_IMAGE_READ_ERROR", error.message, null)
+        }
+    }
+
+    /** Resolves an Android content URI to a supported image MIME type. */
+    private fun imageMimeTypeForUri(uri: Uri): String? {
+        val mimeType = activity.contentResolver.getType(uri)?.trim()?.lowercase(Locale.US)
+        if (mimeType == null || !mimeType.startsWith("image/")) {
+            return null
+        }
+        return mimeType
+    }
+
+    /** Reads one Android content URI into a byte array. */
+    private fun readUriBytes(uri: Uri): ByteArray {
+        val stream =
+            activity.contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("Unable to open clipboard image: $uri")
+        stream.use { input ->
+            val output = ByteArrayOutputStream()
+            input.copyTo(output)
+            return output.toByteArray()
+        }
     }
 
     /** Returns Android onboarding authorization states for the requested host. */
@@ -48,7 +105,16 @@ class AndroidPlatformChannel(
             result.error("INVALID_HOST", "Invalid onboarding host", null)
             return
         }
-        onboardingPermissionSnapshot(result)
+        runtimeHost.runBackground {
+            try {
+                val snapshot = onboardingPermissionSnapshot()
+                activity.runOnUiThread { result.success(snapshot) }
+            } catch (error: Throwable) {
+                activity.runOnUiThread {
+                    result.error("PERMISSION_SNAPSHOT_ERROR", error.message, null)
+                }
+            }
+        }
     }
 
     /** Starts an Android onboarding authorization request for the requested host. */
@@ -157,53 +223,72 @@ class AndroidPlatformChannel(
         }
     }
 
+    /** Destroys the native Runtime and terminates the Android process cleanly. */
+    private fun terminateApplication(result: MethodChannel.Result) {
+        runtimeHost.runBackground {
+            try {
+                runtimeHost.destroy()
+                activity.stopService(
+                    Intent(activity.applicationContext, OperitCoreService::class.java),
+                )
+                activity.runOnUiThread {
+                    result.success(null)
+                    activity.finishAndRemoveTask()
+                    Process.killProcess(Process.myPid())
+                }
+            } catch (error: Throwable) {
+                activity.runOnUiThread {
+                    result.error("APPLICATION_TERMINATION_ERROR", error.message, null)
+                }
+            }
+        }
+    }
+
     /** Returns the latest native local-runtime startup stage. */
     private fun localRuntimeStartupStatus(result: MethodChannel.Result) {
         result.success(runtimeHost.runtimeStartupStatusMap())
     }
 
     /** Builds the Android onboarding authorization status snapshot. */
-    private fun onboardingPermissionSnapshot(result: MethodChannel.Result) {
-        result.success(
-            mapOf(
-                "android.fileManagement" to requirement(
-                    "android.fileManagement",
-                    hasFileManagementPermission(),
-                ),
-                "android.notifications" to requirement(
-                    "android.notifications",
-                    hasNotificationPermission(),
-                ),
-                "android.appList" to requirement(
-                    "android.appList",
-                    hasPackageQueryVisibilityPermission(),
-                ),
-                "android.usageStats" to requirement(
-                    "android.usageStats",
-                    hasUsageStatsPermission(),
-                ),
-                "android.writeSettings" to requirement(
-                    "android.writeSettings",
-                    canWriteSystemSettings(),
-                ),
-                "android.location" to requirement(
-                    "android.location",
-                    hasPermission(Manifest.permission.ACCESS_FINE_LOCATION),
-                ),
-                "android.bluetooth" to requirement(
-                    "android.bluetooth",
-                    hasBluetoothConnectPermission() && hasBluetoothScanPermission(),
-                ),
-                "android.overlay" to requirement("android.overlay", canDrawOverlays()),
-                "android.batteryOptimization" to requirement(
-                    "android.batteryOptimization",
-                    isIgnoringBatteryOptimizations(),
-                ),
-                "android.shizuku" to shizukuAuthorizationRequirement(),
-                "android.root" to requirement(
-                    "android.root",
-                    AndroidPrivilegeAuthorization.isRootAuthorized(activity),
-                ),
+    private fun onboardingPermissionSnapshot(): Map<String, Any> {
+        return mapOf(
+            "android.fileManagement" to requirement(
+                "android.fileManagement",
+                hasFileManagementPermission(),
+            ),
+            "android.notifications" to requirement(
+                "android.notifications",
+                hasNotificationPermission(),
+            ),
+            "android.appList" to requirement(
+                "android.appList",
+                hasPackageQueryVisibilityPermission(),
+            ),
+            "android.usageStats" to requirement(
+                "android.usageStats",
+                hasUsageStatsPermission(),
+            ),
+            "android.writeSettings" to requirement(
+                "android.writeSettings",
+                canWriteSystemSettings(),
+            ),
+            "android.location" to requirement(
+                "android.location",
+                hasPermission(Manifest.permission.ACCESS_FINE_LOCATION),
+            ),
+            "android.bluetooth" to requirement(
+                "android.bluetooth",
+                hasBluetoothConnectPermission() && hasBluetoothScanPermission(),
+            ),
+            "android.overlay" to requirement("android.overlay", canDrawOverlays()),
+            "android.batteryOptimization" to requirement(
+                "android.batteryOptimization",
+                isIgnoringBatteryOptimizations(),
+            ),
+            "android.shizuku" to shizukuAuthorizationRequirement(),
+            "android.root" to requirement(
+                "android.root",
+                AndroidPrivilegeAuthorization.isRootAuthorized(activity),
             ),
         )
     }
@@ -233,7 +318,7 @@ class AndroidPlatformChannel(
                 result.success(null)
             }
             "android.shizuku" -> requestShizukuAuthorization(result)
-            "android.root" -> requestRootAuthorization(result)
+            "android.root" -> requestRootAuthorization(call, result)
             else -> {
                 result.error("INVALID_ONBOARDING_REQUIREMENT", "Invalid onboarding requirement", null)
                 return
@@ -305,9 +390,22 @@ class AndroidPlatformChannel(
     }
 
     /** Verifies and records the user's explicit Root authorization. */
-    private fun requestRootAuthorization(result: MethodChannel.Result) {
+    private fun requestRootAuthorization(call: MethodCall, result: MethodChannel.Result) {
         runtimeHost.runBackground {
             try {
+                val current = AndroidPrivilegeAuthorization.rootExecutionSettings(activity)
+                val mode = call.argument<String>("rootExecutionMode")?.let {
+                    when (it) {
+                        "auto" -> AndroidRootExecutionMode.Auto
+                        "libsu" -> AndroidRootExecutionMode.ForceLibsu
+                        "exec" -> AndroidRootExecutionMode.ForceExec
+                        else -> throw IllegalArgumentException("unsupported Root execution mode: $it")
+                    }
+                } ?: current.mode
+                val command = call.argument<String>("suCommand") ?: current.suCommand
+                AndroidPrivilegeAuthorization.configureRootExecution(
+                    activity, AndroidRootExecutionSettings(mode, command),
+                )
                 verifyRootAuthorization()
                 activity.runOnUiThread { result.success(null) }
             } catch (error: Throwable) {
@@ -318,18 +416,16 @@ class AndroidPlatformChannel(
         }
     }
 
-    /** Executes a Root identity check and stores an explicit successful approval. */
+    /** Uses the same automatic/forced transport policy as actual Root commands. */
     private fun verifyRootAuthorization() {
-        val result =
-            AndroidPrivilegedCommandExecutor.execute(
-                target = AndroidPrivilegedCommandTarget.RootExec,
-                command = "id -u",
-                timeoutMillis = ROOT_AUTHORIZATION_TIMEOUT_MS,
-            )
-        if (result.exitCode != 0 || result.stdoutText().trim() != "0") {
-            throw IllegalStateException("Root authorization was not granted")
+        val status = AndroidRootShell.checkAccess(
+            AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
+            ROOT_AUTHORIZATION_TIMEOUT_MS,
+        )
+        AndroidPrivilegeAuthorization.setRootAuthorized(activity, status.granted)
+        check(status.granted) {
+            "Root authorization was not granted: ${status.diagnostics.joinToString("; ")}"
         }
-        AndroidPrivilegeAuthorization.setRootAuthorized(activity)
     }
 
     /** Requests broad shared-storage access for Android file tools. */
@@ -566,6 +662,6 @@ class AndroidPlatformChannel(
     private companion object {
         private const val ONBOARDING_PERMISSION_REQUEST_CODE = 2407
         private const val SHIZUKU_PERMISSION_REQUEST_CODE = 2408
-        private const val ROOT_AUTHORIZATION_TIMEOUT_MS = 10_000L
+        private const val ROOT_AUTHORIZATION_TIMEOUT_MS = 30_000L
     }
 }

@@ -1,19 +1,991 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:operit2/data/preferences/UserPreferencesManager.dart';
+import 'package:operit2/ui/theme/OperitTheme.dart';
+import 'package:operit2/ui/common/markdown/XmlRenderPluginRegistry.dart';
+import 'package:operit2/ui/features/chat/components/style/bubble/BubbleAiMessageComposable.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:desktop_widgets/desktop_widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
 import 'package:operit2/core/link/CoreLinkCodec.dart';
 import 'package:operit2/core/link/CoreLinkProtocol.dart';
+import 'package:operit2/core/logging/ClientLogger.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
 import 'package:operit2/ui/features/packages/screens/ToolPkgUiLauncherScreen.dart';
+import 'package:operit2/ui/features/chat/components/MessageContextMenu.dart';
+import 'package:operit2/ui/main/navigation/AppNavigationModels.dart';
 
+/// Verifies plugin rendering and message-menu integration through the Core bridge.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(ClientLogger.initialize);
+
+  testWidgets('bubble rebuild retains the XML plugin engine and action state', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge();
+    final clients = GeneratedCoreProxyClients(bridge);
+    final plugin = _pluginRuntime();
+    XmlRenderPluginRegistry.register(({
+      required tagName,
+      required xmlContent,
+      required textColor,
+      required isStreaming,
+      required xmlStream,
+    }) {
+      if (tagName != 'lifecycle_test') return null;
+      return ToolPkgUiLauncherScreen(
+        clients: clients,
+        plugin: plugin,
+        showLauncherChrome: false,
+      );
+    });
+    final rawMessage = _translationMessage('ai').toJson();
+    rawMessage['parts'] = [
+      core_proxy.MessagePart(
+        partId: 'badge',
+        sequence: 0,
+        kind: core_proxy.MessagePartKind.markdown,
+        content: '<lifecycle_test></lifecycle_test>',
+        toolCallId: null,
+        toolName: null,
+        attributes: const {},
+      ).toJson(),
+    ];
+    final message = core_proxy.ChatMessage.fromJson(rawMessage);
+
+    /// Rebuilds the real AI bubble while changing only its available width.
+    Widget screen(double width) => OperitTheme(
+      initialThemePreferenceSnapshot:
+          UserPreferencesManager.defaultThemePreferenceSnapshot,
+      initialThemeIsReady: false,
+      unconfiguredChildEnabled: true,
+      hostInteractionHostsEnabled: false,
+      child: Scaffold(
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: width,
+            child: BubbleAiMessageComposable(
+              message: message,
+              backgroundColor: Colors.white,
+              textColor: Colors.black,
+              splitMarkdownContent: (content) async => [
+                for (final type in [
+                  'markdownBlockStart',
+                  'markdownBlockChunk',
+                  'markdownBlockEnd',
+                ])
+                  core_proxy.MarkdownStreamEvent(
+                    chatId: 'test',
+                    eventType: type,
+                    value: type == 'markdownBlockChunk' ? content : null,
+                    id: null,
+                    blockId: 1,
+                    inlineId: null,
+                    parentBlockId: null,
+                    nodeType: 'XmlBlock',
+                    headerLevel: null,
+                    xml: null,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpWidget(screen(760));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Increment'));
+    await tester.pumpAndSettle();
+    expect(find.text('Counter: 1'), findsOneWidget);
+    final state = tester.state(find.byType(ToolPkgUiLauncherScreen));
+    await tester.pumpWidget(screen(560));
+    await tester.pumpAndSettle();
+    expect(tester.state(find.byType(ToolPkgUiLauncherScreen)), same(state));
+    expect(find.text('Counter: 1'), findsOneWidget);
+    expect(
+      bridge.calls.where(
+        (call) => call.methodName == 'executeToolPkgComposeDslScript',
+      ),
+      hasLength(1),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('equal nested XML inputs do not execute the script again', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge();
+    final clients = GeneratedCoreProxyClients(bridge);
+    final plugin = _pluginRuntime();
+
+    /// Recreates equal JSON values as an external rebuild does.
+    Widget screen() => MaterialApp(
+      home: ToolPkgUiLauncherScreen(
+        clients: clients,
+        plugin: plugin,
+        initialState: {
+          'xmlContent': '<test/>',
+          'items': [
+            {'value': 1},
+          ],
+        },
+        initialMemo: {
+          'nested': {
+            'values': [1, 2],
+          },
+        },
+      ),
+    );
+    await tester.pumpWidget(screen());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Increment'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(screen());
+    await tester.pumpAndSettle();
+    expect(find.text('Counter: 1'), findsOneWidget);
+    expect(
+      bridge.calls.where(
+        (call) => call.methodName == 'executeToolPkgComposeDslScript',
+      ),
+      hasLength(1),
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'moodlet XML screen stays independent of moduleSpec without screen',
+    (tester) async {
+      final bridge = _ToolPkgDslTestBridge();
+      const spec = {'id': 'silent_badge_fingerprint', 'runtime': 'compose_dsl'};
+      await tester.pumpWidget(
+        _screen(
+          bridge,
+          plugin: _moduleOnlyPluginRuntime(),
+          initialRouteId: 'xml_render',
+          embeddedScreenPath: 'dist/ui/silent_badge.ui.js',
+          initialModuleSpec: spec,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final read = bridge.calls.singleWhere(
+        (call) => call.methodName == 'readToolPkgTextResource',
+      );
+      expect((read.args as Map)['resourcePath'], 'dist/ui/silent_badge.ui.js');
+      expect(
+        bridge.calls.where(
+          (call) => call.methodName == 'getToolPkgComposeDslScript',
+        ),
+        isEmpty,
+      );
+      final execute = bridge.calls.singleWhere(
+        (call) => call.methodName == 'executeToolPkgComposeDslScript',
+      );
+      final args = execute.args as Map;
+      final options = args['runtimeOptions'] as Map;
+      expect(
+        args['contextKey'],
+        startsWith(
+          'toolpkg_xml_render:module_only_toolpkg:dist/ui/silent_badge.ui.js:',
+        ),
+      );
+      expect(options['__operit_script_screen'], 'dist/ui/silent_badge.ui.js');
+      expect(options['uiModuleId'], 'xml_render');
+      expect(options['moduleSpec'], spec);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('streaming inputs preserve the tree and execution context', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge();
+    final clients = GeneratedCoreProxyClients(bridge);
+    final plugin = _pluginRuntime();
+
+    /// Updates the XML input on the same embedded screen instance.
+    Widget screen(String xml) => MaterialApp(
+      home: ToolPkgUiLauncherScreen(
+        clients: clients,
+        plugin: plugin,
+        initialState: {'xmlContent': xml},
+        initialMemo: const {'source': 'xml'},
+      ),
+    );
+    await tester.pumpWidget(screen('<demo>'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Increment'));
+    await tester.pumpAndSettle();
+    expect(find.text('Counter: 1'), findsOneWidget);
+    final hostState = tester.state(find.byType(ToolPkgUiLauncherScreen));
+    final pending = Completer<String>();
+    bridge.renderCompletion = pending;
+    await tester.pumpWidget(screen('<demo>one'));
+    await tester.pumpAndSettle();
+    expect(find.text('Counter: 1'), findsOneWidget);
+    expect(tester.state(find.byType(ToolPkgUiLauncherScreen)), same(hostState));
+    final calls = bridge.calls.where(
+      (call) => call.methodName == 'executeToolPkgComposeDslScript',
+    );
+    final options = (calls.last.args as Map)['runtimeOptions'] as Map;
+    expect(options['state'], containsPair('xmlContent', '<demo>one'));
+    expect(options['state'], containsPair('count', 1));
+    expect(options['memo'], containsPair('source', 'xml'));
+    await tester.pumpWidget(screen('<demo>two</demo>'));
+    await tester.pump();
+    bridge.renderCompletion = null;
+    pending.complete(_counterRenderResult(99));
+    await tester.pumpAndSettle();
+    expect(find.text('Counter: 99'), findsNothing);
+    final latest = (calls.last.args as Map)['runtimeOptions'] as Map;
+    expect(latest['state'], containsPair('xmlContent', '<demo>two</demo>'));
+    expect(
+      bridge.calls.where(
+        (call) => call.methodName == 'acquireToolPkgExecutionEngine',
+      ),
+      hasLength(1),
+    );
+    expect(
+      bridge.calls.where(
+        (call) => call.methodName == 'releaseToolPkgExecutionEngine',
+      ),
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final sender in ['user', 'ai']) {
+    testWidgets('opens and closes translation from the $sender message menu', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = sender == 'user'
+          ? const Size(390, 844)
+          : const Size(1280, 720);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      final bridge = _ToolPkgDslTestBridge(
+        renderResult: (_) => jsonEncode({
+          'success': true,
+          'tree': _node(
+            'AlertDialog',
+            props: {
+              'title': 'Translation dialog',
+              'confirmText': 'Translate',
+              'dismissText': 'Close',
+              'closeOnConfirm': false,
+              'onConfirm': {'__actionId': 'translate'},
+            },
+            slots: {
+              'text': [
+                _node(
+                  'LazyColumn',
+                  props: {'width': 560, 'height': 200},
+                  children: [
+                    _node('Text', props: {'text': 'Selected message'}),
+                  ],
+                ),
+              ],
+            },
+          ),
+        }),
+      );
+      final clients = GeneratedCoreProxyClients(bridge);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageContextMenu(
+              message: _translationMessage(sender),
+              chatId: 'translation-chat',
+              messageIndex: 3,
+              clients: clients,
+              packageManager: clients.application.packageManager(),
+              onToggleFavoriteMessage: (timestamp, isFavorite) async {},
+              child: const Text('Message bubble'),
+            ),
+          ),
+        ),
+      );
+      if (sender == 'user') {
+        await tester.longPress(find.text('Message bubble'));
+      } else {
+        await tester.tap(
+          find.text('Message bubble'),
+          buttons: kSecondaryButton,
+        );
+      }
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.translate), findsOneWidget);
+      await tester.tap(find.text('Translate message'));
+      await tester.pumpAndSettle();
+      final invocation =
+          bridge.calls
+                  .singleWhere(
+                    (call) =>
+                        call.methodName == 'invokeToolPkgChatMessageMenuItem',
+                  )
+                  .args
+              as Map;
+      expect(invocation['chatId'], 'translation-chat');
+      expect(invocation['messageIndex'], 3);
+      expect((invocation['message'] as Map)['content'], 'Selected message');
+      expect((invocation['message'] as Map)['sender'], sender);
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.text('Selected message'), findsOneWidget);
+      final bounds = tester.getRect(find.byType(AlertDialog));
+      expect(bounds.left, greaterThanOrEqualTo(0));
+      expect(bounds.right, lessThanOrEqualTo(tester.view.physicalSize.width));
+      await tester.tap(find.text('Translate'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(bridge.calls.last.args, containsPair('actionId', 'translate'));
+      if (sender == 'user') {
+        await tester.tap(find.text('Close'));
+      } else {
+        await tester.tapAt(const Offset(4, 4));
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(ToolPkgUiLauncherScreen), findsNothing);
+      expect(find.text('Message bubble'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+    'publishes color-only theme changes without reloading the UI context',
+    (tester) async {
+      final bridge = _ToolPkgDslTestBridge();
+      final clients = GeneratedCoreProxyClients(bridge);
+      final plugin = _pluginRuntime();
+
+      /// Rebuilds the same plugin route with a different application color scheme.
+      Widget themed(Color seed) => MaterialApp(
+        theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed)),
+        home: ToolPkgUiLauncherScreen(clients: clients, plugin: plugin),
+      );
+      await tester.pumpWidget(themed(Colors.red));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Increment'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(themed(Colors.green));
+      await tester.pumpAndSettle();
+      expect(find.text('Counter: 1'), findsOneWidget);
+      expect(
+        bridge.calls.where(
+          (call) => call.methodName == 'executeToolPkgComposeDslScript',
+        ),
+        hasLength(1),
+      );
+      final changes = bridge.calls.where(
+        (call) =>
+            call.methodName == 'dispatchToolPkgComposeDslActionEvents' &&
+            (call.args as Map)['actionId'] == '__operit_theme_changed',
+      );
+      expect(changes, isNotEmpty);
+      final snapshot = (changes.last.args as Map)['payload'] as Map;
+      expect(snapshot['brightness'], 'light');
+      final expected = ColorScheme.fromSeed(seedColor: Colors.green).primary;
+      final rgb = (expected.toARGB32() & 0xffffff)
+          .toRadixString(16)
+          .padLeft(6, '0');
+      expect((snapshot['colors'] as Map)['primary'], '#${rgb}ff');
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('one DSL frame builds both window content and published pixels', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge();
+    final clients = GeneratedCoreProxyClients(bridge);
+    const definition = core_proxy.ToolPkgDesktopWidget(
+      containerPackageName: 'demo_toolpkg',
+      toolPkgId: 'demo_toolpkg',
+      widgetId: 'summary',
+      routeId: 'old-route',
+      renderRouteId: 'widget_summary',
+      title: 'Old title',
+      subtitle: '',
+      description: '',
+      icon: null,
+      order: 0,
+    );
+    late BuildContext hostContext;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) {
+            hostContext = context;
+            return const Scaffold(body: Text('Host'));
+          },
+        ),
+      ),
+    );
+    final frame = await ToolPkgDesktopWidgetFrame.load(
+      clients: clients,
+      definition: definition,
+      instanceId: 'shared-frame',
+      useEnglish: true,
+    );
+    String? opened;
+
+    /// Records the common action destination for either presentation.
+    Future<void> openRoute(String package, String route) async {
+      opened = '$package/$route';
+    }
+
+    final pixels = DesktopWidgetRasterizer.render(
+      context: hostContext,
+      size: const Size(180, 120),
+      child: frame.buildContent(
+        clients: clients,
+        instanceId: 'shared-frame',
+        onOpenRoute: openRoute,
+      ),
+    );
+    await tester.pump();
+    await tester.runAsync(() async {
+      expect((await pixels).take(4), [137, 80, 78, 71]);
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: frame.buildContent(
+            clients: clients,
+            instanceId: 'shared-frame',
+            onOpenRoute: openRoute,
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Widget loaded'));
+    expect(opened, 'demo_toolpkg/main');
+    expect(frame.definition.title, 'Summary');
+    expect(
+      bridge.calls.where(
+        (call) => call.methodName == 'renderToolPkgDesktopWidget',
+      ),
+      hasLength(1),
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'renders registered desktop widget and opens its application route',
+    (tester) async {
+      final bridge = _ToolPkgDslTestBridge();
+      String? openedRoute;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ToolPkgDesktopWidgetView(
+              clients: GeneratedCoreProxyClients(bridge),
+              definition: const core_proxy.ToolPkgDesktopWidget(
+                containerPackageName: 'demo_toolpkg',
+                toolPkgId: 'demo_toolpkg',
+                widgetId: 'summary',
+                routeId: 'main',
+                renderRouteId: 'widget_summary',
+                title: 'Summary',
+                subtitle: '',
+                description: '',
+                icon: null,
+                order: 0,
+              ),
+              instanceId: 'desktop-instance-1',
+              onOpenRoute: (package, route) async {
+                openedRoute = '$package/$route';
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Widget loaded'), findsOneWidget);
+      final call = bridge.calls.singleWhere(
+        (call) => call.methodName == 'renderToolPkgDesktopWidget',
+      );
+      expect(call.args, containsPair('widgetId', 'summary'));
+      expect(call.args, containsPair('instanceId', 'desktop-instance-1'));
+      await tester.tap(find.text('Widget loaded'));
+      await tester.pumpAndSettle();
+      expect(openedRoute, 'demo_toolpkg/main');
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('keeps alert dialog open according to close policy', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'alertdialog',
+          props: {
+            'title': 'Confirm operation',
+            'text': 'Dialog body',
+            'confirmText': 'Apply',
+            'closeOnConfirm': false,
+            'onConfirm': {'__actionId': 'confirm'},
+          },
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    expect(find.text('Dialog body'), findsOneWidget);
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    expect(find.text('Dialog body'), findsOneWidget);
+    expect(bridge.calls.last.args, containsPair('actionId', 'confirm'));
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    expect(find.text('Dialog body'), findsNothing);
+  });
+
+  for (final size in [
+    const Size(1280, 720),
+    const Size(390, 844),
+    const Size(740, 360),
+  ]) {
+    testWidgets('workflow dialog stays bounded at $size', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      final bridge = _ToolPkgDslTestBridge(
+        renderResult: (_) => jsonEncode({
+          'success': true,
+          'tree': _node(
+            'Dialog',
+            props: {
+              'properties': {'usePlatformDefaultWidth': false},
+            },
+            children: [
+              _node(
+                'Column',
+                props: {
+                  'width': 560,
+                  'padding': 24,
+                  'spacing': 16,
+                  'modifier': {
+                    '__modifierOps': [
+                      {
+                        'name': 'heightIn',
+                        'args': [0, 650],
+                      },
+                    ],
+                  },
+                },
+                children: [
+                  _node(
+                    'Text',
+                    props: {'text': 'Edit node', 'style': 'headlineSmall'},
+                  ),
+                  _node(
+                    'LazyColumn',
+                    props: {
+                      'height': 440,
+                      'weight': 1,
+                      'weightFill': false,
+                      'fillMaxWidth': true,
+                      'spacing': 12,
+                    },
+                    children: [
+                      for (var index = 0; index < 30; index++)
+                        _node(
+                          'Text',
+                          props: {'text': 'Field $index', 'height': 48},
+                        ),
+                    ],
+                  ),
+                  _node(
+                    'FlowRow',
+                    props: {
+                      'fillMaxWidth': true,
+                      'horizontalArrangement': 'end',
+                    },
+                    children: [
+                      _node(
+                        'TextButton',
+                        props: {
+                          'text': 'Save',
+                          'onClick': {'__actionId': 'save'},
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
+        }),
+      );
+      await tester.pumpWidget(_screen(bridge));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getSize(find.byType(Dialog)).width,
+        lessThanOrEqualTo(size.width),
+      );
+      final save = tester.getRect(find.text('Save'));
+      expect(save.bottom, lessThan(size.height));
+      final list = tester.widget<ListView>(
+        find.byWidgetPredicate((widget) => widget is ListView),
+      );
+      list.controller!.jumpTo(list.controller!.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(find.text('Field 29'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(bridge.calls.last.args, containsPair('actionId', 'save'));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+    'combined motion supports dragging and pinch without competing recognizers',
+    (tester) async {
+      final bridge = _ToolPkgDslTestBridge(
+        renderResult: (_) => jsonEncode({
+          'success': true,
+          'tree': _node(
+            'Canvas',
+            props: {
+              'width': 400,
+              'height': 300,
+              'commands': [],
+              'modifier': {
+                '__modifierOps': [
+                  {
+                    'name': 'dragGestures',
+                    'args': [
+                      {
+                        'onDragStart': {'__actionId': 'start'},
+                        'onDrag': {'__actionId': 'drag'},
+                        'onDragEnd': {'__actionId': 'end'},
+                        'onDragCancel': {'__actionId': 'cancel'},
+                      },
+                    ],
+                  },
+                  {
+                    'name': 'transformGestures',
+                    'args': [
+                      {
+                        'onGesture': {'__actionId': 'transform'},
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ),
+        }),
+      );
+      await tester.pumpWidget(_screen(bridge));
+      await tester.pumpAndSettle();
+      final origin =
+          tester.getTopLeft(find.byType(CustomPaint).last) +
+          const Offset(70, 70);
+      final first = await tester.startGesture(origin, pointer: 1);
+      await first.moveBy(const Offset(35, 0));
+      await tester.pump();
+      await first.moveBy(const Offset(20, 0));
+      await tester.pump();
+      final second = await tester.startGesture(
+        origin + const Offset(150, 0),
+        pointer: 2,
+      );
+      await second.moveBy(const Offset(45, 0));
+      await tester.pump();
+      await second.moveBy(const Offset(30, 0));
+      await tester.pump();
+      await second.up();
+      await first.up();
+      await tester.pumpAndSettle();
+      final actions = bridge.calls
+          .where((call) => call.args is Map)
+          .map((call) => (call.args as Map)['actionId'])
+          .toList();
+      expect(actions, containsAll(['start', 'drag', 'cancel', 'transform']));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('builds lazy list entries only near the viewport', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'LazyColumn',
+          props: {'height': 200, 'spacing': 8},
+          children: [
+            for (var index = 0; index < 200; index++)
+              _node(
+                'Text',
+                props: {'key': index, 'height': 48, 'text': 'Entry $index'},
+              ),
+          ],
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    expect(find.text('Entry 0'), findsOneWidget);
+    expect(find.text('Entry 199'), findsNothing);
+    final list = tester.widget<ListView>(
+      find.byWidgetPredicate((widget) => widget is ListView),
+    );
+    list.controller!.jumpTo(list.controller!.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    expect(find.text('Entry 199'), findsOneWidget);
+  });
+
+  testWidgets('applies column and row spacing between children', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'Column',
+          props: {'spacing': 10, 'padding': 14},
+          children: [
+            _node('Text', props: {'text': 'Section', 'height': 24}),
+            _node(
+              'Row',
+              props: {'spacing': 12},
+              children: [
+                _node(
+                  'Text',
+                  props: {'text': 'Logo', 'width': 34, 'height': 20},
+                ),
+                _node(
+                  'Text',
+                  props: {'text': 'Title', 'width': 40, 'height': 20},
+                ),
+              ],
+            ),
+          ],
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+
+    final section = tester.getRect(find.text('Section'));
+    final logo = tester.getRect(find.text('Logo'));
+    final title = tester.getRect(find.text('Title'));
+    expect(logo.top, section.bottom + 10);
+    expect(title.left, logo.right + 12);
+    expect(section.left, greaterThan(10));
+  });
+
+  testWidgets('wraps FlowRow children into additional lines', (tester) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'FlowRow',
+          props: {'width': 118, 'spacing': 10, 'runSpacing': 12},
+          children: [
+            _node('Text', props: {'text': 'Alpha', 'width': 50, 'height': 20}),
+            _node('Text', props: {'text': 'Beta', 'width': 50, 'height': 20}),
+            _node('Text', props: {'text': 'Gamma', 'width': 50, 'height': 20}),
+          ],
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+
+    final alpha = tester.getRect(find.text('Alpha'));
+    final beta = tester.getRect(find.text('Beta'));
+    final gamma = tester.getRect(find.text('Gamma'));
+    expect(find.byType(Wrap), findsOneWidget);
+    expect(beta.top, alpha.top);
+    expect(gamma.top, alpha.bottom + 12);
+  });
+
+  testWidgets('dispatches direct Row onClick actions', (tester) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'Row',
+          props: <String, Object?>{
+            'onClick': <String, Object?>{'__actionId': 'expand'},
+            'padding': <String, Object?>{'horizontal': 14, 'vertical': 12},
+          },
+          children: <Map<String, Object?>>[
+            _node('Text', props: <String, Object?>{'text': 'Expand'}),
+          ],
+        ),
+        'state': <String, Object?>{},
+        'memo': <String, Object?>{},
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Expand'));
+    await tester.pumpAndSettle();
+
+    final actionCall = bridge.calls.lastWhere(
+      (request) =>
+          request.methodName == 'dispatchToolPkgComposeDslActionEvents',
+    );
+    expect((actionCall.args as Map<String, Object?>)['actionId'], 'expand');
+  });
+
+  testWidgets('clickable site card navigates without an action return value', (
+    tester,
+  ) async {
+    final navigated = <String>[];
+    AppRouterGateway.install(
+      handler: (routeId, args, source) {
+        navigated.add(routeId);
+        expect(source, RouteEntrySource.script);
+        expect(args['id'], 'doubao');
+      },
+      reset: (_, _, _) {},
+    );
+    addTearDown(AppRouterGateway.clear);
+    var clicked = false;
+    final bridge = _ToolPkgDslTestBridge(
+      onAction: (args) {
+        expect(args['actionId'], 'open');
+        clicked = true;
+      },
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'Card',
+          props: {
+            'fillMaxWidth': true,
+            'modifier': {
+              '__modifierOps': [
+                {'name': 'fillMaxWidth', 'args': []},
+                {
+                  'name': 'clickable',
+                  'args': [
+                    {'__actionId': 'open'},
+                  ],
+                },
+              ],
+            },
+          },
+          children: [
+            _node('Text', props: {'text': 'Open site'}),
+          ],
+        ),
+        'navigationCommands': [
+          if (clicked)
+            {
+              'route':
+                  'toolpkg:com.operit.sidebar_model_sites:ui:model_sites_viewer',
+              'args': {'id': 'doubao'},
+            },
+        ],
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    expect(navigated, isEmpty);
+    await tester.tap(find.text('Open site'));
+    await tester.pumpAndSettle();
+    expect(navigated, [
+      'toolpkg:com.operit.sidebar_model_sites:ui:model_sites_viewer',
+    ]);
+  });
+
+  testWidgets('serializes rapid input and ignores delayed echoes', (
+    tester,
+  ) async {
+    var echo = '';
+    final bridge = _ToolPkgDslTestBridge(
+      holdActionCompletion: true,
+      onAction: (args) {
+        if (args['actionId'] == 'edit') echo = args['payload'] as String;
+      },
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'TextField',
+          props: {
+            'value': echo,
+            'onValueChange': {'__actionId': 'edit'},
+          },
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'a');
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'ab');
+    await tester.pump();
+    expect(echo, 'a');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'ab',
+    );
+    bridge.actionCompletion!.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(echo, 'ab');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'ab',
+    );
+    bridge.actionCompletion!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('dispatches long press from combined clickable', (tester) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: (_) => jsonEncode({
+        'success': true,
+        'tree': _node(
+          'Text',
+          props: {
+            'text': 'Hold here',
+            'modifier': {
+              '__modifierOps': [
+                {
+                  'name': 'combinedClickable',
+                  'args': [
+                    {
+                      'onClick': {'__actionId': 'click'},
+                      'onLongClick': {'__actionId': 'hold'},
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ),
+      }),
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('Hold here'));
+    await tester.pumpAndSettle();
+    expect(bridge.calls.last.args, containsPair('actionId', 'hold'));
+  });
 
   testWidgets('renders compose dsl tree from toolpkg route', (tester) async {
     final bridge = _ToolPkgDslTestBridge();
@@ -32,7 +1004,10 @@ void main() {
     final scriptCall = bridge.calls.singleWhere(
       (request) => request.methodName == 'getToolPkgComposeDslScript',
     );
-    expect(scriptCall.targetObjectId, 4);
+    final packageManagerId = GeneratedCoreProxyClients(
+      bridge,
+    ).application.packageManager().objectId;
+    expect(scriptCall.target, packageManagerId);
     expect(scriptCall.args, isA<Map<String, Object?>>());
     final args = scriptCall.args as Map<String, Object?>;
     expect(args['containerPackageName'], 'demo_toolpkg');
@@ -41,7 +1016,7 @@ void main() {
     final renderCall = bridge.calls.singleWhere(
       (request) => request.methodName == 'executeToolPkgComposeDslScript',
     );
-    expect(renderCall.targetObjectId, 4);
+    expect(renderCall.target, packageManagerId);
     final renderArgs = renderCall.args as Map<String, Object?>;
     expect(
       renderArgs['contextKey'],
@@ -93,6 +1068,55 @@ void main() {
     expect(moduleSpec['screen'], 'ui/toolbox.js');
   });
 
+  testWidgets('renders an embedded XML screen by its explicit resource path', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge();
+    await tester.pumpWidget(
+      _screen(
+        bridge,
+        plugin: _moduleOnlyPluginRuntime(),
+        initialRouteId: 'xml_render',
+        embeddedScreenPath: 'ui/planask/index.ui.js',
+        initialModuleSpec: <String, Object?>{
+          'id': 'xml_render',
+          'runtime': 'compose_dsl',
+          'screen': 'ui/planask/index.ui.js',
+          'toolPkgId': 'module_only_toolpkg',
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Counter: 0'), findsOneWidget);
+    final resourceCall = bridge.calls.singleWhere(
+      (request) => request.methodName == 'readToolPkgTextResource',
+    );
+    expect(
+      (resourceCall.args as Map<String, Object?>)['resourcePath'],
+      'ui/planask/index.ui.js',
+    );
+    expect(
+      bridge.calls.where(
+        (request) => request.methodName == 'getToolPkgComposeDslScript',
+      ),
+      isEmpty,
+    );
+    final renderCall = bridge.calls.singleWhere(
+      (request) => request.methodName == 'executeToolPkgComposeDslScript',
+    );
+    final renderArgs = renderCall.args as Map<String, Object?>;
+    expect(
+      renderArgs['contextKey'],
+      startsWith(
+        'toolpkg_xml_render:module_only_toolpkg:ui/planask/index.ui.js:',
+      ),
+    );
+    final runtimeOptions = renderArgs['runtimeOptions'] as Map<String, Object?>;
+    expect(runtimeOptions['uiModuleId'], 'xml_render');
+    expect(runtimeOptions['__operit_script_screen'], 'ui/planask/index.ui.js');
+  });
+
   testWidgets('dispatches compose dsl action and renders returned tree', (
     tester,
   ) async {
@@ -112,7 +1136,10 @@ void main() {
     final args = actionCall.args as Map<String, Object?>;
     expect(args['actionId'], 'increment');
     expect(args['payload'], isNull);
-    expect(actionCall.targetObjectId, 4);
+    expect(
+      actionCall.target,
+      GeneratedCoreProxyClients(bridge).application.packageManager().objectId,
+    );
     expect(
       args['contextKey'],
       startsWith(
@@ -209,6 +1236,21 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('weighted rows keep short workflow labels on one line', (
+    tester,
+  ) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: _weightedWorkflowRowRenderResult,
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(tester.getSize(find.text('已禁用')).height, lessThan(30));
+    expect(tester.getSize(find.text('节点')).height, lessThan(30));
+    expect(tester.getSize(find.text('工作流标题')).width, greaterThan(100));
   });
 
   testWidgets('renders text field slots and preserves focused input state', (
@@ -717,6 +1759,121 @@ void main() {
     expect(args['payload'], false);
   });
 
+  for (final contentLocation in ['children', 'slot']) {
+    testWidgets('renders icon button custom content from $contentLocation', (
+      tester,
+    ) async {
+      final icon = _node('Icon', props: {'name': 'delete', 'size': 16});
+      final bridge = _ToolPkgDslTestBridge(
+        renderResult: (_) => jsonEncode({
+          'success': true,
+          'tree': _node(
+            'Row',
+            children: [
+              _node(
+                'IconButton',
+                props: {
+                  'width': 32,
+                  'height': 32,
+                  'onClick': {'__actionId': 'delete'},
+                },
+                children: contentLocation == 'children' ? [icon] : [],
+                slots: contentLocation == 'slot'
+                    ? {
+                        'content': [icon],
+                      }
+                    : {},
+              ),
+            ],
+          ),
+        }),
+      );
+      await tester.pumpWidget(_screen(bridge));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ErrorWidget), findsNothing);
+      final iconFinder = find.byIcon(Icons.delete);
+      final buttonFinder = find.byType(IconButton);
+      expect(tester.widget<Icon>(iconFinder).size, 16);
+      expect(tester.getSize(buttonFinder), const Size(32, 32));
+      expect(tester.getCenter(iconFinder), tester.getCenter(buttonFinder));
+      await tester.tap(buttonFinder);
+      await tester.pumpAndSettle();
+      final action = bridge.calls.lastWhere(
+        (call) => call.methodName == 'dispatchToolPkgComposeDslActionEvents',
+      );
+      expect((action.args as Map<String, Object?>)['actionId'], 'delete');
+    });
+  }
+
+  for (final invalidType in ['Icon', 'IconButton']) {
+    testWidgets(
+      'contains invalid plugin $invalidType without breaking sibling actions',
+      (tester) async {
+        final bridge = _ToolPkgDslTestBridge(
+          renderResult: (count) => jsonEncode({
+            'success': true,
+            'tree': _node(
+              'Row',
+              children: [
+                _node('Text', props: {'text': 'Healthy sibling $count'}),
+                _node(
+                  invalidType,
+                  props: {
+                    'name': 'not_a_material_icon',
+                    'icon': 'not_a_material_icon',
+                    'width': 32,
+                    'height': 32,
+                  },
+                ),
+                _node(
+                  'IconButton',
+                  props: {
+                    'icon': 'add',
+                    'onClick': {'__actionId': 'increment'},
+                  },
+                ),
+              ],
+            ),
+          }),
+        );
+        await tester.pumpWidget(_screen(bridge));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.byType(ErrorWidget), findsNothing);
+        expect(find.text('Healthy sibling 0'), findsOneWidget);
+        await tester.tap(find.byIcon(Icons.add));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.byType(ErrorWidget), findsNothing);
+        expect(find.text('Healthy sibling 1'), findsOneWidget);
+      },
+    );
+  }
+
+  testWidgets('applies explicit size to a plain icon button', (tester) async {
+    final bridge = _ToolPkgDslTestBridge(
+      renderResult: _plainIconButtonRenderResult,
+    );
+    await tester.pumpWidget(_screen(bridge));
+    await tester.pumpAndSettle();
+
+    final finder = find.byType(IconButton);
+    expect(finder, findsOneWidget);
+    expect(tester.getSize(finder), const Size(32, 32));
+
+    final button = tester.widget<IconButton>(finder);
+    expect(button.style?.minimumSize?.resolve(<WidgetState>{}), Size.zero);
+    expect(button.style?.padding?.resolve(<WidgetState>{}), EdgeInsets.zero);
+    expect(button.style?.tapTargetSize, MaterialTapTargetSize.shrinkWrap);
+    final iconFinder = find.descendant(
+      of: finder,
+      matching: find.byIcon(Icons.close),
+    );
+    expect(iconFinder, findsOneWidget);
+    expect(tester.getCenter(iconFinder), tester.getCenter(finder));
+  });
+
   testWidgets('renders navigation item slots and dispatches item actions', (
     tester,
   ) async {
@@ -842,11 +1999,17 @@ void main() {
 Widget _screen(
   _ToolPkgDslTestBridge bridge, {
   core_proxy.ToolPkgContainerRuntime? plugin,
+  String? initialRouteId,
+  String? embeddedScreenPath,
+  Map<String, Object?>? initialModuleSpec,
 }) {
   return MaterialApp(
     home: ToolPkgUiLauncherScreen(
       clients: GeneratedCoreProxyClients(bridge),
       plugin: plugin ?? _pluginRuntime(),
+      initialRouteId: initialRouteId,
+      embeddedScreenPath: embeddedScreenPath,
+      initialModuleSpec: initialModuleSpec,
     ),
   );
 }
@@ -861,6 +2024,12 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
       values: <String, String>{'default': 'DSL test package'},
     ),
     version: '1.0.0',
+    apiVersion: '2.0.0',
+    publicApi: null,
+    publicApis: <core_proxy.ToolPkgRegisteredFunctionHook>[],
+    requires: <core_proxy.ToolPkgManifestRequirement>[],
+    dependencyIssues: <core_proxy.ToolPkgDependencyIssue>[],
+    manifestExtensions: <String, Object?>{},
     author: <String>['Operit'],
     mainEntry: 'dist/main.js',
     sourceType: core_proxy.ToolPkgSourceType.externalValue,
@@ -893,6 +2062,7 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
         keepAlive: true,
       ),
     ],
+    chatComposerSlots: <core_proxy.ToolPkgChatComposerSlotRuntime>[],
     navigationEntries: <core_proxy.ToolPkgNavigationEntryRuntime>[],
     desktopWidgets: <core_proxy.ToolPkgDesktopWidgetRuntime>[],
     appLifecycleHooks: <core_proxy.ToolPkgAppLifecycleHookRuntime>[],
@@ -902,6 +2072,8 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     chatInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatViewHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    chatMessageMenuItems: <core_proxy.ToolPkgChatMessageMenuItemRuntime>[],
+    chatRuntimeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     hostEventHooks: <core_proxy.ToolPkgHostEventHookRuntime>[],
     toolLifecycleHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     promptInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
@@ -912,7 +2084,12 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
     promptFinalizeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     promptEstimateFinalizeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     summaryGenerateHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    coreCommands: <core_proxy.ToolPkgCoreCommandRuntime>[],
     aiProviders: <core_proxy.ToolPkgAiProviderRuntime>[],
+    manifestExtensionHandlers:
+        <core_proxy.ToolPkgRegisteredManifestExtension>[],
+    logoResource: null,
+    marketOrigin: null,
   );
 }
 
@@ -926,6 +2103,12 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
       values: <String, String>{'default': 'Module only package'},
     ),
     version: '1.0.0',
+    apiVersion: '2.0.0',
+    publicApi: null,
+    publicApis: <core_proxy.ToolPkgRegisteredFunctionHook>[],
+    requires: <core_proxy.ToolPkgManifestRequirement>[],
+    dependencyIssues: <core_proxy.ToolPkgDependencyIssue>[],
+    manifestExtensions: <String, Object?>{},
     author: <String>['Operit'],
     mainEntry: 'dist/main.js',
     sourceType: core_proxy.ToolPkgSourceType.externalValue,
@@ -947,6 +2130,7 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
       ),
     ],
     uiRoutes: <core_proxy.ToolPkgUiRouteRuntime>[],
+    chatComposerSlots: <core_proxy.ToolPkgChatComposerSlotRuntime>[],
     navigationEntries: <core_proxy.ToolPkgNavigationEntryRuntime>[],
     desktopWidgets: <core_proxy.ToolPkgDesktopWidgetRuntime>[],
     appLifecycleHooks: <core_proxy.ToolPkgAppLifecycleHookRuntime>[],
@@ -956,6 +2140,8 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
     chatInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatViewHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     chatMessageHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    chatMessageMenuItems: <core_proxy.ToolPkgChatMessageMenuItemRuntime>[],
+    chatRuntimeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     hostEventHooks: <core_proxy.ToolPkgHostEventHookRuntime>[],
     toolLifecycleHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     promptInputHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
@@ -966,7 +2152,51 @@ core_proxy.ToolPkgContainerRuntime _moduleOnlyPluginRuntime() {
     promptFinalizeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     promptEstimateFinalizeHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
     summaryGenerateHooks: <core_proxy.ToolPkgFunctionHookRuntime>[],
+    coreCommands: <core_proxy.ToolPkgCoreCommandRuntime>[],
     aiProviders: <core_proxy.ToolPkgAiProviderRuntime>[],
+    manifestExtensionHandlers:
+        <core_proxy.ToolPkgRegisteredManifestExtension>[],
+    logoResource: null,
+    marketOrigin: null,
+  );
+}
+
+/// Creates a selected message whose tool and thinking parts must stay out of translation.
+core_proxy.ChatMessage _translationMessage(String sender) {
+  return core_proxy.ChatMessage(
+    sender: sender,
+    parts: [
+      for (final entry in [
+        (core_proxy.MessagePartKind.thinking, 'Private reasoning'),
+        (core_proxy.MessagePartKind.toolResult, 'Tool output'),
+        (core_proxy.MessagePartKind.markdown, 'Selected message'),
+      ].indexed)
+        core_proxy.MessagePart(
+          partId: 'part-${entry.$1}',
+          sequence: entry.$1,
+          kind: entry.$2.$1,
+          content: entry.$2.$2,
+          toolCallId: null,
+          toolName: null,
+          attributes: const {},
+        ),
+    ],
+    timestamp: 100,
+    roleName: '',
+    selectedVariantIndex: 0,
+    variantCount: 1,
+    provider: '',
+    modelName: '',
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    sentAt: 100,
+    outputDurationMs: 0,
+    waitDurationMs: 0,
+    completedAt: 101,
+    displayMode: core_proxy.ChatMessageDisplayMode.normal,
+    isFavorite: false,
+    contentStream: null,
   );
 }
 
@@ -974,34 +2204,82 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
   _ToolPkgDslTestBridge({
     String Function(int count)? renderResult,
     this.holdActionCompletion = false,
+    this.onAction,
   }) : _renderResult = renderResult ?? _counterRenderResult;
 
   final List<CoreCallRequest> calls = <CoreCallRequest>[];
   final String Function(int count) _renderResult;
   final bool holdActionCompletion;
+  final void Function(Map<String, Object?>)? onAction;
   Completer<void>? actionCompletion;
+  Completer<String>? renderCompletion;
   var _count = 0;
   var _checked = false;
 
-  /// Rejects encoded calls because this test models decoded tool package calls.
+  /// Encodes decoded test responses using the current native bridge envelope.
   @override
-  Future<Uint8List> callBytes(CoreCallRequest request) {
-    throw UnimplementedError();
+  Future<Uint8List> callBytes(CoreCallRequest request) async {
+    return encodeCoreLink(<Object?>[0, await call(request)]);
   }
 
   @override
   Future<Object?> call(CoreCallRequest request) async {
     calls.add(request);
     switch (request.methodName) {
+      case 'getToolPkgChatMessageMenuItems':
+        return [
+          const core_proxy.ToolPkgChatMessageMenuItem(
+            containerPackageName: 'demo_toolpkg',
+            itemId: 'translate_message',
+            title: 'Translate message',
+            icon: 'translate',
+            order: 20,
+            dialog: core_proxy.ToolPkgChatMessageMenuDialog(
+              screen: 'ui/translate.js',
+              title: 'Translation dialog',
+            ),
+          ).toJson(),
+        ];
+      case 'invokeToolPkgChatMessageMenuItem':
+        return jsonEncode({
+          'dialog': {'state': {}, 'moduleSpec': {}},
+        });
+      case 'getToolPkgContainerRuntime':
+        return _pluginRuntime().toJson();
+      case 'renderToolPkgDesktopWidget':
+        return jsonEncode({
+          'widget': const core_proxy.ToolPkgDesktopWidget(
+            containerPackageName: 'demo_toolpkg',
+            toolPkgId: 'demo_toolpkg',
+            widgetId: 'summary',
+            routeId: 'main',
+            renderRouteId: 'widget_summary',
+            title: 'Summary',
+            subtitle: '',
+            description: '',
+            icon: null,
+            order: 0,
+          ).toJson(),
+          'renderResult': {
+            'success': true,
+            'tree': _node('Text', props: {'text': 'Widget loaded'}),
+            'state': <String, Object?>{},
+            'memo': <String, Object?>{},
+          },
+        });
       case 'acquireToolPkgExecutionEngine':
       case 'releaseToolPkgExecutionEngine':
         return null;
       case 'getToolPkgComposeDslScript':
         return 'export default function render() {}';
+      case 'readToolPkgTextResource':
+        return 'export default function render() {}';
       case 'getToolPkgComposeDslScreenPath':
         final args = request.args as Map<String, Object?>;
         return args['uiModuleId'] == 'toolbox' ? 'ui/toolbox.js' : 'ui/main.js';
       case 'executeToolPkgComposeDslScript':
+        final pendingRender = renderCompletion;
+        if (pendingRender != null) return pendingRender.future;
         _count = 0;
         _checked = false;
         return _renderResult(_count);
@@ -1019,7 +2297,7 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
   @override
   Stream<T> openEmbeddedCoreStream<T>(
     String streamId,
-    int targetObjectId,
+    String target,
     String propertyName,
     Object? args,
     T Function(CoreLinkValueReader reader) decode,
@@ -1032,7 +2310,7 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
   Future<CoreEvent> watchSnapshot(CoreWatchRequest request) async {
     return CoreEvent(
       requestId: request.requestId,
-      targetObjectId: request.targetObjectId,
+      target: request.target,
       propertyName: request.propertyName,
       kind: 'Snapshot',
       value: null,
@@ -1048,13 +2326,14 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
     calls.add(
       CoreCallRequest(
         requestId: request.requestId,
-        targetObjectId: request.targetObjectId,
+        target: request.target,
         methodName: request.propertyName,
         args: request.args,
       ),
     );
     final args = request.args as Map<String, Object?>;
     final actionId = args['actionId'];
+    onAction?.call(args);
     if (actionId == 'increment') {
       _count += 1;
     }
@@ -1064,35 +2343,46 @@ class _ToolPkgDslTestBridge extends OperitRuntimeBridge {
     final result = actionId == 'toggle'
         ? _toggleRenderResult(_checked)
         : _renderResult(_count);
+    final intermediateResult = jsonDecode(result) as Map<String, Object?>;
+    intermediateResult['navigationCommands'] = <Object?>[];
     if (holdActionCompletion) {
       actionCompletion = Completer<void>();
     }
-    yield CoreEvent(
+    yield CoreEvent.raw(
       requestId: request.requestId,
-      targetObjectId: request.targetObjectId,
+      target: request.target,
       propertyName: request.propertyName,
       kind: 'Changed',
-      value: jsonEncode(<String, Object?>{
-        'phase': 'intermediate',
-        'result': result,
-      }),
+      decodeValue: decodeCoreLink<Object?>,
+      valueBytes: encodeCoreLink(
+        jsonEncode(<String, Object?>{
+          'phase': 'intermediate',
+          'result': jsonEncode(intermediateResult),
+        }),
+      ),
     );
     if (actionCompletion != null) {
       await actionCompletion!.future;
     }
-    yield CoreEvent(
+    yield CoreEvent.raw(
       requestId: request.requestId,
-      targetObjectId: request.targetObjectId,
+      target: request.target,
       propertyName: request.propertyName,
       kind: 'Changed',
-      value: jsonEncode(<String, Object?>{'phase': 'final', 'result': result}),
+      decodeValue: decodeCoreLink<Object?>,
+      valueBytes: encodeCoreLink(
+        jsonEncode(<String, Object?>{'phase': 'final', 'result': result}),
+      ),
     );
-    yield CoreEvent(
+    yield CoreEvent.raw(
       requestId: request.requestId,
-      targetObjectId: request.targetObjectId,
+      target: request.target,
       propertyName: request.propertyName,
       kind: 'Completed',
-      value: jsonEncode(<String, Object?>{'phase': 'complete'}),
+      decodeValue: decodeCoreLink<Object?>,
+      valueBytes: encodeCoreLink(
+        jsonEncode(<String, Object?>{'phase': 'complete'}),
+      ),
     );
   }
 }
@@ -1199,6 +2489,37 @@ String _rowSurfaceRenderResult(int count) {
               'Text',
               props: <String, Object?>{'text': '开始/暂停', 'style': 'labelLarge'},
             ),
+          ],
+        ),
+      ],
+    ),
+    'state': <String, Object?>{'count': count},
+    'memo': <String, Object?>{'route': 'main'},
+  });
+}
+
+/// Builds workflow labels beside an explicitly weighted title at card width.
+String _weightedWorkflowRowRenderResult(int count) {
+  return jsonEncode(<String, Object?>{
+    'success': true,
+    'tree': _node(
+      'Box',
+      children: <Map<String, Object?>>[
+        _node(
+          'Row',
+          props: <String, Object?>{'width': 320, 'spacing': 8},
+          children: <Map<String, Object?>>[
+            _node(
+              'Text',
+              props: <String, Object?>{
+                'text': '工作流标题',
+                'weight': 1,
+                'maxLines': 1,
+              },
+            ),
+            _node('Text', props: <String, Object?>{'text': '已禁用'}),
+            _node('Text', props: <String, Object?>{'text': '节点'}),
+            _node('Switch', props: <String, Object?>{'checked': false}),
           ],
         ),
       ],
@@ -1870,6 +3191,28 @@ String _iconToggleRenderResult(int count) {
                 props: <String, Object?>{'text': 'Selected toggle'},
               ),
             ],
+          },
+        ),
+      ],
+    ),
+    'state': <String, Object?>{'count': count},
+    'memo': <String, Object?>{'route': 'main'},
+  });
+}
+
+String _plainIconButtonRenderResult(int count) {
+  return jsonEncode(<String, Object?>{
+    'success': true,
+    'tree': _node(
+      'Row',
+      children: <Map<String, Object?>>[
+        _node(
+          'IconButton',
+          props: <String, Object?>{
+            'icon': 'close',
+            'width': 32,
+            'height': 32,
+            'onClick': <String, Object?>{'__actionId': 'close'},
           },
         ),
       ],

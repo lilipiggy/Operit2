@@ -95,7 +95,7 @@ impl ToolPkgChatInputHookBridge {
     }
 
     #[allow(non_snake_case)]
-    pub fn dispatchChatInputHooks(
+    pub async fn dispatchChatInputHooks(
         runtime: &ToolPkgBridgeRuntime,
         context: ChatInputHookContext,
     ) -> Option<ChatInputHookResult> {
@@ -109,16 +109,6 @@ impl ToolPkgChatInputHookBridge {
         }
 
         let mut current = context;
-        ChainLogger::info(
-            PLUGIN_CHAIN,
-            "plugin.toolpkg.chat_input.scan",
-            &[
-                ("event", current.eventName.clone()),
-                ("chatId", current.chatId.clone()),
-                ("hookCount", activeHooks.len().to_string()),
-                ("textChars", ChainLogger::lenField(&current.text)),
-            ],
-        );
         let manager = runtime.package_manager();
         let budget = ToolPkgPreHookTimeout::fromPreferences();
         let mut timedOut = false;
@@ -149,19 +139,21 @@ impl ToolPkgChatInputHookBridge {
                     ("function", hook.functionName.clone()),
                 ],
             );
-            let raw = manager.runToolPkgMainHookWithTimeoutMillis(
-                &hook.containerPackageName,
-                &hook.functionName,
-                TOOLPKG_EVENT_CHAT_INPUT,
-                Some(&current.eventName),
-                Some(&hook.hookId),
-                hook.functionSource.as_deref(),
-                buildChatInputEventPayload(&current),
-                None,
-                None,
-                None,
-                timeoutMillis,
-            );
+            let raw = manager
+                .runToolPkgMainHookWithTimeoutMillis(
+                    &hook.containerPackageName,
+                    &hook.functionName,
+                    TOOLPKG_EVENT_CHAT_INPUT,
+                    Some(&current.eventName),
+                    Some(&hook.hookId),
+                    hook.functionSource.as_deref(),
+                    buildChatInputEventPayload(&current),
+                    None,
+                    None,
+                    None,
+                    timeoutMillis,
+                )
+                .await;
             let hookTimedOut = raw
                 .as_ref()
                 .err()
@@ -271,11 +263,11 @@ impl ToolPkgChatInputHookBridge {
 
     /// Dispatches chat input hooks through the runtime registered by the common bridge.
     #[allow(non_snake_case)]
-    pub fn dispatchRegisteredChatInputHooks(
+    pub async fn dispatchRegisteredChatInputHooks(
         context: ChatInputHookContext,
     ) -> Option<ChatInputHookResult> {
         let runtime = CHAT_INPUT_RUNTIME.get()?;
-        Self::dispatchChatInputHooks(runtime, context)
+        Self::dispatchChatInputHooks(runtime, context).await
     }
 }
 

@@ -10,12 +10,13 @@ use operit_providers::chat::config::SystemToolPrompts as ProviderToolPrompts;
 use operit_providers::chat::enhance::FileBindingService::{
     FileBindingService, StructuredEditAction, StructuredEditOperation,
 };
+use operit_providers::chat::llmprovider::AIService::SendMessageRequest;
 use operit_providers::chat::EnhancedAIService::{EnhancedAIService, SendMessageOptions};
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_tools::runtime_support::{
-    CachedMcpToolInfo, CoreNodeToolRuntime, CoreRouteChangeHandler,
+    CachedMcpToolInfo, EdgeToolRuntime, CoreNodeToolRuntime, CoreRouteChangeHandler, CoreRouteResumeContext,
     ResolvedCharacterCardToolAccess, RuntimeBundledExternalSkillAsset, RuntimeCharacterCardInfo,
-    RuntimeCharacterMemoryBinding, RuntimeChatSendRequest, RuntimeChatSlot,
+    RuntimeCharacterMemoryBinding, RuntimeChatCallRequest, RuntimeChatSendRequest, RuntimeChatSlot,
     RuntimeCoreNodeRouteState, RuntimePluginAsset, RuntimeSkillCatalogEntry,
     RuntimeStructuredEditAction, RuntimeStructuredEditOperation, ToolRuntimeSupport,
     ToolRuntimeSupportFuture,
@@ -30,6 +31,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::core::chat::ChatRuntimeHolder::ChatRuntimeHolder;
 use crate::core::chat::ChatRuntimeSlot::ChatRuntimeSlot;
 use crate::data::preferences::CharacterCardManager::CharacterCardManager;
+use crate::data::preferences::SharedMemoryStoreManager::SharedMemoryStoreManager;
 use crate::data::preferences::CharacterCardToolAccessResolver::CharacterCardToolAccessResolver;
 use crate::data::preferences::EnvPreferences::EnvPreferences;
 use crate::data::preferences::MemorySearchSettingsPreferences::MemorySearchSettingsPreferences;
@@ -51,6 +53,7 @@ impl ToolRuntimeSupportService {
             chatRuntimeHolder,
             runtimeBindings: OnceLock::new(),
             coreNodeToolRuntime: RwLock::new(None),
+            edgeToolRuntime: OnceLock::new(),
             coreRouteChangeHandler: RwLock::new(None),
         })
     }
@@ -68,6 +71,7 @@ pub struct RuntimeToolSupport {
     chatRuntimeHolder: Arc<AsyncMutex<ChatRuntimeHolder>>,
     runtimeBindings: OnceLock<RuntimeToolBindings>,
     coreNodeToolRuntime: RwLock<Option<Arc<dyn CoreNodeToolRuntime>>>,
+    edgeToolRuntime: OnceLock<Arc<dyn EdgeToolRuntime>>,
     coreRouteChangeHandler: RwLock<Option<CoreRouteChangeHandler>>,
 }
 
@@ -95,6 +99,17 @@ impl RuntimeToolSupport {
 }
 
 impl ToolRuntimeSupport for RuntimeToolSupport {
+    fn bindEdgeToolRuntime(&self, runtime: Arc<dyn EdgeToolRuntime>) -> Result<(), String> {
+        self.edgeToolRuntime.set(runtime).map_err(|_| "Edge tool routing is already initialized".into())
+    }
+    fn executeEdgeTool(&self, nodeId: String, request: operit_link::CoreCallRequest)
+        -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<serde_json::Value, String>> {
+        match self.edgeToolRuntime.get() {
+            Some(runtime) => runtime.execute(nodeId, request),
+            None => Box::pin(async {Err("Edge tool routing is not initialized".into())}),
+        }
+    }
+
     /// Installs the live routing capability provided by the outer Core proxy.
     #[allow(non_snake_case)]
     fn bindCoreNodeToolRuntime(&self, runtime: Arc<dyn CoreNodeToolRuntime>) -> Result<(), String> {
@@ -138,6 +153,7 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
         &'a self,
         chatId: String,
         targetNodeId: String,
+        resumeContext: CoreRouteResumeContext,
     ) -> ToolRuntimeSupportFuture<'a, Result<(), String>> {
         let handler = self
             .coreRouteChangeHandler
@@ -147,7 +163,7 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
         Box::pin(async move {
             let handler =
                 handler.ok_or_else(|| "Core route change handler is not bound".to_string())?;
-            handler(chatId, targetNodeId).await
+            handler(chatId, targetNodeId, resumeContext).await
         })
     }
 
@@ -469,6 +485,86 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
         })
     }
 
+    /// Calls the configured functional model directly and keeps the request outside chat history.
+    #[allow(non_snake_case)]
+    fn callChatModel<'a>(
+        &'a self,
+        request: RuntimeChatCallRequest,
+    ) -> ToolRuntimeSupportFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let bindings = self.runtimeBindings()?.clone();
+            let mut service =
+                EnhancedAIService::new(bindings.toolHandler, bindings.providerRuntimeContext);
+            let (modelConfig, modelParameters, aiService) = service
+                .multi_service_manager
+                .getServiceBundleForFunction(request.functionType.clone())
+                .map_err(|error| error.to_string())?;
+            let thinkingQualityLevel = service
+                .provider_runtime_context
+                .support()
+                .thinkingQualityLevel()
+                .map_err(|error| error.to_string())?;
+            let providerModel = {
+                let provider = aiService.lock().await;
+                provider.provider_model()
+            };
+            let mut response = {
+                let mut provider = aiService.lock().await;
+                provider
+                    .send_message(SendMessageRequest {
+                        chat_history: request.turns,
+                        model_parameters: modelParameters,
+                        enable_thinking: request.enableThinking,
+                        thinking_quality_level: thinkingQualityLevel,
+                        thinking_configurations: modelConfig.thinkingConfigurations,
+                        thinking_option_id: modelConfig.thinkingOptionId,
+                        stream: false,
+                        available_tools: Vec::new(),
+                        preserve_think_in_history: true,
+                        enable_retry: false,
+                        on_non_fatal_error: None,
+                        on_tool_invocation: None,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+            let mut output = String::new();
+            response.collect(&mut |chunk| output.push_str(&chunk)).await;
+            if request.recordTokenUsage {
+                let (inputTokens, cachedInputTokens, outputTokens) = {
+                    let provider = aiService.lock().await;
+                    (
+                        provider.input_token_count(),
+                        provider.cached_input_token_count(),
+                        provider.output_token_count(),
+                    )
+                };
+                service
+                    .provider_runtime_context
+                    .support()
+                    .updateTokensForProviderModel(
+                        &providerModel,
+                        inputTokens,
+                        outputTokens,
+                        cachedInputTokens,
+                    )
+                    .map_err(|error| error.to_string())?;
+                operit_store::repository::UsageStatisticsStore::UsageStatisticsStore::new()
+                    .recordProviderModelRequest(
+                        providerModel,
+                        request.functionType,
+                        operit_store::repository::UsageStatisticsStore::UsageRequestSource::CHAT_RESPONSE,
+                        None,
+                        inputTokens,
+                        outputTokens,
+                        cachedInputTokens,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(output)
+        })
+    }
+
     /// Lists character cards through runtime preferences.
     #[allow(non_snake_case)]
     fn listCharacterCards(&self) -> Result<Vec<RuntimeCharacterCardInfo>, String> {
@@ -513,6 +609,26 @@ impl ToolRuntimeSupport for RuntimeToolSupport {
                 sharedMemoryId: card.sharedMemoryId,
             })
             .map_err(|error| error.to_string())
+    }
+
+    /// Rejects memory owner keys that are not a registered character card or shared store.
+    #[allow(non_snake_case)]
+    fn assertMemoryOwnerExists(&self, ownerKey: &str) -> Result<(), String> {
+        let parsed = operit_util::OperitPaths::parseMemoryOwnerKey(ownerKey)?;
+        match parsed.kind {
+            operit_util::OperitPaths::MemoryOwnerKind::Character => CharacterCardManager::getInstance()
+                .getCharacterCard(&parsed.id)
+                .map(|_| ())
+                .map_err(|error| format!("character memory owner not found: {error}")),
+            operit_util::OperitPaths::MemoryOwnerKind::Shared => {
+                let stores = SharedMemoryStoreManager::getInstance().getAllSharedMemoryStores()?;
+                if stores.iter().any(|store| store.id == parsed.id) {
+                    Ok(())
+                } else {
+                    Err(format!("shared memory store not found: {}", parsed.id))
+                }
+            }
+        }
     }
 
     /// Loads memory search settings for an owner scope.

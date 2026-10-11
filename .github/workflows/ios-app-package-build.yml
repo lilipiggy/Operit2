@@ -2,15 +2,6 @@ name: iOS App Package Build
 
 on:
   workflow_dispatch:
-    inputs:
-      build_web_assets:
-        description: "Force rebuild web assets before iOS packaging"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: read
@@ -28,8 +19,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore iSH Alpine rootfs cache
+        id: ish-rootfs-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: apps/flutter/app/ios/Runner/ish-root.tar.gz
+          key: ios-ish-rootfs-${{ hashFiles('tools/ios-runtime/ish/build_alpine_rootfs_linux.sh') }}
+
       - name: Build iSH Alpine rootfs
+        if: steps.ish-rootfs-cache.outputs.cache-hit != 'true'
         run: bash tools/ios-runtime/ish/build_alpine_rootfs_linux.sh
+
+      - name: Save iSH Alpine rootfs cache
+        if: steps.ish-rootfs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: apps/flutter/app/ios/Runner/ish-root.tar.gz
+          key: ios-ish-rootfs-${{ hashFiles('tools/ios-runtime/ish/build_alpine_rootfs_linux.sh') }}
 
       - name: Upload iSH Alpine rootfs
         uses: actions/upload-artifact@v4
@@ -46,13 +52,7 @@ jobs:
     env:
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
-      FVM_VERSION: 4.1.2
-      TYPESCRIPT_VERSION: 5.9.3
-      WASM_BINDGEN_VERSION: 0.2.122
-      WASI_SDK_VERSION: "20.0"
-      WEB_BUILD_CACHE_VERSION: v2
-      QUICKJS_WASM_SYS_WASI_SDK_MAJOR_VERSION: 20
-      QUICKJS_WASM_SYS_WASI_SDK_MINOR_VERSION: 0
+      FVM_VERSION: 4.3.0
 
     defaults:
       run:
@@ -68,11 +68,10 @@ jobs:
           name: operit2-ios-ish-rootfs-${{ github.sha }}
           path: apps/flutter/app/ios/Runner
 
-      - name: Install bootstrap Flutter
-        uses: subosito/flutter-action@v2
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
         with:
-          channel: stable
-          cache: true
+          sdk: 3.11.5
 
       - name: Install FVM
         run: |
@@ -106,8 +105,38 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
 
+      - name: Identify iSH build toolchain
+        id: ish-build-toolchain
+        run: |
+          toolchain_hash="$({
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos clang --version
+            meson --version
+            ninja --version
+          } | shasum -a 256 | awk '{ print $1 }')"
+          echo "hash=$toolchain_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Restore iSH static libraries
+        id: ish-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: apps/flutter/app/apple/ish-build/Release-iphoneos
+          key: ${{ runner.os }}-${{ runner.arch }}-ish-static-${{ steps.ish-build-toolchain.outputs.hash }}-${{ hashFiles('apps/flutter/app/ios/Runner.xcodeproj/project.pbxproj', 'tools/ios-runtime/ish/build_ish_ios.sh', 'tools/ios-runtime/ish/fetch_sources.py', 'tools/ios-runtime/ish/patches/**') }}
+
       - name: Check build environment
-        run: python3 tools/build_scripts/check_environment.py --products app --include-ios --github-runner
+        run: python3 tools/build_scripts/check_build_environment.py --products app --include-ios --github-runner
+
+      - name: Build iSH static libraries
+        if: steps.ish-build-cache.outputs.cache-hit != 'true'
+        run: bash tools/ios-runtime/ish/build_ish_ios.sh Release iphoneos iphoneos arm64
+
+      - name: Save iSH static libraries
+        if: steps.ish-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: apps/flutter/app/apple/ish-build/Release-iphoneos
+          key: ${{ runner.os }}-${{ runner.arch }}-ish-static-${{ steps.ish-build-toolchain.outputs.hash }}-${{ hashFiles('apps/flutter/app/ios/Runner.xcodeproj/project.pbxproj', 'tools/ios-runtime/ish/build_ish_ios.sh', 'tools/ios-runtime/ish/fetch_sources.py', 'tools/ios-runtime/ish/patches/**') }}
 
       - name: Cache Cargo outputs
         uses: actions/cache@v4
@@ -122,83 +151,8 @@ jobs:
             target/operit-build-tools
           key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN_VERSION }}-cargo-ios-${{ hashFiles('core/Cargo.lock', 'core/crates/**/Cargo.toml', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock', 'apps/flutter/native/operit-flutter-bridge/Cargo.toml', 'hosts/apple/Cargo.lock', 'hosts/apple/Cargo.toml', 'hosts/web/Cargo.lock', 'hosts/web/Cargo.toml') }}
 
-      - name: Restore web access bundle
-        id: web-build-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            apps/web_access/build/bundle
-            apps/flutter/app/assets/web_access
-          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN_VERSION }}-web-access-${{ env.WEB_BUILD_CACHE_VERSION }}-${{ hashFiles('apps/flutter/app/.fvmrc', 'apps/flutter/app/pubspec.yaml', 'apps/flutter/app/pubspec.lock', 'apps/flutter/app/lib/**/*.dart', 'apps/flutter/app/hook/build.dart', 'apps/web_access/web/**', 'apps/flutter/native/operit-flutter-bridge/Cargo.lock', 'apps/flutter/native/operit-flutter-bridge/Cargo.toml', 'apps/flutter/native/operit-flutter-bridge/src/**', 'core/Cargo.lock', 'core/crates/**/*.rs', 'core/crates/**/Cargo.toml', 'hosts/web/Cargo.lock', 'hosts/web/Cargo.toml', 'hosts/web/src/**', 'plugins/packages/**', 'plugins/tools/**') }}
-
-      - name: Decide web asset build
-        id: web-build
-        run: |
-          if [ "${{ steps.web-build-cache.outputs.cache-hit }}" != "true" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_web_assets }}" = "true" ]; }; then
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Restore TypeScript compiler
-        id: typescript-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .ci-tools/typescript
-          key: ${{ runner.os }}-typescript-${{ env.TYPESCRIPT_VERSION }}
-
-      - name: Restore wasm-bindgen CLI
-        if: steps.web-build.outputs.needed == 'true'
-        id: wasm-bindgen-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .ci-tools/wasm-bindgen
-          key: ${{ runner.os }}-${{ runner.arch }}-wasm-bindgen-${{ env.WASM_BINDGEN_VERSION }}
-
-      - name: Restore WASI SDK
-        if: steps.web-build.outputs.needed == 'true'
-        id: wasi-sdk-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: target/operit-build-tools/wasi-sdk-${{ env.WASI_SDK_VERSION }}-macos
-          key: ${{ runner.os }}-${{ runner.arch }}-wasi-sdk-${{ env.WASI_SDK_VERSION }}
-
-      - name: Build Web Access assets
-        if: steps.web-build.outputs.needed == 'true'
-        run: python3 tools/build_scripts/build_flutter_web_access.py --base-href /
-
       - name: Build and package unsigned iOS app
         run: python3 tools/build_scripts/build_flutter_ios.py
-
-      - name: Save TypeScript compiler
-        if: steps.typescript-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .ci-tools/typescript
-          key: ${{ runner.os }}-typescript-${{ env.TYPESCRIPT_VERSION }}
-
-      - name: Save wasm-bindgen CLI
-        if: steps.web-build.outputs.needed == 'true' && steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .ci-tools/wasm-bindgen
-          key: ${{ runner.os }}-${{ runner.arch }}-wasm-bindgen-${{ env.WASM_BINDGEN_VERSION }}
-
-      - name: Save WASI SDK
-        if: steps.web-build.outputs.needed == 'true' && steps.wasi-sdk-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/operit-build-tools/wasi-sdk-${{ env.WASI_SDK_VERSION }}-macos
-          key: ${{ runner.os }}-${{ runner.arch }}-wasi-sdk-${{ env.WASI_SDK_VERSION }}
-
-      - name: Save web access bundle
-        if: steps.web-build.outputs.needed == 'true' && steps.web-build-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            apps/web_access/build/bundle
-            apps/flutter/app/assets/web_access
-          key: ${{ steps.web-build-cache.outputs.cache-primary-key }}
 
       - name: Upload unsigned iOS app artifact
         uses: actions/upload-artifact@v4

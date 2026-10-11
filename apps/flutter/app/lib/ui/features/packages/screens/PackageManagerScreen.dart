@@ -5,20 +5,25 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import '../../../common/components/PageActivityMixin.dart';
+
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
+import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/AnimatedLazyIndexedStack.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../main/navigation/AppNavigationModels.dart';
+import '../../../main/navigation/ToolPkgCatalogChangeBus.dart';
 import '../../../main/screens/OperitScreens.dart';
 import '../../../main/screens/ScreenRouteRegistry.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../../chat/PendingChatDraftHandler.dart';
-import '../components/EmptyState.dart';
 import '../components/PackageTab.dart';
+import '../components/ExtensionScopeControls.dart';
 import '../dialogs/MCPImportDialog.dart';
 import '../dialogs/PackageDetailsDialog.dart';
+import '../dialogs/PackageEnvironmentVariablesDialog.dart';
 import '../dialogs/PackageToolRunDialog.dart';
 import '../dialogs/QuickPluginCreatorDialog.dart';
 import '../dialogs/SkillImportDialog.dart';
@@ -47,24 +52,54 @@ class PackageManagerScreen extends StatefulWidget {
   State<PackageManagerScreen> createState() => _PackageManagerScreenState();
 }
 
-class _PackageManagerScreenState extends State<PackageManagerScreen> {
+class _PackageManagerScreenState extends State<PackageManagerScreen>
+    with PageActivityMixin<PackageManagerScreen> {
   late PackageTab _selectedTab = widget.initialTab;
   bool _loading = true;
   bool _searchFiltering = false;
-  String? _errorMessage;
   String _searchInput = '';
   String _searchQuery = '';
   int _skillReloadRevision = 0;
   int _mcpReloadRevision = 0;
   PackageManagerSnapshot _snapshot = PackageManagerSnapshot.empty();
   Timer? _searchDebounce;
+  StreamSubscription<void>? _catalogSubscription;
+  int _snapshotGeneration = 0;
+  Map<String, String> _scopes = {};
+  StreamSubscription<int>? _scopeSubscription;
 
   GeneratedApplicationPackageManagerCoreProxy get _packageManager =>
       widget.clients.application.packageManager();
 
+  /// Watches catalog changes only while the retained manager is active.
   @override
-  void initState() {
-    super.initState();
+  void onPageActivityChanged(bool active) {
+    if (!active) {
+      _searchDebounce?.cancel();
+      _searchQuery = _searchInput.trim();
+      _searchFiltering = false;
+      _catalogSubscription?.cancel();
+      _catalogSubscription = null;
+      _scopeSubscription?.cancel();
+      _scopeSubscription = null;
+      _snapshotGeneration += 1;
+      return;
+    }
+    _skillReloadRevision += 1;
+    _mcpReloadRevision += 1;
+    _catalogSubscription = ToolPkgCatalogChangeBus.listen(() {
+      unawaited(_loadSnapshot(rescan: false));
+    });
+    _scopeSubscription = widget.clients.application
+        .extensionCatalogRevisionFlow()
+        .listen((_) {
+          if (!mounted || !isPageActive) return;
+          setState(() {
+            _skillReloadRevision += 1;
+            _mcpReloadRevision += 1;
+          });
+          unawaited(_loadSnapshot(rescan: false));
+        });
     _loadSnapshot();
   }
 
@@ -78,56 +113,79 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     }
   }
 
+  /// Releases catalog and search listeners when the page is removed.
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _catalogSubscription?.cancel();
+    _scopeSubscription?.cancel();
     super.dispose();
   }
 
-  Future<void> _loadSnapshot() async {
+  /// Loads the current package manager state into the screen.
+  Future<void> _loadSnapshot({bool rescan = true}) async {
+    if (!mounted || !isPageActive) {
+      return;
+    }
+    final generation = ++_snapshotGeneration;
     setState(() {
       _loading = true;
-      _errorMessage = null;
     });
     try {
-      await _packageManager.loadAvailablePackages();
+      if (rescan) {
+        await _packageManager.loadAvailablePackages();
+      }
       final results = await Future.wait<Object>(<Future<Object>>[
         _packageManager.getExecutableAvailablePackages(),
         _packageManager.getEnabledPackageNames(),
         _packageManager.getToolPkgContainerRuntimes(),
+        _packageManager.getToolPkgContainerOrder(),
         _packageManager.getBundledExternalPackageCandidates(),
         _packageManager.getBundledExternalToolPkgContainerRuntimes(),
       ]);
+      if (!mounted || !isPageActive || generation != _snapshotGeneration) {
+        return;
+      }
       final availablePackages =
           results[0] as Map<String, core_proxy.ToolPackage>;
       final enabledPackages = results[1] as List<String>;
       final pluginContainers =
           results[2] as List<core_proxy.ToolPkgContainerRuntime>;
-      final bundledExternalPackageCandidates =
-          results[3] as List<core_proxy.BundledExternalPackageCandidate>;
+      final pluginContainerOrder = results[3] as List<String>;
+      final bundledExternalCandidates =
+          results[4] as List<core_proxy.BundledExternalPackageCandidate>;
       final bundledExternalToolPkgContainers =
-          results[4] as List<core_proxy.ToolPkgContainerRuntime>;
-      final bundledExternalPluginCandidates =
-          _mergeBundledExternalPluginCandidates(
-            bundledExternalPackageCandidates,
-            bundledExternalToolPkgContainers,
-          );
+          results[5] as List<core_proxy.ToolPkgContainerRuntime>;
+      final pluginLoadIssues = await _packageManager.getToolPkgLoadIssues();
+      if (!mounted || !isPageActive || generation != _snapshotGeneration) {
+        return;
+      }
+      final scopes = await widget.clients.application.getExtensionScopes(
+        kind: 'package',
+      );
+      final bundledExternalPluginCandidates = _mergeBundledExternalCandidates(
+        bundledExternalCandidates,
+        bundledExternalToolPkgContainers,
+      );
       final enabledPackageNameSet = enabledPackages.toSet();
-      if (!mounted) {
+      if (!mounted || generation != _snapshotGeneration) {
         return;
       }
       setState(() {
+        _scopes = scopes;
         _snapshot = PackageManagerSnapshot(
           availablePackages: availablePackages,
           enabledPackageNames: enabledPackageNameSet,
           pluginContainers: pluginContainers,
+          pluginContainerOrder: pluginContainerOrder,
           enabledPluginContainerNames: pluginContainers
               .where(
                 (plugin) => enabledPackageNameSet.contains(plugin.packageName),
               )
               .map((plugin) => plugin.packageName)
               .toSet(),
-          bundledExternalPackageCandidates: bundledExternalPluginCandidates,
+          bundledExternalCandidates: bundledExternalPluginCandidates,
+          pluginLoadIssues: pluginLoadIssues,
         );
         _loading = false;
       });
@@ -135,20 +193,37 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
       debugPrint(
         'Failed to load package manager snapshot: $error\n$stackTrace',
       );
-      if (!mounted) {
+      if (!mounted || generation != _snapshotGeneration) {
         return;
       }
+      final loadIssue = core_proxy.ToolPkgLoadIssue(
+        sourcePath: 'runtime://package-manager',
+        packageName: null,
+        displayName: '插件管理器',
+        code: 'package_manager',
+        message: error.toString(),
+        packageKind: 'package_manager',
+      );
       setState(() {
-        _errorMessage = error.toString();
+        _snapshot = _snapshot.copyWith(
+          pluginLoadIssues: <core_proxy.ToolPkgLoadIssue>[
+            ..._snapshot.pluginLoadIssues,
+            loadIssue,
+          ],
+        );
         _loading = false;
       });
     }
   }
 
+  /// Applies an enabled-state change to a plugin container.
   Future<void> _setPluginEnabled(
     core_proxy.ToolPkgContainerRuntime plugin,
     bool enabled,
   ) async {
+    if (!mounted) {
+      return;
+    }
     final previous = _snapshot.enabledPluginContainerNames.contains(
       plugin.packageName,
     );
@@ -163,6 +238,8 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
           containerPackageName: plugin.packageName,
         );
       }
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+      await _loadSnapshot();
     } catch (error, stackTrace) {
       debugPrint('Failed to update plugin state: $error\n$stackTrace');
       if (!mounted) {
@@ -173,10 +250,14 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     }
   }
 
+  /// Applies an enabled-state change to a package.
   Future<void> _setPackageEnabled(
     core_proxy.ToolPackage package,
     bool enabled,
   ) async {
+    if (!mounted) {
+      return;
+    }
     final previous = _snapshot.enabledPackageNames.contains(package.name);
     _setOptimisticPackageEnabled(package.name, enabled);
     try {
@@ -185,6 +266,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
       } else {
         await _packageManager.disablePackage(packageName: package.name);
       }
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
     } catch (error, stackTrace) {
       debugPrint('Failed to update package state: $error\n$stackTrace');
       if (!mounted) {
@@ -195,7 +277,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     }
   }
 
+  /// Confirms and deletes a package from package storage.
   Future<void> _deletePackage(core_proxy.ToolPackage package) async {
+    if (!mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
@@ -219,13 +305,17 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
         );
       },
     );
-    if (confirmed != true) {
+    if (confirmed != true || !mounted) {
       return;
     }
     try {
       final deleted = await _packageManager.deletePackage(
         packageName: package.name,
       );
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+      if (!mounted) {
+        return;
+      }
       await _loadSnapshot();
       if (!mounted) {
         return;
@@ -235,6 +325,9 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
       }
     } catch (error, stackTrace) {
       debugPrint('Failed to delete package: $error\n$stackTrace');
+      if (!mounted) {
+        return;
+      }
       await _loadSnapshot();
       if (!mounted) {
         return;
@@ -243,7 +336,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     }
   }
 
+  /// Confirms and deletes a plugin container from package storage.
   Future<void> _deletePlugin(core_proxy.ToolPkgContainerRuntime plugin) async {
+    if (!mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) {
@@ -267,13 +364,17 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
         );
       },
     );
-    if (confirmed != true) {
+    if (confirmed != true || !mounted) {
       return;
     }
     try {
       final deleted = await _packageManager.deletePackage(
         packageName: plugin.packageName,
       );
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+      if (!mounted) {
+        return;
+      }
       await _loadSnapshot();
       if (!mounted) {
         return;
@@ -283,6 +384,9 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
       }
     } catch (error, stackTrace) {
       debugPrint('Failed to delete plugin: $error\n$stackTrace');
+      if (!mounted) {
+        return;
+      }
       await _loadSnapshot();
       if (!mounted) {
         return;
@@ -291,7 +395,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     }
   }
 
+  /// Updates the visible enabled state for a plugin container.
   void _setOptimisticPluginEnabled(String packageName, bool enabled) {
+    if (!mounted) {
+      return;
+    }
     setState(() {
       final next = Set<String>.from(_snapshot.enabledPluginContainerNames);
       if (enabled) {
@@ -303,7 +411,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     });
   }
 
+  /// Updates the visible enabled state for a package.
   void _setOptimisticPackageEnabled(String packageName, bool enabled) {
+    if (!mounted) {
+      return;
+    }
     setState(() {
       final next = Set<String>.from(_snapshot.enabledPackageNames);
       if (enabled) {
@@ -315,7 +427,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     });
   }
 
+  /// Shows a package manager message while this screen is active.
   void _showSnackBar(String message) {
+    if (!mounted) {
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
     );
@@ -359,21 +475,8 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
   }
 
   Widget _buildContent(BuildContext context) {
-    final error = _errorMessage;
     if (_loading && _snapshot.isEmpty) {
       return const M3LoadingPane();
-    }
-    if (error != null && _snapshot.isEmpty) {
-      return EmptyState(
-        icon: Icons.error_outline,
-        title: '加载失败',
-        message: error,
-        action: TextButton.icon(
-          onPressed: _loadSnapshot,
-          icon: const Icon(Icons.refresh),
-          label: const Text('刷新'),
-        ),
-      );
     }
     return RefreshIndicator(
       onRefresh: _loadSnapshot,
@@ -384,7 +487,10 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
           return switch (PackageTab.values[index]) {
             PackageTab.plugins => PluginTabContent(
               plugins: _filteredPlugins,
+              scopes: _scopes,
+              onMoveScope: _movePackageScope,
               morePlugins: _filteredMorePlugins,
+              loadIssues: _filteredPluginLoadIssues,
               enabledPluginNames: _snapshot.enabledPluginContainerNames,
               isLoading: _loading || _searchFiltering,
               isSearchActive: _searchQuery.trim().isNotEmpty,
@@ -392,15 +498,25 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
               onPluginTap: _showPluginDetails,
               onLoadMorePlugin: _loadBundledExternalPlugin,
               onPluginEnabledChanged: _setPluginEnabled,
+              onPluginReordered: _searchQuery.trim().isEmpty
+                  ? _reorderPlugin
+                  : null,
+              onLoadIssueTap: _showPackageLoadIssue,
             ),
             PackageTab.packages => PackageTabContent(
               packages: _filteredPackages,
+              scopes: _scopes,
+              onMoveScope: _movePackageScope,
               enabledPackageNames: _snapshot.enabledPackageNames,
+              loadIssues: _filteredPackageLoadIssues,
               isLoading: _loading || _searchFiltering,
               isSearchActive: _searchQuery.trim().isNotEmpty,
               onQuickPluginCreatorClick: _openQuickPluginCreator,
               onPackageTap: _showPackageDetails,
+              morePackages: _filteredMorePackages,
+              onLoadMorePackage: _loadBundledExternalPackage,
               onPackageEnabledChanged: _setPackageEnabled,
+              onLoadIssueTap: _showPackageLoadIssue,
             ),
             PackageTab.skills => SkillConfigScreen(
               clients: widget.clients,
@@ -450,7 +566,9 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     );
   }
 
+  /// Builds package management actions, including the shared environment editor.
   Widget _buildFloatingActions(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     final marketTab = switch (_selectedTab) {
       PackageTab.plugins => MarketHomeTab.all,
       PackageTab.packages => MarketHomeTab.all,
@@ -466,6 +584,18 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
+        FloatingActionButton.small(
+          heroTag: null,
+          tooltip: l10n.packageConfigureEnvironmentVariables,
+          backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+          foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+          onPressed: () => PackageEnvironmentVariablesDialog.show(
+            context: context,
+            clients: widget.clients,
+          ),
+          child: const Icon(Icons.settings_outlined),
+        ),
+        const SizedBox(height: 12),
         FloatingActionButton(
           heroTag: null,
           onPressed: () => _openMarket(marketTab),
@@ -521,11 +651,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
   List<core_proxy.ToolPkgContainerRuntime> get _filteredPlugins {
     final query = _searchQuery.trim().toLowerCase();
     final items = _snapshot.pluginContainers.toList()
-      ..sort(
-        (left, right) => toolPkgContainerDisplayName(
-          left,
-        ).compareTo(toolPkgContainerDisplayName(right)),
-      );
+      ..sort(_comparePluginOrder);
     if (query.isEmpty) {
       return items;
     }
@@ -540,14 +666,194 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
         .toList(growable: false);
   }
 
+  /// Filters structured plugin load issues using the package search query.
+  List<core_proxy.ToolPkgLoadIssue> get _filteredPluginLoadIssues {
+    final query = _searchQuery.trim().toLowerCase();
+    final items = _snapshot.pluginLoadIssues
+        .where(_isPluginLoadIssue)
+        .toList(growable: false);
+    return _filterLoadIssues(items, query);
+  }
+
+  /// Filters package-file issues using the package search query.
+  List<core_proxy.ToolPkgLoadIssue> get _filteredPackageLoadIssues {
+    final query = _searchQuery.trim().toLowerCase();
+    final items = _snapshot.pluginLoadIssues
+        .where((issue) => !_isPluginLoadIssue(issue))
+        .toList(growable: false);
+    return _filterLoadIssues(items, query);
+  }
+
+  /// Identifies ToolPkg errors that belong to the plugin tab.
+  bool _isPluginLoadIssue(core_proxy.ToolPkgLoadIssue issue) {
+    return switch (issue.packageKind) {
+      'toolpkg' || 'market_toolpkg' || 'bundled_toolpkg' => true,
+      _ => false,
+    };
+  }
+
+  /// Applies the common search predicate to structured load issues.
+  List<core_proxy.ToolPkgLoadIssue> _filterLoadIssues(
+    List<core_proxy.ToolPkgLoadIssue> items,
+    String query,
+  ) {
+    if (query.isEmpty) {
+      return items;
+    }
+    return items
+        .where(
+          (issue) =>
+              issue.displayName.toLowerCase().contains(query) ||
+              issue.sourcePath.toLowerCase().contains(query) ||
+              issue.message.toLowerCase().contains(query) ||
+              issue.packageName?.toLowerCase().contains(query) == true,
+        )
+        .toList(growable: false);
+  }
+
+  /// Opens the complete structured explanation for one failed package load.
+  void _showPackageLoadIssue(core_proxy.ToolPkgLoadIssue issue) {
+    if (!mounted) {
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        final colorScheme = Theme.of(context).colorScheme;
+        return AlertDialog(
+          title: Row(
+            children: <Widget>[
+              Icon(Icons.error_outline, color: colorScheme.error),
+              const SizedBox(width: 8),
+              Expanded(child: Text(issue.displayName)),
+            ],
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 680, maxHeight: 520),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  _IssueDetailLine(label: '错误类型', value: issue.code),
+                  _IssueDetailLine(label: '插件类型', value: issue.packageKind),
+                  _IssueDetailLine(
+                    label: '包/插件 ID',
+                    value: issue.packageName ?? '',
+                  ),
+                  _IssueDetailLine(label: '来源路径', value: issue.sourcePath),
+                  const SizedBox(height: 12),
+                  Text(
+                    issue.message,
+                    style: TextStyle(color: colorScheme.error),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Compares ToolPkg containers using the persisted package-manager order.
+  int _comparePluginOrder(
+    core_proxy.ToolPkgContainerRuntime left,
+    core_proxy.ToolPkgContainerRuntime right,
+  ) {
+    final order = <String, int>{
+      for (
+        var index = 0;
+        index < _snapshot.pluginContainerOrder.length;
+        index += 1
+      )
+        _snapshot.pluginContainerOrder[index]: index,
+    };
+    return order[left.packageName]!.compareTo(order[right.packageName]!);
+  }
+
+  /// Moves one plugin before the selected plugin and persists the complete order.
+  Future<void> _reorderPlugin(
+    String sourcePackageName,
+    String targetPackageName,
+  ) async {
+    if (sourcePackageName == targetPackageName) {
+      return;
+    }
+    final ordered = _filteredPlugins
+        .map((plugin) => plugin.packageName)
+        .toList();
+    final sourceIndex = ordered.indexOf(sourcePackageName);
+    final targetIndex = ordered.indexOf(targetPackageName);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      throw StateError(
+        'Plugin reorder target is not present in the current plugin list',
+      );
+    }
+    final moved = ordered.removeAt(sourceIndex);
+    ordered.insert(targetIndex, moved);
+    try {
+      await _packageManager.setToolPkgContainerOrder(packageNames: ordered);
+      if (!mounted) {
+        return;
+      }
+      await _loadSnapshot();
+    } catch (error, stackTrace) {
+      debugPrint(
+        'Failed to persist ToolPkg container order: $error\n$stackTrace',
+      );
+      if (!mounted) {
+        return;
+      }
+      await _loadSnapshot();
+      if (!mounted) {
+        return;
+      }
+      _showSnackBar(error.toString());
+    }
+  }
+
   List<core_proxy.BundledExternalPackageCandidate> get _filteredMorePlugins {
     final query = _searchQuery.trim().toLowerCase();
-    final items = _snapshot.bundledExternalPackageCandidates.toList()
-      ..sort(
-        (left, right) => bundledExternalPackageDisplayName(
-          left,
-        ).compareTo(bundledExternalPackageDisplayName(right)),
-      );
+    final items =
+        _snapshot.bundledExternalCandidates
+            .where((candidate) => candidate.isToolPkg)
+            .toList()
+          ..sort(
+            (left, right) => bundledExternalPackageDisplayName(
+              left,
+            ).compareTo(bundledExternalPackageDisplayName(right)),
+          );
+    if (query.isEmpty) {
+      return items;
+    }
+    return items
+        .where((item) {
+          return bundledExternalPackageDisplayName(
+                item,
+              ).toLowerCase().contains(query) ||
+              item.packageName.toLowerCase().contains(query) ||
+              localizedText(item.description).toLowerCase().contains(query);
+        })
+        .toList(growable: false);
+  }
+
+  List<core_proxy.BundledExternalPackageCandidate> get _filteredMorePackages {
+    final query = _searchQuery.trim().toLowerCase();
+    final items =
+        _snapshot.bundledExternalCandidates
+            .where((candidate) => !candidate.isToolPkg)
+            .toList()
+          ..sort(
+            (left, right) => bundledExternalPackageDisplayName(
+              left,
+            ).compareTo(bundledExternalPackageDisplayName(right)),
+          );
     if (query.isEmpty) {
       return items;
     }
@@ -564,7 +870,7 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
 
   /// Merges bundled external package and ToolPkg container candidates.
   List<core_proxy.BundledExternalPackageCandidate>
-  _mergeBundledExternalPluginCandidates(
+  _mergeBundledExternalCandidates(
     List<core_proxy.BundledExternalPackageCandidate> packageCandidates,
     List<core_proxy.ToolPkgContainerRuntime> toolPkgContainers,
   ) {
@@ -624,7 +930,11 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
         .toList(growable: false);
   }
 
+  /// Shows details and actions for a plugin container.
   void _showPluginDetails(core_proxy.ToolPkgContainerRuntime plugin) {
+    if (!mounted) {
+      return;
+    }
     showDialog<void>(
       context: context,
       builder: (context) {
@@ -634,18 +944,18 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
             plugin.packageName,
           ),
           packageManager: _packageManager,
-          onEnabledChanged: (enabled) {
-            Navigator.of(context).pop();
-            _setPluginEnabled(plugin, enabled);
-          },
           onOpenUi: (initialRouteId) {
             Navigator.of(context).pop();
-            _openPluginUi(plugin, initialRouteId: initialRouteId);
+            if (mounted) {
+              _openPluginUi(plugin, initialRouteId: initialRouteId);
+            }
           },
-          onDeletePackage: _isExternalPlugin(plugin)
+          onDeletePackage: _canDeletePlugin(plugin)
               ? () {
                   Navigator.of(context).pop();
-                  _deletePlugin(plugin);
+                  if (mounted) {
+                    unawaited(_deletePlugin(plugin));
+                  }
                 }
               : null,
         );
@@ -653,24 +963,82 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     );
   }
 
-  bool _isExternalPlugin(core_proxy.ToolPkgContainerRuntime plugin) {
-    return plugin.sourceType.toString() == 'EXTERNAL';
+  /// Returns whether the plugin source can be removed from package storage.
+  bool _canDeletePlugin(core_proxy.ToolPkgContainerRuntime plugin) {
+    return switch (plugin.sourceType) {
+      core_proxy.ToolPkgSourceType.asset => false,
+      core_proxy.ToolPkgSourceType.market ||
+      core_proxy.ToolPkgSourceType.externalValue => true,
+    };
   }
 
+  /// Moves an installed package with its configuration and refreshes all rows.
+  Future<void> _movePackageScope(String id) async {
+    try {
+      final moved = await changeExtensionScope(
+        context: context,
+        clients: widget.clients,
+        kind: 'package',
+        id: id,
+        currentScope: _scopes[id]!,
+      );
+      if (moved) await _loadSnapshot();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      await _loadSnapshot();
+    }
+  }
+
+  /// Imports one bundled external ToolPkg container from runtime assets.
   Future<void> _loadBundledExternalPlugin(
     core_proxy.BundledExternalPackageCandidate plugin,
   ) async {
-    await _runAddAction(
-      () => _packageManager.importBundledExternalPackage(
-        packageName: plugin.packageName,
-      ),
-    );
+    final scope = await chooseExtensionScope(context);
+    if (scope == null) return;
+    await _runAddAction(() async {
+      final result = await _packageManager
+          .importBundledExternalToolPkgContainer(
+            containerPackageName: plugin.packageName,
+          );
+      await widget.clients.application.setExtensionScope(
+        kind: 'package',
+        id: plugin.packageName,
+        scope: scope,
+      );
+      return result;
+    });
   }
 
+  /// Imports one bundled external standalone package from runtime assets.
+  Future<void> _loadBundledExternalPackage(
+    core_proxy.BundledExternalPackageCandidate package,
+  ) async {
+    final scope = await chooseExtensionScope(context);
+    if (scope == null) return;
+    await _runAddAction(() async {
+      final result = await _packageManager.importBundledExternalPackage(
+        packageName: package.packageName,
+      );
+      await widget.clients.application.setExtensionScope(
+        kind: 'package',
+        id: package.packageName,
+        scope: scope,
+      );
+      return result;
+    });
+  }
+
+  /// Opens the plugin-provided interface at an optional initial route.
   void _openPluginUi(
     core_proxy.ToolPkgContainerRuntime plugin, {
     String? initialRouteId,
   }) {
+    if (!mounted) {
+      return;
+    }
     if (!_snapshot.enabledPluginContainerNames.contains(plugin.packageName)) {
       return;
     }
@@ -685,20 +1053,21 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     );
   }
 
+  /// Shows details and actions for a package.
   void _showPackageDetails(core_proxy.ToolPackage package) {
+    if (!mounted) {
+      return;
+    }
     showDialog<void>(
       context: context,
       builder: (context) {
         return PackageDetailsDialog(
           package: package,
-          enabled: _snapshot.enabledPackageNames.contains(package.name),
-          onEnabledChanged: (enabled) {
-            Navigator.of(context).pop();
-            _setPackageEnabled(package, enabled);
-          },
           onDeletePackage: () {
             Navigator.of(context).pop();
-            _deletePackage(package);
+            if (mounted) {
+              unawaited(_deletePackage(package));
+            }
           },
           onRunTool: (tool) {
             showDialog<void>(
@@ -739,11 +1108,18 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     if (file == null) {
       return;
     }
-    await _runAddAction(
-      () => _packageManager.addPackageFileFromExternalStorage(
-        filePath: file.path,
-      ),
-    );
+    final scope = await chooseExtensionScope(context);
+    if (scope == null) return;
+    await _runAddAction(() async {
+      final result = await _packageManager
+          .addPackageFileFromExternalStorageResult(filePath: file.path);
+      await widget.clients.application.setExtensionScope(
+        kind: 'package',
+        id: result.packageName,
+        scope: scope,
+      );
+      return result;
+    });
   }
 
   Future<void> _importPackage() async {
@@ -758,11 +1134,18 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     if (file == null) {
       return;
     }
-    await _runAddAction(
-      () => _packageManager.addPackageFileFromExternalStorage(
-        filePath: file.path,
-      ),
-    );
+    final scope = await chooseExtensionScope(context);
+    if (scope == null) return;
+    await _runAddAction(() async {
+      final result = await _packageManager
+          .addPackageFileFromExternalStorageResult(filePath: file.path);
+      await widget.clients.application.setExtensionScope(
+        kind: 'package',
+        id: result.packageName,
+        scope: scope,
+      );
+      return result;
+    });
   }
 
   Future<void> _showMcpImportDialog() async {
@@ -795,23 +1178,44 @@ class _PackageManagerScreenState extends State<PackageManagerScreen> {
     });
   }
 
-  Future<void> _runAddAction(Future<String> Function() action) async {
+  Future<void> _runAddAction(Future<Object?> Function() action) async {
     try {
-      final result = await action();
+      await action();
       if (!mounted) {
         return;
       }
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
       await _loadSnapshot();
-      if (mounted && result.trim().isNotEmpty) {
-        _showSnackBar(result);
-      }
     } catch (error, stackTrace) {
       debugPrint('Failed to run package add action: $error\n$stackTrace');
       if (!mounted) {
         return;
       }
-      _showSnackBar(error.toString());
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      await _loadSnapshot();
     }
+  }
+}
+
+class _IssueDetailLine extends StatelessWidget {
+  /// Creates one labeled line in a package-load error dialog.
+  const _IssueDetailLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  /// Builds the line only when its value is present.
+  @override
+  Widget build(BuildContext context) {
+    if (value.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text('$label: $value'),
+    );
   }
 }
 

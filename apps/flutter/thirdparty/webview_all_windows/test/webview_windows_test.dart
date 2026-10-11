@@ -73,7 +73,11 @@ void main() {
     WidgetTester tester,
   ) async {
     final surfaceSizes = <WindowsSizeData>[];
-    _mockWindowsWebViewCreation(onSetSize: surfaceSizes.add);
+    final captureEnabled = <bool>[];
+    _mockWindowsWebViewCreation(
+      onSetSize: surfaceSizes.add,
+      onSetCaptureEnabled: captureEnabled.add,
+    );
     final controller = WindowsWebViewController(
       const PlatformWebViewControllerCreationParams(),
     );
@@ -97,6 +101,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(surfaceSizes, isEmpty);
+    expect(captureEnabled, <bool>[false]);
   });
 
   test('rejects invalid generic cookies before native cookie calls', () async {
@@ -866,6 +871,7 @@ void _mockWindowsWebViewCreation({
   void Function(bool enabled)? onSetJavaScriptEnabled,
   void Function(bool enabled)? onSetZoomControlEnabled,
   void Function(WindowsSizeData size)? onSetSize,
+  void Function(bool enabled)? onSetCaptureEnabled,
   void Function({
     required bool alert,
     required bool confirm,
@@ -879,7 +885,7 @@ void _mockWindowsWebViewCreation({
     ByteData? message,
   ) async {
     return WindowsWebViewHostApi.pigeonChannelCodec.encodeMessage(<Object?>[
-      WindowsCreateWebViewResult(textureId: 1),
+      WindowsCreateWebViewResult(viewId: 1),
     ]);
   });
   messenger.setMockMessageHandler(_hostApiChannel('setPopupWindowPolicy'), (
@@ -996,6 +1002,15 @@ void _mockWindowsWebViewCreation({
     const MethodChannel('$windowsWebViewChannelPrefix/1/events'),
     (MethodCall methodCall) async => null,
   );
+  messenger.setMockMethodCallHandler(
+    const MethodChannel('$windowsWebViewChannelPrefix/1'),
+    (MethodCall methodCall) async {
+      if (methodCall.method == 'setCaptureEnabled') {
+        onSetCaptureEnabled?.call(methodCall.arguments as bool);
+      }
+      return null;
+    },
+  );
 }
 
 void _clearWindowsWebViewCreationMock() {
@@ -1039,6 +1054,10 @@ void _clearWindowsWebViewCreationMock() {
   );
   messenger.setMockMethodCallHandler(
     const MethodChannel('$windowsWebViewChannelPrefix/1/events'),
+    null,
+  );
+  messenger.setMockMethodCallHandler(
+    const MethodChannel('$windowsWebViewChannelPrefix/1'),
     null,
   );
 }

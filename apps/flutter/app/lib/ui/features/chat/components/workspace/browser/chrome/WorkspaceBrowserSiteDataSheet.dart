@@ -88,6 +88,9 @@ class _WorkspaceBrowserSiteDataSheetState
                 onPressed: _clearCookies,
                 icon: const Icon(Icons.delete_outline, size: 18),
                 visualDensity: VisualDensity.compact,
+                style: const ButtonStyle(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
                 constraints: const BoxConstraints.tightFor(
                   width: 32,
                   height: 32,
@@ -107,6 +110,7 @@ class _WorkspaceBrowserSiteDataSheetState
       onPressed: _refresh,
       icon: const Icon(Icons.refresh, size: 18),
       visualDensity: VisualDensity.compact,
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
       constraints: const BoxConstraints.tightFor(width: 32, height: 32),
       padding: EdgeInsets.zero,
     );

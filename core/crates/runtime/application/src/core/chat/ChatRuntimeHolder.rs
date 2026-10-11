@@ -81,8 +81,17 @@ pub struct ChatRuntimeHolder {
 impl ChatRuntimeHolder {
     /// Resolves one generated proxy object id to the main chat service core.
     #[allow(non_snake_case)]
-    pub fn coreForObjectId(&mut self, _objectId: u32) -> Option<&mut ChatServiceCore> {
+    pub fn coreForTarget(&mut self, _target: &str) -> Option<&mut ChatServiceCore> {
         Some(self.getCore(ChatRuntimeSlot::MAIN))
+    }
+
+    /// Resolves a detached window's stable slot identity to its local chat core.
+    ///
+    /// The generated proxy uses the slot id as an instance argument because all
+    /// detached windows share the same generated object schema.
+    #[allow(non_snake_case)]
+    pub fn coreForInstanceId(&mut self, instanceId: String) -> Option<&mut ChatServiceCore> {
+        Some(self.getCore(ChatRuntimeSlot::DETACHED(instanceId)))
     }
 
     /// Creates a holder using bootstrap cores without host-backed enhanced AI services.

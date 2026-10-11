@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/l10n/generated/app_localizations.dart';
+import 'package:operit2/ui/common/markdown/MarkdownNodeGrouper.dart';
+import 'package:operit2/ui/common/markdown/StreamMarkdownRendererState.dart';
 import 'package:operit2/ui/features/chat/components/part/CustomXmlRenderer.dart';
 import 'package:operit2/ui/features/chat/components/part/FileDiffDisplay.dart';
 import 'package:operit2/ui/features/chat/components/part/StructuredMessagePartRenderer.dart';
+import 'package:operit2/ui/features/chat/components/part/ThinkToolsXmlNodeGrouper.dart';
 import 'package:operit2/ui/features/chat/components/part/ToolDisplayComponents.dart';
 
 /// Verifies semantic message parts keep the established XML render behavior.
@@ -17,7 +22,7 @@ void main() {
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
-          body: StructuredMessagePartRenderer(
+          body: StreamingStructuredMessageRenderer(
             parts: const <MessagePart>[
               MessagePart(
                 partId: 'thinking',
@@ -32,14 +37,75 @@ void main() {
             textColor: Colors.black,
             backgroundColor: Colors.white,
             showThinkingProcess: true,
+            contentStream: null,
+            streamState: StreamMarkdownRendererState(),
             splitMarkdownContent: _splitMarkdownContent,
+            nodeGrouper: const NoopMarkdownNodeGrouper(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CustomXmlRenderer), findsOneWidget);
+    expect(find.byType(ExpansionTile), findsNothing);
+  });
+
+  testWidgets('keeps streamed thinking body mounted when height toggles', (
+    tester,
+  ) async {
+    var listenCount = 0;
+    final markdownController = StreamController<Object>(
+      onListen: () {
+        listenCount += 1;
+      },
+    );
+    addTearDown(markdownController.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: SizedBox(
+            width: 360,
+            child: CustomXmlRenderer(
+              xmlContent: '<think>streaming body',
+              isStreaming: true,
+              textColor: Colors.black,
+              xmlStream: const Stream<String>.empty(),
+              xmlMarkdownEventStream: markdownController.stream,
+              showThinkingProcess: true,
+              splitMarkdownContent: _splitMarkdownContent,
+            ),
           ),
         ),
       ),
     );
 
-    expect(find.byType(CustomXmlRenderer), findsOneWidget);
-    expect(find.byType(ExpansionTile), findsNothing);
+    markdownController
+      ..add(_markdownEvent('markdownBlockStart', blockId: 1))
+      ..add(
+        _markdownEvent(
+          'markdownBlockChunk',
+          blockId: 1,
+          value: 'streaming body',
+        ),
+      );
+    await tester.pump(const Duration(milliseconds: 240));
+    await tester.pump();
+
+    final bodyToggle = find.byKey(
+      const ValueKey<String>('thinking-body-toggle'),
+    );
+    expect(bodyToggle, findsOneWidget);
+
+    tester.widget<GestureDetector>(bodyToggle).onTap!();
+    await tester.pump(const Duration(milliseconds: 120));
+    tester.widget<GestureDetector>(bodyToggle).onTap!();
+    await tester.pump(const Duration(milliseconds: 120));
+
+    expect(listenCount, 1);
   });
 
   testWidgets('renders completion status with the established status card', (
@@ -56,8 +122,9 @@ void main() {
           toolName: null,
           attributes: <String, String>{'type': 'completion'},
         ),
-      ]),
+      ], nodeGrouper: const NoopMarkdownNodeGrouper()),
     );
+    await tester.pumpAndSettle();
 
     expect(find.text('✓ Task completed'), findsOneWidget);
   });
@@ -76,8 +143,9 @@ void main() {
           toolName: 'read_file',
           attributes: <String, String>{'path': 'README.md'},
         ),
-      ]),
+      ], nodeGrouper: const NoopMarkdownNodeGrouper()),
     );
+    await tester.pumpAndSettle();
 
     expect(find.byType(CompactToolDisplay), findsOneWidget);
     expect(find.byType(DetailedToolDisplay), findsNothing);
@@ -107,26 +175,89 @@ void main() {
           toolName: 'apply_file',
           attributes: <String, String>{'status': 'SUCCESS'},
         ),
-      ]),
+      ], nodeGrouper: const NoopMarkdownNodeGrouper()),
     );
+    await tester.pumpAndSettle();
 
     expect(find.text('permission denied'), findsOneWidget);
     expect(find.byType(FileDiffDisplay), findsOneWidget);
   });
+
+  testWidgets('groups persisted thinking and one tool call like live XML', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _messagePartApp(
+        const <MessagePart>[
+          MessagePart(
+            partId: 'thinking-1',
+            sequence: 0,
+            kind: MessagePartKind.thinking,
+            content: 'need current time',
+            toolCallId: null,
+            toolName: null,
+            attributes: <String, String>{},
+          ),
+          MessagePart(
+            partId: 'tool-call-1',
+            sequence: 1,
+            kind: MessagePartKind.toolCall,
+            content: '',
+            toolCallId: 'call-1',
+            toolName: 'daily_life:get_current_time',
+            attributes: <String, String>{},
+          ),
+          MessagePart(
+            partId: 'tool-result-1',
+            sequence: 2,
+            kind: MessagePartKind.toolResult,
+            content: '03:08 AM',
+            toolCallId: 'call-1',
+            toolName: 'daily_life:get_current_time',
+            attributes: <String, String>{'status': 'SUCCESS'},
+          ),
+          MessagePart(
+            partId: 'thinking-2',
+            sequence: 3,
+            kind: MessagePartKind.thinking,
+            content: 'answer in Chinese',
+            toolCallId: null,
+            toolName: null,
+            attributes: <String, String>{},
+          ),
+        ],
+        locale: const Locale('zh'),
+        nodeGrouper: const ThinkToolsXmlNodeGrouper(showThinkingProcess: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('思考与工具调用（1）'), findsOneWidget);
+    expect(find.text('思考过程'), findsNothing);
+    expect(find.byType(CompactToolDisplay), findsNothing);
+  });
 }
 
 /// Wraps structured parts in the localized Material test surface.
-Widget _messagePartApp(List<MessagePart> parts) {
+Widget _messagePartApp(
+  List<MessagePart> parts, {
+  Locale? locale,
+  required MarkdownNodeGrouper nodeGrouper,
+}) {
   return MaterialApp(
+    locale: locale,
     localizationsDelegates: AppLocalizations.localizationsDelegates,
     supportedLocales: AppLocalizations.supportedLocales,
     home: Scaffold(
-      body: StructuredMessagePartRenderer(
+      body: StreamingStructuredMessageRenderer(
         parts: parts,
+        contentStream: null,
         textColor: Colors.black,
         backgroundColor: Colors.white,
         showThinkingProcess: true,
+        streamState: StreamMarkdownRendererState(),
         splitMarkdownContent: _splitMarkdownContent,
+        nodeGrouper: nodeGrouper,
       ),
     ),
   );
@@ -145,6 +276,7 @@ Future<List<MarkdownStreamEvent>> _splitMarkdownContent(String content) async {
       parentBlockId: null,
       nodeType: null,
       headerLevel: null,
+      xml: null,
     ),
     MarkdownStreamEvent(
       chatId: 'test',
@@ -156,6 +288,7 @@ Future<List<MarkdownStreamEvent>> _splitMarkdownContent(String content) async {
       parentBlockId: null,
       nodeType: null,
       headerLevel: null,
+      xml: null,
     ),
     const MarkdownStreamEvent(
       chatId: 'test',
@@ -167,6 +300,23 @@ Future<List<MarkdownStreamEvent>> _splitMarkdownContent(String content) async {
       parentBlockId: null,
       nodeType: null,
       headerLevel: null,
+      xml: null,
     ),
   ];
+}
+
+/// Creates a generated Markdown stream event for renderer tests.
+MarkdownStreamEvent _markdownEvent(String type, {String? value, int? blockId}) {
+  return MarkdownStreamEvent(
+    chatId: 'test',
+    eventType: type,
+    value: value,
+    id: null,
+    blockId: blockId,
+    inlineId: null,
+    parentBlockId: null,
+    nodeType: null,
+    headerLevel: null,
+    xml: null,
+  );
 }

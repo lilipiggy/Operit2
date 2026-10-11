@@ -21,11 +21,10 @@ from common import (
     copy_required_file,
     host_platform,
     node_package_command,
-    ohos_fvm_flutter_sdk_dir,
-    prepare_web_access_embedded_assets,
+    flutter_command,
+    flutter_pub_get,
     read_properties,
     run,
-    run_ohos_fvm_flutter,
 )
 
 
@@ -93,7 +92,6 @@ def parse_args() -> argparse.Namespace:
 # Builds the signed OpenHarmony HAP through the FVM-selected Flutter SDK.
 def main() -> int:
     args = parse_args()
-    prepare_web_access_embedded_assets()
     if not OHOS_PROJECT_DIR.is_dir():
         raise RuntimeError(
             "OpenHarmony Flutter project not found at "
@@ -102,10 +100,7 @@ def main() -> int:
     verify_ohos_sdk_preflight()
     build_ohos_rust_bridge()
     env = ohos_hvigor_env()
-    run_ohos_fvm_flutter(
-        ["pub", "get", *(["--enforce-lockfile"] if args.enforce_lockfile else [])],
-        env,
-    )
+    flutter_pub_get(enforce_lockfile=args.enforce_lockfile, env=env)
     prepare_ohos_package_dependencies()
     build_unsigned_ohos_hap(args, env)
     sign_ohos_hap()
@@ -116,6 +111,8 @@ def main() -> int:
 
 # Builds the unsigned OpenHarmony HAP with Flutter and Hvigor.
 def build_unsigned_ohos_hap(args: argparse.Namespace, env: dict[str, str]) -> None:
+    if OHOS_UNSIGNED_HAP_PATH.exists():
+        OHOS_UNSIGNED_HAP_PATH.unlink()
     command = (
         [
             "build",
@@ -129,7 +126,7 @@ def build_unsigned_ohos_hap(args: argparse.Namespace, env: dict[str, str]) -> No
         + (["--build-name", args.build_name] if args.build_name else [])
         + (["--build-number", args.build_number] if args.build_number else [])
     )
-    run_ohos_fvm_flutter(command, env)
+    run([flutter_command(), *command], cwd=FLUTTER_APP_DIR, env=env)
     if not OHOS_UNSIGNED_HAP_PATH.is_file():
         raise RuntimeError(f"OpenHarmony unsigned HAP was not produced: {OHOS_UNSIGNED_HAP_PATH}")
 
@@ -308,7 +305,7 @@ def prepare_ohos_package_dependencies() -> None:
 # Copies the Flutter engine HAR files required by a release arm64 HAP.
 def copy_ohos_flutter_hars() -> None:
     engine_dir = (
-        ohos_fvm_flutter_sdk_dir()
+        Path(flutter_command()).parent.parent
         / "bin"
         / "cache"
         / "artifacts"
@@ -497,7 +494,7 @@ def stage_ohos_flutter_plugins() -> list[str]:
     ohos_plugins = graph.get("plugins", {}).get("ohos", [])
     plugin_names: list[str] = []
     for plugin in ohos_plugins:
-        if plugin.get("native_build") is False:
+        if plugin.get("dev_dependency") is True or plugin.get("native_build") is False:
             continue
         name = plugin["name"]
         source = Path(plugin["path"]) / "ohos"
@@ -628,6 +625,10 @@ def write_json_package(path: Path, value: dict) -> None:
 # Returns the environment needed by Hvigor and included OHOS plugin modules.
 def ohos_hvigor_env() -> dict[str, str]:
     env = os.environ.copy()
+    local_app_data = env.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("LOCALAPPDATA is required for the Windows OpenHarmony build")
+    env["PUB_CACHE"] = str(Path(local_app_data) / "Pub" / "Cache")
     npm = node_package_command("npm")
     completed = subprocess.run(
         [npm, "root", "-g"],

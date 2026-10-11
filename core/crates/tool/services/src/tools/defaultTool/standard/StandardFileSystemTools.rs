@@ -8,11 +8,15 @@ use operit_host_api::{
     HttpRequestData, RuntimeStorageHost, SystemOperationHost,
 };
 use operit_store::RuntimeFileSyncStore::RuntimeFileSyncStore;
+use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
 
 use crate::runtime_support::{
-    RuntimeStructuredEditAction, RuntimeStructuredEditOperation, ToolRuntimeSupport,
+    RuntimeChatCallRequest, RuntimeStructuredEditAction, RuntimeStructuredEditOperation,
+    ToolRuntimeSupport,
 };
 use operit_host_api::HostManager::HostManager;
+use operit_model::FunctionType::FunctionType;
+use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::files::VisualFileSystem::VisualFileSystem;
 use operit_tools::tools::ToolExecutionLimits::ToolExecutionLimits;
@@ -28,10 +32,13 @@ use operit_tools::ToolExecutionManager::{
     AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutor, ToolParameter,
     ToolValidationResult,
 };
+use operit_util::ChatUtils::ChatUtils;
+use operit_util::DocumentConversionUtil::DocumentConversionUtil;
+use operit_util::FileUtils::FileUtils;
+use operit_util::ImagePoolManager::ImagePoolManager;
+use operit_util::MediaPoolManager::MediaPoolManager;
 use operit_util::OCRUtils::{OCRUtils, Quality as OCRQuality};
-use operit_util::RuntimeStorageLayout::{
-    EXTENSIONS_PLUGIN_CONFIGS_DIR_PATH, RUNTIME_ROOT_PATH_PREFIX, RUNTIME_SYNC_DIR_PATH,
-};
+use operit_util::RuntimeStorageLayout::RUNTIME_ROOT_PATH_PREFIX;
 
 use super::StandardWebVisitTool::StandardWebVisitTool;
 
@@ -75,11 +82,33 @@ impl StandardFileSystemTools {
             PathMapper::new(
                 self.runtimeStoreRoot.clone(),
                 self.workspaceCollectionRoot.clone(),
+                self.runtimeStorageHost.clone(),
             ),
         )
     }
 
-    /// Writes one text file through the synchronized plugin-config store or its mapped host.
+    /// File tools honor registered storage ownership; no extension-specific synchronization.
+    #[allow(non_snake_case)]
+    fn synchronizeMappedChanges<T>(&self, paths: &[&str], change: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let mut storagePaths = Vec::new();
+        let mut workspaceChanged = false;
+        for path in paths {
+            let canonical = PathMapper::canonicalizeVfsPath(path)?;
+            workspaceChanged |= PathMapper::relativePath("/app/workspaces", &canonical)?.is_some();
+            if let Some(relative) = PathMapper::relativePath("/app/data", &canonical)? {
+                storagePaths.push(format!("runtime/{relative}"));
+            }
+        }
+        let tracked = || RuntimeFileSyncStore::new(self.runtimeStorageHost.clone(), RUNTIME_SYNC_DIR_PATH)
+            .trackChanges(&storagePaths, change);
+        if workspaceChanged {
+            operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(
+                self.runtimeStorageHost.clone(), RUNTIME_SYNC_DIR_PATH,
+            ).track(tracked)
+        } else { tracked() }
+    }
+
+    /// Writes text and publishes changed Space files, including appended bytes.
     #[allow(non_snake_case)]
     fn writeMappedText(
         &self,
@@ -88,23 +117,10 @@ impl StandardFileSystemTools {
         content: &str,
         append: bool,
     ) -> Result<(), String> {
-        match pluginConfigStoragePath(path)? {
-            Some(storagePath) => {
-                let store = RuntimeFileSyncStore::new(
-                    self.runtimeStorageHost.clone(),
-                    RUNTIME_SYNC_DIR_PATH,
-                );
-                if append {
-                    store.appendBytes(&storagePath, content.as_bytes())
-                } else {
-                    store.writeBytes(&storagePath, content.as_bytes())
-                }
-            }
-            None => vfs.writeFile(path, content, append),
-        }
+        self.synchronizeMappedChanges(&[path], || vfs.writeFile(path, content, append))
     }
 
-    /// Writes one binary file through the synchronized plugin-config store or its mapped host.
+    /// Writes binary data using the same generic file synchronization path.
     #[allow(non_snake_case)]
     fn writeMappedBytes(
         &self,
@@ -112,13 +128,7 @@ impl StandardFileSystemTools {
         path: &str,
         content: &[u8],
     ) -> Result<(), String> {
-        match pluginConfigStoragePath(path)? {
-            Some(storagePath) => {
-                RuntimeFileSyncStore::new(self.runtimeStorageHost.clone(), RUNTIME_SYNC_DIR_PATH)
-                    .writeBytes(&storagePath, content)
-            }
-            None => vfs.writeFileBytes(path, content),
-        }
+        self.synchronizeMappedChanges(&[path], || vfs.writeFileBytes(path, content))
     }
 
     #[allow(non_snake_case)]
@@ -183,6 +193,25 @@ impl StandardFileSystemTools {
                     );
                 }
 
+                let bytes = match vfs.readFileBytes(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return toolError(
+                            tool,
+                            String::new(),
+                            format!("Error reading file: {error}"),
+                        );
+                    }
+                };
+                if !FileUtils::isTextLikeSample(&bytes, 512) {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        "File does not appear to be a text file. Use read_file_binary for binary files."
+                            .to_string(),
+                    );
+                }
+
                 match vfs.readFileWithLimit(&path, ToolExecutionLimits::MAX_FILE_READ_BYTES) {
                     Ok(content) => {
                         let mut finalContent = addLineNumbers(&content, 0, 0);
@@ -212,16 +241,42 @@ impl StandardFileSystemTools {
     /// Reads a complete file or delegates special file handling.
     pub fn readFileFull(&self, tool: &AITool) -> ToolResult {
         let path = parameterValue(tool, "path");
+        let textOnly = parameterBool(tool, "text_only");
         let vfs = self.vfs();
 
         match vfs.fileExists(&path) {
             Ok(existence) if existence.exists && !existence.isDirectory => {
                 let fileExt = fileExtension(&path);
+                let bytes = match vfs.readFileBytes(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return toolError(
+                            tool,
+                            String::new(),
+                            format!("Error reading file: {error}"),
+                        );
+                    }
+                };
+                if textOnly && !FileUtils::isTextLikeSample(&bytes, 512) {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        format!("Skipped non-text file: {path}"),
+                    );
+                }
                 if isSpecialFileType(&fileExt) {
                     return self.handleSpecialFileRead(tool, &vfs, &path, &fileExt);
                 }
 
-                match vfs.readFile(&path) {
+                if !FileUtils::isTextLike(&bytes) {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        "File does not appear to be a text file. Use read_file_binary for binary files."
+                            .to_string(),
+                    );
+                }
+                match String::from_utf8(bytes) {
                     Ok(content) => successData(
                         tool,
                         ToolResultData::FileContentData(FileContentData {
@@ -230,9 +285,11 @@ impl StandardFileSystemTools {
                             content,
                         }),
                     ),
-                    Err(error) => {
-                        toolError(tool, String::new(), format!("Error reading file: {error}"))
-                    }
+                    Err(error) => toolError(
+                        tool,
+                        String::new(),
+                        format!("Error decoding text file: {error}"),
+                    ),
                 }
             }
             Ok(existence) if !existence.exists => {
@@ -253,6 +310,13 @@ impl StandardFileSystemTools {
     ) -> ToolResult {
         match fileExt {
             "jpg" | "jpeg" | "png" | "gif" | "bmp" => self.handleImageFileRead(tool, vfs, path),
+            "pdf" | "doc" | "docx" => self.handleDocumentFileRead(tool, vfs, path, fileExt),
+            "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" => {
+                self.handleAudioFileRead(tool, vfs, path, fileExt)
+            }
+            "mp4" | "mkv" | "mov" | "webm" | "avi" | "m4v" => {
+                self.handleVideoFileRead(tool, vfs, path, fileExt)
+            }
             _ => toolError(
                 tool,
                 String::new(),
@@ -262,11 +326,183 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Extracts plain text from a supported document container.
+    fn handleDocumentFileRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+        fileExt: &str,
+    ) -> ToolResult {
+        let bytes = match vfs.readFileBytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return toolError(
+                    tool,
+                    String::new(),
+                    format!("Error reading document: {error}"),
+                );
+            }
+        };
+        match DocumentConversionUtil::extractText(&bytes, fileExt) {
+            Ok(content) => successData(
+                tool,
+                ToolResultData::FileContentData(FileContentData {
+                    path: path.to_string(),
+                    size: content.len() as i64,
+                    content,
+                }),
+            ),
+            Err(error) => toolError(
+                tool,
+                String::new(),
+                format!("Error extracting text from {fileExt} document: {error}"),
+            ),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    /// Reads audio bytes and returns either a canonical pool link or media metadata.
+    fn handleAudioFileRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+        fileExt: &str,
+    ) -> ToolResult {
+        if parameterBool(tool, "direct_audio") {
+            return self.handleDirectMediaFileRead(tool, vfs, path, fileExt, "audio");
+        }
+        self.handleMediaInfoRead(tool, vfs, path, fileExt, "audio")
+    }
+
+    #[allow(non_snake_case)]
+    /// Reads video bytes and returns either a canonical pool link or media metadata.
+    fn handleVideoFileRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+        fileExt: &str,
+    ) -> ToolResult {
+        if parameterBool(tool, "direct_video") {
+            return self.handleDirectMediaFileRead(tool, vfs, path, fileExt, "video");
+        }
+        self.handleMediaInfoRead(tool, vfs, path, fileExt, "video")
+    }
+
+    #[allow(non_snake_case)]
+    /// Registers an audio or video file in the media pool and returns its link.
+    fn handleDirectMediaFileRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+        fileExt: &str,
+        mediaType: &str,
+    ) -> ToolResult {
+        let bytes = match vfs.readFileBytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return toolError(
+                    tool,
+                    String::new(),
+                    format!("Error reading {mediaType} file: {error}"),
+                );
+            }
+        };
+        let mediaId = MediaPoolManager::add_media_bytes(&bytes, mediaMimeType(mediaType, fileExt));
+        if mediaId == "error" {
+            return toolError(
+                tool,
+                String::new(),
+                format!("Error registering {mediaType} file: {path}"),
+            );
+        }
+        let content = buildMediaLink(mediaType, &mediaId);
+        successData(
+            tool,
+            ToolResultData::FileContentData(FileContentData {
+                path: path.to_string(),
+                size: content.len() as i64,
+                content,
+            }),
+        )
+    }
+
+    #[allow(non_snake_case)]
+    /// Returns deterministic metadata for a non-direct audio or video read.
+    fn handleMediaInfoRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+        fileExt: &str,
+        mediaType: &str,
+    ) -> ToolResult {
+        let bytes = match vfs.readFileBytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return toolError(
+                    tool,
+                    String::new(),
+                    format!("Error reading {mediaType} file: {error}"),
+                );
+            }
+        };
+        let content = format!(
+            "{} file info:\n- path: {}\n- size_bytes: {}\n- extension: {}\n- mime_type: {}",
+            titleCase(mediaType),
+            path,
+            bytes.len(),
+            fileExt,
+            mediaMimeType(mediaType, fileExt),
+        );
+        successData(
+            tool,
+            ToolResultData::FileContentData(FileContentData {
+                path: path.to_string(),
+                size: content.len() as i64,
+                content,
+            }),
+        )
+    }
+
+    #[allow(non_snake_case)]
+    /// Reads image files through the same three-stage chain as the Kotlin client:
+    /// direct media link, backend image recognition with intent, then local OCR.
     fn handleImageFileRead(&self, tool: &AITool, vfs: &VisualFileSystem, path: &str) -> ToolResult {
-        let physicalPath = match vfs.resolvePath(path) {
-            Ok(resolved) => resolved.physicalPath,
+        if parameterBool(tool, "direct_image") {
+            let directResult = self.handleDirectImageFileRead(tool, vfs, path);
+            // A failed direct registration must not abort the read. Kotlin falls back to
+            // intent recognition/OCR when ImagePoolManager cannot register the image.
+            if directResult.success {
+                return directResult;
+            }
+        }
+
+        let physicalPath = match vfs.resolvePath(path).and_then(|resolved| resolved.nativePath()) {
+            Ok(path) => path,
             Err(error) => return toolError(tool, String::new(), error),
         };
+        let intent = optionalParameterValue(tool, "intent")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if !intent.is_empty() {
+            if let Some(recognitionResult) = self.recognizeImageWithIntent(vfs, path, &intent) {
+                return successData(
+                    tool,
+                    ToolResultData::FileContentData(FileContentData {
+                        path: path.to_string(),
+                        size: recognitionResult.len() as i64,
+                        content: recognitionResult,
+                    }),
+                );
+            }
+        }
+
         let content = match self.recognizeImageText(&physicalPath) {
             Ok(ocrText) if ocrText.trim().is_empty() => "No text detected in image.".to_string(),
             Ok(ocrText) => ocrText,
@@ -283,6 +519,102 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Sends an image plus the caller's intent to the configured image-recognition model.
+    /// Returns None on any registration/model failure so the caller can fall back to OCR.
+    fn recognizeImageWithIntent(
+        &self,
+        vfs: &VisualFileSystem,
+        path: &str,
+        intent: &str,
+    ) -> Option<String> {
+        let bytes = match vfs.readFileBytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("[StandardFileSystemTools] unable to read image for intent recognition: {error}");
+                return None;
+            }
+        };
+        let imageId = ImagePoolManager::add_image_bytes(
+            &bytes,
+            Some(imageMimeTypeFromPath(path)),
+            None,
+        );
+        if imageId == "error" {
+            eprintln!("[StandardFileSystemTools] unable to register image for intent recognition: {path}");
+            return None;
+        }
+
+        let prompt = format!("{}\n{}", buildImageMediaLink(&imageId), intent);
+        let request = RuntimeChatCallRequest {
+            functionType: FunctionType::IMAGE_RECOGNITION,
+            turns: vec![PromptTurn::new(PromptTurnKind::USER, prompt)],
+            recordTokenUsage: false,
+            enableThinking: false,
+        };
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| runtime.block_on(self.runtimeSupport.callChatModel(request)));
+        ImagePoolManager::remove_image(&imageId);
+
+        match result {
+            Ok(output) => {
+                let output = ChatUtils::remove_thinking_content(&output);
+                if !output.trim().is_empty() {
+                    Some(output)
+                } else {
+                    eprintln!("[StandardFileSystemTools] image recognition returned an empty result: {path}");
+                    None
+                }
+            }
+            Err(error) => {
+                eprintln!("[StandardFileSystemTools] image recognition failed for {path}: {error}");
+                None
+            }
+        }
+    }
+
+    #[allow(non_snake_case)]
+    /// Reads an image file into the process image pool and returns its media-link tag.
+    fn handleDirectImageFileRead(
+        &self,
+        tool: &AITool,
+        vfs: &VisualFileSystem,
+        path: &str,
+    ) -> ToolResult {
+        let bytes = match vfs.readFileBytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return toolError(
+                    tool,
+                    String::new(),
+                    format!("Error reading image file: {error}"),
+                );
+            }
+        };
+        let imageId =
+            ImagePoolManager::add_image_bytes(&bytes, Some(imageMimeTypeFromPath(path)), None);
+        if imageId == "error" {
+            return toolError(
+                tool,
+                String::new(),
+                format!("Error registering image file: {path}"),
+            );
+        }
+        let content = buildImageMediaLink(&imageId);
+        successData(
+            tool,
+            ToolResultData::FileContentData(FileContentData {
+                path: path.to_string(),
+                size: content.len() as i64,
+                content,
+            }),
+        )
+    }
+
+    #[allow(non_snake_case)]
+    /// Recognizes text contained in an image through the system operation host.
     fn recognizeImageText(&self, imagePath: &str) -> Result<String, String> {
         let Some(systemOperationHost) = self.systemOperationHost.clone() else {
             return Err("SystemOperationHost is required for OCR".to_string());
@@ -306,16 +638,61 @@ impl StandardFileSystemTools {
             optionalParameterValue(tool, "end_line").and_then(|value| value.parse::<usize>().ok());
         let vfs = self.vfs();
 
-        let content = match vfs.readFile(&path) {
+        let existence = match vfs.fileExists(&path) {
             Ok(value) => value,
             Err(error) => {
+                return toolError(tool, String::new(), error);
+            }
+        };
+        if !existence.exists || existence.isDirectory {
+            return toolError(tool, String::new(), format!("Path is not a file: {path}"));
+        }
+
+        let fileExt = fileExtension(&path);
+        let content = if isSpecialFileType(&fileExt) {
+            let fullResult = self.readFileFull(tool);
+            if !fullResult.success {
+                return fullResult;
+            }
+            let ToolResultData::FileContentData(contentData) = fullResult.result else {
                 return toolError(
                     tool,
                     String::new(),
-                    format!("Error reading file part: {error}"),
-                )
+                    "Unexpected read_file_full result".to_string(),
+                );
+            };
+            contentData.content
+        } else {
+            let bytes = match vfs.readFileBytes(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        format!("Error reading file part: {error}"),
+                    );
+                }
+            };
+            if !FileUtils::isTextLike(&bytes) {
+                return toolError(
+                    tool,
+                    String::new(),
+                    "File does not appear to be a text file. Use read_file_binary for binary files."
+                        .to_string(),
+                );
+            }
+            match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(error) => {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        format!("Error decoding file part: {error}"),
+                    );
+                }
             }
         };
+
         let lines = content.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
         let totalLines = lines.len();
         let startLine = startLineParam.max(1).min(totalLines.max(1));
@@ -334,10 +711,8 @@ impl StandardFileSystemTools {
         };
         let isTruncated = partContent.len() > ToolExecutionLimits::MAX_FILE_READ_BYTES;
         if isTruncated {
-            partContent = partContent
-                .chars()
-                .take(ToolExecutionLimits::MAX_FILE_READ_BYTES)
-                .collect();
+            partContent =
+                utf8Prefix(&partContent, ToolExecutionLimits::MAX_FILE_READ_BYTES).to_string();
         }
         let mut numbered = addLineNumbers(&partContent, startIndex, totalLines);
         if isTruncated {
@@ -446,7 +821,8 @@ impl StandardFileSystemTools {
         let recursive = parameterBool(tool, "recursive");
         let vfs = self.vfs();
 
-        match vfs.deleteFile(&path, recursive) {
+        match self.synchronizeMappedChanges(&[&path], || vfs.deleteFile(&path, recursive))
+        {
             Ok(()) => successData(
                 tool,
                 fileOperationResult(
@@ -490,7 +866,8 @@ impl StandardFileSystemTools {
         let destPath = parameterValue(tool, "destination");
         let vfs = self.vfs();
 
-        match vfs.moveFile(&sourcePath, &destPath) {
+        match self.synchronizeMappedChanges(&[&sourcePath, &destPath], || vfs.moveFile(&sourcePath, &destPath))
+        {
             Ok(()) => successData(
                 tool,
                 fileOperationResult(
@@ -515,7 +892,8 @@ impl StandardFileSystemTools {
         let recursive = parameterBoolDefaultTrue(tool, "recursive");
         let vfs = self.vfs();
 
-        match vfs.copyFile(&sourcePath, &destPath, recursive) {
+        match self.synchronizeMappedChanges(&[&destPath], || vfs.copyFile(&sourcePath, &destPath, recursive))
+        {
             Ok(()) => successData(
                 tool,
                 fileOperationResult(
@@ -720,11 +1098,9 @@ impl StandardFileSystemTools {
             if visitKey.trim().is_empty() || (linkNumber.is_none() && imageNumber.is_none()) {
                 return toolError(
                     tool,
-                    fileOperationDataToString(
-                        &format!(
-                            "Download failed for {destPath}: Either url or (visit_key + link_number/image_number) is required"
-                        ),
-                    ),
+                    fileOperationDataToString(&format!(
+                        "Download failed for {destPath}: Either url or (visit_key + link_number/image_number) is required"
+                    )),
                     "Either url or (visit_key + link_number/image_number) is required".to_string(),
                 );
             }
@@ -790,7 +1166,7 @@ impl StandardFileSystemTools {
                     tool,
                     fileOperationDataToString(&format!("Download failed for {destPath}: {error}")),
                     error,
-                )
+                );
             }
         };
 
@@ -947,7 +1323,7 @@ impl StandardFileSystemTools {
                     message.to_string(),
                 )];
             }
-            return vec![match vfs.writeFile(&path, &newContent, false) {
+            return vec![match self.writeMappedText(&vfs, &path, &newContent, false) {
                 Ok(()) => {
                     let diffContent = self.runtimeSupport.generateUnifiedDiff("", &newContent);
                     let details = format!("Successfully created new file: {path}");
@@ -1048,7 +1424,7 @@ impl StandardFileSystemTools {
                 aiInstructions,
             )];
         }
-        vec![match vfs.writeFile(&path, &mergedContent, false) {
+        vec![match self.writeMappedText(&vfs, &path, &mergedContent, false) {
             Ok(()) => {
                 let details = format!("Successfully applied AI code to file: {path}");
                 let diffContent = self
@@ -1188,24 +1564,6 @@ pub enum FileSystemToolOperation {
     ShareFile,
 }
 
-/// Maps one ToolPkg or JS plugin configuration VFS file into runtime storage.
-#[allow(non_snake_case)]
-fn pluginConfigStoragePath(vfsPath: &str) -> Result<Option<String>, String> {
-    let relativeRoot = EXTENSIONS_PLUGIN_CONFIGS_DIR_PATH
-        .strip_prefix(RUNTIME_ROOT_PATH_PREFIX)
-        .expect("plugin configuration layout must be below runtime");
-    let vfsRoot = PathMapper::joinVfsPath("/app/data", relativeRoot)?;
-    let Some(relativePath) = PathMapper::relativePath(&vfsRoot, vfsPath)? else {
-        return Ok(None);
-    };
-    if relativePath.is_empty() {
-        return Err("plugin configuration writes must identify a file".to_string());
-    }
-    Ok(Some(format!(
-        "{EXTENSIONS_PLUGIN_CONFIGS_DIR_PATH}/{relativePath}"
-    )))
-}
-
 impl ToolExecutor for FileSystemToolExecutor {
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
         let names = requiredParameters(&self.operation);
@@ -1257,11 +1615,17 @@ impl ToolExecutor for FileSystemToolExecutor {
             | FileSystemToolOperation::DownloadFile
             | FileSystemToolOperation::CreateFile
             | FileSystemToolOperation::EditFile
-            | FileSystemToolOperation::OpenFile
             | FileSystemToolOperation::ShareFile => ToolAccessSpec {
                 effect: ToolEffect::WRITE,
                 boundary: ToolBoundary::FilePath {
                     effect: ToolEffect::WRITE,
+                },
+            },
+            // Presentation is an external side effect, but the source only needs read access.
+            FileSystemToolOperation::OpenFile => ToolAccessSpec {
+                effect: ToolEffect::WRITE,
+                boundary: ToolBoundary::FilePath {
+                    effect: ToolEffect::READ,
                 },
             },
             FileSystemToolOperation::ApplyFile => ToolAccessSpec {
@@ -1525,6 +1889,97 @@ fn fileExtension(path: &str) -> String {
 }
 
 #[allow(non_snake_case)]
+/// Builds the canonical image media-link tag used by chat providers.
+fn buildImageMediaLink(imageId: &str) -> String {
+    format!("<link type=\"image\" id=\"{imageId}\"></link>")
+}
+
+#[allow(non_snake_case)]
+/// Builds the canonical audio or video media-link tag.
+fn buildMediaLink(mediaType: &str, mediaId: &str) -> String {
+    format!("<link type=\"{mediaType}\" id=\"{mediaId}\"></link>")
+}
+
+#[allow(non_snake_case)]
+/// Returns the declared image MIME type for a supported image extension.
+fn imageMimeTypeFromPath(path: &str) -> &'static str {
+    match fileExtension(path).as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+}
+
+#[allow(non_snake_case)]
+/// Returns the MIME type associated with one supported audio or video extension.
+fn mediaMimeType(mediaType: &str, extension: &str) -> &'static str {
+    match (mediaType, extension) {
+        ("audio", "mp3") => "audio/mpeg",
+        ("audio", "wav") => "audio/wav",
+        ("audio", "m4a") => "audio/mp4",
+        ("audio", "aac") => "audio/aac",
+        ("audio", "flac") => "audio/flac",
+        ("audio", "ogg") => "audio/ogg",
+        ("audio", "opus") => "audio/opus",
+        ("video", "mp4") => "video/mp4",
+        ("video", "mkv") => "video/x-matroska",
+        ("video", "mov") => "video/quicktime",
+        ("video", "webm") => "video/webm",
+        ("video", "avi") => "video/x-msvideo",
+        ("video", "m4v") => "video/x-m4v",
+        ("audio", _) => "audio/octet-stream",
+        ("video", _) => "video/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
+#[allow(non_snake_case)]
+/// Capitalizes the first ASCII character for human-readable metadata labels.
+fn titleCase(value: &str) -> String {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    first.to_uppercase().collect::<String>() + characters.as_str()
+}
+
+/// Returns a UTF-8-safe prefix no longer than the requested byte length.
+fn utf8Prefix(value: &str, maxBytes: usize) -> &str {
+    if value.len() <= maxBytes {
+        return value;
+    }
+    let mut end = maxBytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+#[allow(non_snake_case)]
 fn isSpecialFileType(fileExtension: &str) -> bool {
-    matches!(fileExtension, "jpg" | "jpeg" | "png" | "gif" | "bmp")
+    matches!(
+        fileExtension,
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "bmp"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "mp3"
+            | "wav"
+            | "m4a"
+            | "aac"
+            | "flac"
+            | "ogg"
+            | "opus"
+            | "mp4"
+            | "mkv"
+            | "mov"
+            | "webm"
+            | "avi"
+            | "m4v"
+    )
 }

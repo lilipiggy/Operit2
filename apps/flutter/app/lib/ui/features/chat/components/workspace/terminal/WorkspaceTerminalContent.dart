@@ -7,9 +7,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../../../../common/components/PageActivityMixin.dart';
+
 import '../../../../../theme/OperitGlassSurface.dart';
 import '../../../../../theme/OperitTheme.dart';
 import 'WorkspacePtyProcess.dart';
+import 'TerminalPinchZoom.dart';
 
 class WorkspaceTerminalContent extends StatefulWidget {
   const WorkspaceTerminalContent({
@@ -28,10 +31,12 @@ class WorkspaceTerminalContent extends StatefulWidget {
       _WorkspaceTerminalContentState();
 }
 
-class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
+class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent>
+    with PageActivityMixin<WorkspaceTerminalContent> {
   late final Terminal _terminal;
   late final TerminalController _controller;
   late final FocusNode _focusNode;
+  final ScrollController _scrollController = ScrollController();
   StreamSubscription<String>? _outputSubscription;
   WorkspacePtyProcess? _pty;
   Object? _startupError;
@@ -43,6 +48,7 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
   bool _ctrlLatched = false;
   bool _altLatched = false;
 
+  /// Creates terminal state and requests input focus only for visible content.
   @override
   void initState() {
     super.initState();
@@ -64,7 +70,7 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     };
     WidgetsBinding.instance.endOfFrame.then((_) {
       if (mounted) {
-        _focusNode.requestFocus();
+        if (isPageActive) _focusNode.requestFocus();
         _attachSession();
       }
     });
@@ -85,6 +91,7 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     _pty?.kill();
     _pendingTerminalOutput.clear();
     _focusNode.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -169,19 +176,33 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
                 removeTop: true,
                 removeRight: true,
                 removeBottom: true,
-                child: TerminalView(
-                  _terminal,
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  autofocus: true,
-                  padding: const EdgeInsets.all(8),
-                  theme: _workspaceTerminalTheme,
-                  backgroundOpacity: 0,
-                  textStyle: _terminalStyleFromTheme(
-                    Theme.of(context).textTheme.bodySmall!,
+                child: Scrollbar(
+                  controller: _scrollController,
+                  thumbVisibility: true,
+                  child: TerminalPinchZoom(
+                    builder: (context, scale) => TerminalView(
+                      _terminal,
+                      scrollController: _scrollController,
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      autofocus: true,
+                      padding: const EdgeInsets.all(8),
+                      theme: _workspaceTerminalTheme,
+                      backgroundOpacity: 0,
+                      textStyle: _terminalStyleFromTheme(
+                        Theme.of(context).textTheme.bodySmall!.copyWith(
+                          fontSize:
+                              (Theme.of(
+                                    context,
+                                  ).textTheme.bodySmall!.fontSize ??
+                                  12) *
+                              scale,
+                        ),
+                      ),
+                      onSecondaryTapDown: (details, offset) =>
+                          _copyOrPasteSelection(),
+                    ),
                   ),
-                  onSecondaryTapDown: (details, offset) =>
-                      _copyOrPasteSelection(),
                 ),
               ),
             ),
@@ -210,10 +231,23 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     );
   }
 
+  /// Stops terminal presentation callbacks without terminating the process.
+  @override
+  void onPageActivityChanged(bool active) {
+    if (active) {
+      _outputSubscription?.resume();
+      _scheduleTerminalFlush();
+    } else {
+      _outputSubscription?.pause();
+    }
+  }
+
+  /// Attaches the presentation stream to the existing terminal session.
   Future<void> _attachSession() async {
     await _attachPty();
   }
 
+  /// Attaches the process stream and pauses its presentation while inactive.
   Future<void> _attachPty() async {
     try {
       final pty = attachWorkspacePty(widget.sessionId);
@@ -224,7 +258,17 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
       _outputSubscription = pty.output
           .cast<List<int>>()
           .transform(const convert.Utf8Decoder())
-          .listen(_queueTerminalWrite);
+          .listen(
+            _queueTerminalWrite,
+            onError: (Object error, StackTrace stackTrace) {
+              if (!mounted) return;
+              _queueTerminalWrite('\r\n[终端连接已结束：$error]\r\n');
+              _exited = true;
+            },
+          );
+      if (!isPageActive) {
+        _outputSubscription!.pause();
+      }
       unawaited(
         pty.exitCode.then(
           (code) {
@@ -269,18 +313,30 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
     _pty?.write(const convert.Utf8Encoder().convert(data));
   }
 
+  /// Buffers terminal output until the visible page can render it.
   void _queueTerminalWrite(String data) {
     if (data.isEmpty) {
       return;
     }
     _pendingTerminalOutput.write(data);
-    if (_terminalFlushScheduled) {
+    _scheduleTerminalFlush();
+  }
+
+  /// Coalesces output only while terminal presentation is active.
+  void _scheduleTerminalFlush() {
+    if (!isPageActive ||
+        _pendingTerminalOutput.isEmpty ||
+        _terminalFlushScheduled) {
       return;
     }
     _terminalFlushScheduled = true;
     WidgetsBinding.instance.scheduleFrameCallback((_) {
       if (!mounted) {
         _pendingTerminalOutput.clear();
+        _terminalFlushScheduled = false;
+        return;
+      }
+      if (!isPageActive) {
         _terminalFlushScheduled = false;
         return;
       }
@@ -339,7 +395,6 @@ class _WorkspaceTerminalContentState extends State<WorkspaceTerminalContent> {
       _altLatched = false;
     });
   }
-
 }
 
 class _LatchedTerminalInputHandler implements TerminalInputHandler {
@@ -407,21 +462,13 @@ class _TerminalShortcutBar extends StatelessWidget {
                 ),
                 _TerminalShortcutButton(
                   label: '/',
-                  onPressed: () => onText(
-                    '/',
-                    modifiedKey: TerminalKey.slash,
-                  ),
+                  onPressed: () => onText('/', modifiedKey: TerminalKey.slash),
                 ),
                 _TerminalShortcutButton(
                   label: '―',
-                  onPressed: () => onText(
-                    '-',
-                    modifiedKey: TerminalKey.minus,
-                  ),
-                  onSwipeUp: () => onText(
-                    '|',
-                    modifiedKey: TerminalKey.backslash,
-                  ),
+                  onPressed: () => onText('-', modifiedKey: TerminalKey.minus),
+                  onSwipeUp: () =>
+                      onText('|', modifiedKey: TerminalKey.backslash),
                   popupLabel: '|',
                 ),
                 _TerminalShortcutButton(
@@ -514,7 +561,8 @@ class _TerminalShortcutButton extends StatefulWidget {
   final String? popupLabel;
 
   @override
-  State<_TerminalShortcutButton> createState() => _TerminalShortcutButtonState();
+  State<_TerminalShortcutButton> createState() =>
+      _TerminalShortcutButtonState();
 }
 
 class _TerminalShortcutButtonState extends State<_TerminalShortcutButton> {

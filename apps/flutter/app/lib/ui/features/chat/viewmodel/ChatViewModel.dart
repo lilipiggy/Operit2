@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../../core/bridge/OperitRuntimeBridge.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../../core/host/SelectedFileInput.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import 'WorkspaceFileModels.dart';
@@ -17,6 +18,51 @@ typedef ChatResponseStreamEvent = core_proxy.MarkdownStreamEvent;
 typedef AttachmentInfo = core_proxy.AttachmentInfo;
 
 const String _pastedTextAttachmentPrefix = 'pasted_text:';
+const String _pastedImageAttachmentPrefix = 'pasted_image:';
+
+enum ChatToolPermissionResult {
+  allow('allow'),
+  deny('deny'),
+  allowSession('allow_session');
+
+  const ChatToolPermissionResult(this.wireName);
+
+  final String wireName;
+}
+
+class PastedImageAttachmentPayload {
+  /// Creates a base64 image payload for a virtual chat attachment.
+  const PastedImageAttachmentPayload({
+    required this.fileName,
+    required this.mimeType,
+    required this.fileSize,
+    required this.base64Content,
+  });
+
+  /// Creates a base64 image payload from pasted image bytes.
+  factory PastedImageAttachmentPayload.fromBytes({
+    required String fileName,
+    required String mimeType,
+    required Uint8List bytes,
+  }) {
+    return PastedImageAttachmentPayload(
+      fileName: fileName,
+      mimeType: mimeType,
+      fileSize: bytes.length,
+      base64Content: base64Encode(bytes),
+    );
+  }
+
+  final String fileName;
+  final String mimeType;
+  final int fileSize;
+  final String base64Content;
+
+  /// Encodes this payload for the runtime attachment boundary.
+  String toAttachmentPath() {
+    return '$_pastedImageAttachmentPrefix${jsonEncode(<String, Object>{'fileName': fileName, 'mimeType': mimeType, 'fileSize': fileSize, 'base64Content': base64Content})}';
+  }
+}
 
 class ChatInputSubmitDecision {
   const ChatInputSubmitDecision({
@@ -50,16 +96,40 @@ class ChatInputSubmitDecision {
 class ChatViewModel {
   ChatViewModel({
     this.bridge = const ProxyCoreRuntimeBridge(),
+    GeneratedChatRuntimeHolderMainCoreProxy? chat,
   }) : clients = GeneratedCoreProxyClients(bridge),
-       _chat = GeneratedCoreProxyClients(bridge).chatRuntimeHolderMain;
+       _chat = chat ?? GeneratedCoreProxyClients(bridge).chatRuntimeHolderMain;
 
   final OperitRuntimeBridge bridge;
   final GeneratedCoreProxyClients clients;
   final GeneratedChatRuntimeHolderMainCoreProxy _chat;
 
+  /// The chat runtime scoped to this view model's window.
+  GeneratedChatRuntimeHolderMainCoreProxy get chatCore => _chat;
+
+  /// Extraction and selected-message queue use the chat's persisted binding.
+  Future<void> updateMemory(String chatId) =>
+      _chat.updateMemory(chatId: chatId);
+  Future<void> enqueueSelectedMessagesForMemory(
+    String chatId,
+    List<int> timestamps,
+  ) => _chat.enqueueSelectedMessagesForMemory(
+    chatId: chatId,
+    messageTimestamps: timestamps,
+  );
+
+  /// Core resolves character/shared/group memory ownership for the persisted chat.
+  Future<String> memoryOwnerForChat(String chatId) =>
+      _chat.memoryOwnerKeyForChat(chatId: chatId);
+
   /// Watches the selected chat id used to bind per-chat Core flows.
   Stream<String?> watchCurrentChatId() {
     return _chat.currentChatIdFlow();
+  }
+
+  /// Observes generic Core routing metadata for the selected chat binding.
+  Stream<core_proxy.BindingRouteStatus?> watchRouteStatus(String chatId) {
+    return clients.serverCoreNodeRouter.bindingRouteStatusFlow(key: chatId);
   }
 
   /// Watches messages for one explicit main-runtime chat id.
@@ -70,6 +140,19 @@ class ChatViewModel {
   /// Watches runtime state for one explicit main-runtime chat id.
   Stream<core_proxy.ChatState> watchChatState(String chatId) {
     return _chat.chatStateFlow(chatId: chatId);
+  }
+
+  /// Sends a decision for a permission request through the owning chat route.
+  Future<void> respondToolPermissionRequest({
+    required String chatId,
+    required String requestId,
+    required ChatToolPermissionResult result,
+  }) {
+    return _chat.respondChatToolPermission(
+      chatId: chatId,
+      requestId: requestId,
+      result: result.wireName,
+    );
   }
 
   Future<void> sendUserMessage(
@@ -220,9 +303,87 @@ class ChatViewModel {
     return _chat.handleAttachment(filePath: filePath);
   }
 
+  /// Streams a selection to the receiving Host, then registers only committed metadata.
+  Future<void> attachSelectedFile(
+    SelectedFileInput file, {
+    required String? expectedChatId,
+    bool Function()? isCancelled,
+  }) async {
+    final transfer = clients.servicesAttachmentTransferManager;
+    String? uploadId;
+    void checkCancellation() {
+      if (isCancelled?.call() ?? false) {
+        throw StateError('Attachment upload was cancelled');
+      }
+    }
+
+    try {
+      checkCancellation();
+      uploadId = await transfer.beginAttachmentUpload(
+        fileName: file.name,
+        expectedByteLength: file.byteLength,
+      );
+      var uploaded = 0;
+      Stream<Uint8List> checkedChunks() async* {
+        await for (final chunk in file.chunks()) {
+          checkCancellation();
+          uploaded += chunk.length;
+          if (file.byteLength != null && uploaded > file.byteLength!) {
+            throw StateError('Selected file exceeds its declared byte length');
+          }
+          yield chunk;
+        }
+        if (file.byteLength != null && uploaded != file.byteLength) {
+          throw StateError('Selected file byte length changed during upload');
+        }
+      }
+
+      await transfer.writeAttachmentUpload(
+        uploadId: uploadId,
+        fileName: file.name,
+        expectedByteLength: file.byteLength,
+        bytes: checkedChunks(),
+      );
+      checkCancellation();
+      final attachment = await transfer.completeAttachmentUpload(
+        uploadId: uploadId,
+        fileName: file.name,
+        expectedByteLength: uploaded,
+      );
+      checkCancellation();
+      await _chat.attachUploadedFile(
+        attachment: attachment,
+        expectedChatId: expectedChatId,
+      );
+    } catch (error, stackTrace) {
+      if (uploadId != null) {
+        try {
+          await transfer.discardAttachmentUpload(
+            uploadId: uploadId,
+            fileName: file.name,
+          );
+        } catch (cleanup) {
+          debugPrint('Failed to discard attachment upload: $cleanup');
+        }
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      try {
+        await file.close();
+      } catch (cleanup) {
+        debugPrint('Failed to close selected file input: $cleanup');
+      }
+    }
+  }
+
   /// Adds pasted text through the runtime's virtual plain-text attachment path.
   Future<void> attachPastedText(String text) {
     return handleAttachment('$_pastedTextAttachmentPrefix$text');
+  }
+
+  /// Adds a pasted image through the runtime's virtual image attachment path.
+  Future<void> attachPastedImage(PastedImageAttachmentPayload payload) {
+    return handleAttachment(payload.toAttachmentPath());
   }
 
   Future<void> removeAttachment(String filePath) {
@@ -235,14 +396,37 @@ class ChatViewModel {
 
   String createAttachmentReference(AttachmentInfo attachment) {
     final buffer = StringBuffer('<attachment ');
-    buffer.write('id="${attachment.filePath}" ');
-    buffer.write('filename="${attachment.fileName}" ');
-    buffer.write('type="${attachment.mimeType}" ');
+    const escape = HtmlEscape(HtmlEscapeMode.attribute);
+    final normalized = attachment.filePath.replaceAll('\\', '/');
+    const marker = '/temp/clean_on_exit/';
+    final markerIndex = normalized.lastIndexOf(marker);
+    String? toolPath;
+    if (markerIndex >= 0) {
+      final relative = normalized.substring(markerIndex + marker.length);
+      if (relative.isNotEmpty &&
+          relative
+              .split('/')
+              .every(
+                (part) => part.isNotEmpty && part != '.' && part != '..',
+              )) {
+        toolPath = '/app/data/temp/clean_on_exit/$relative';
+      }
+    }
+    buffer.write('id="${escape.convert(toolPath ?? attachment.filePath)}" ');
+    buffer.write('filename="${escape.convert(attachment.fileName)}" ');
+    buffer.write('type="${escape.convert(attachment.mimeType)}" ');
+    final nodeId = attachment.nodeId;
+    if (nodeId != null && nodeId.isNotEmpty) {
+      buffer.write('node_id="${escape.convert(nodeId)}" ');
+    }
+    if (toolPath != null) {
+      buffer.write('path="${escape.convert(toolPath)}" ');
+    }
     if (attachment.fileSize > 0) {
       buffer.write('size="${attachment.fileSize}" ');
     }
     if (attachment.content.isNotEmpty) {
-      buffer.write('content="${attachment.content}" ');
+      buffer.write('content="${escape.convert(attachment.content)}" ');
     }
     buffer.write('/>');
     return buffer.toString();
@@ -266,6 +450,11 @@ class ChatViewModel {
     String query,
   ) {
     return _chat.loadChatMessageLocatorPreviews(chatId: chatId, query: query);
+  }
+
+  /// Reveals one message inside the current chat display window.
+  Future<bool> revealMessageForCurrentChat(int targetTimestamp) {
+    return _chat.revealMessageForCurrentChat(targetTimestamp: targetTimestamp);
   }
 
   Future<void> setMessageFavorite(int timestamp, bool isFavorite) {
@@ -316,6 +505,14 @@ class ChatViewModel {
     return _chat.deleteMessageVariant(
       timestamp: timestamp,
       variantIndex: variantIndex,
+    );
+  }
+
+  /// Selects the displayed response variant for a message.
+  Future<void> selectMessageVariant(int timestamp, int selectedVariantIndex) {
+    return _chat.selectMessageVariant(
+      timestamp: timestamp,
+      selectedVariantIndex: selectedVariantIndex,
     );
   }
 
@@ -379,18 +576,17 @@ class ChatViewModel {
     return _chat.showLatestMessagesForCurrentChat();
   }
 
-  Future<String> createAndBindDefaultWorkspace(
-    String chatId,
-    String? projectType,
-  ) {
-    return _chat.createAndBindDefaultWorkspace(
-      chatId: chatId,
-      projectType: projectType,
-    );
+  Future<String> createAndBindWorkspace(String chatId, String name) {
+    return _chat.createAndBindWorkspace(chatId: chatId, name: name);
   }
 
   Future<void> bindChatToWorkspace(String chatId, String workspace) {
     return _chat.bindChatToWorkspace(chatId: chatId, workspace: workspace);
+  }
+
+  /// Detaches this chat without deleting the workspace or its files.
+  Future<void> unbindChatFromWorkspace(String chatId) {
+    return _chat.unbindChatFromWorkspace(chatId: chatId);
   }
 
   Future<List<WorkspaceFileEntry>> listWorkspaceFiles(
@@ -401,6 +597,19 @@ class ChatViewModel {
       chatId: chatId,
       relativePath: relativePath,
     );
+    return entries;
+  }
+
+  /// Lists workspace entries ranked for the active @ mention query.
+  Future<List<WorkspaceFileEntry>> listMentionWorkspaceSuggestions(
+    String searchQuery,
+  ) async {
+    final chatId = await _requiredCurrentChatId();
+    final entries = await clients.servicesWorkspaceService
+        .listMentionWorkspaceSuggestions(
+          chatId: chatId,
+          searchQuery: searchQuery,
+        );
     return entries;
   }
 

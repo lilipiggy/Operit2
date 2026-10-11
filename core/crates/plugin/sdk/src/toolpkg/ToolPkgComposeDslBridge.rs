@@ -61,57 +61,13 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                 };
             }
 
-            function parseJsonValue(rawValue) {
-                if (rawValue === undefined || rawValue === null) {
-                    return undefined;
+            /** Unwraps the explicit structured WebView result contract without parsing application strings. */
+            function unwrapHostResult(result) {
+                if (!result || typeof result !== 'object' || typeof result.success !== 'boolean') {
+                    throw new TypeError('Compose host returned an invalid result envelope');
                 }
-                if (typeof rawValue !== 'string') {
-                    return rawValue;
-                }
-                var trimmed = rawValue.trim();
-                if (!trimmed) {
-                    return undefined;
-                }
-                try {
-                    return JSON.parse(trimmed);
-                } catch (e) {
-                    return rawValue;
-                }
-            }
-
-            function unwrapNativeResult(rawValue) {
-                var parsed = parseJsonValue(rawValue);
-                if (
-                    parsed &&
-                    typeof parsed === 'object' &&
-                    parsed.success === false
-                ) {
-                    throw createUserFacingError(parsed.message, parsed);
-                }
-                if (
-                    parsed &&
-                    typeof parsed === 'object' &&
-                    Object.prototype.hasOwnProperty.call(parsed, 'data')
-                ) {
-                    return parsed.data;
-                }
-                return parsed;
-            }
-
-            function invokeNative(methodName, args) {
-                try {
-                    if (
-                        typeof NativeInterface === 'undefined' ||
-                        !NativeInterface ||
-                        typeof NativeInterface[methodName] !== 'function'
-                    ) {
-                        return undefined;
-                    }
-                    return NativeInterface[methodName].apply(NativeInterface, args || []);
-                } catch (e) {
-                    console.error('Native bridge call failed for ' + methodName + ':', e);
-                    return undefined;
-                }
+                if (!result.success) throw createUserFacingError(result.message, result);
+                return result.data;
             }
 
             function normalizeSerializableValue(value, runtime, seen) {
@@ -193,7 +149,8 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                 return node;
             }
 
-            function resolvePackageName(value) {
+            /// Resolves an optional package argument inside its owning runtime.
+            function resolvePackageName(value, runtime) {
                 var name = String(value || runtime.packageName || '').trim();
                 return name;
             }
@@ -280,6 +237,7 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                             ? options.__operit_call_runtime
                             : null,
                     actionStore: {},
+                    navigationCommands: [],
                     actionCounter: 0,
                     stateChangeListeners: [],
                     stateChangeScheduled: false,
@@ -383,80 +341,25 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                         routeInstanceId: runtime.routeInstanceId || '',
                         executionContextKey: runtime.executionContextKey || ''
                     };
+                    /** Builds one structured controller request with its owning Compose context. */
+                    function controllerRequest(command, payload) {
+                        return {
+                            command: String(command), key: controllerKey,
+                            routeInstanceId: runtime.routeInstanceId || '',
+                            executionContextKey: runtime.executionContextKey || '',
+                            payload: normalizeSerializableValue(payload, runtime, [])
+                        };
+                    }
+                    /** Executes a synchronous controller command through the structured host binding. */
                     function invokeControllerCommand(command, payload) {
-                        return unwrapNativeResult(
-                            invokeNative('composeWebViewControllerCommand', [
-                                JSON.stringify({
-                                    command: String(command || ''),
-                                    key: controllerKey,
-                                    routeInstanceId: runtime.routeInstanceId || '',
-                                    executionContextKey: runtime.executionContextKey || '',
-                                    payload: normalizeSerializableValue(
-                                        payload && typeof payload === 'object'
-                                            ? payload
-                                            : {},
-                                        runtime,
-                                        []
-                                    )
-                                })
-                            ])
-                        );
+                        return unwrapHostResult(__operitNativeComposeWebViewControllerCommand(
+                            controllerRequest(command, payload)
+                        ));
                     }
-                    function nextWebViewControllerCallbackId() {
-                        return '__operit_compose_webview_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
-                    }
+                    /** Executes an asynchronous controller command through its owning host Promise. */
                     function invokeControllerCommandSuspend(command, payload) {
-                        if (typeof Promise !== 'function') {
-                            throw new Error('Promise is required for suspend webview controller command');
-                        }
-                        return new Promise(function(resolve, reject) {
-                            if (
-                                typeof NativeInterface === 'undefined' ||
-                                !NativeInterface ||
-                                typeof NativeInterface.composeWebViewControllerCommandSuspend !== 'function'
-                            ) {
-                                reject(createUserFacingError('NativeInterface.composeWebViewControllerCommandSuspend is unavailable'));
-                                return;
-                            }
-                            var root = typeof globalThis !== 'undefined'
-                                ? globalThis
-                                : (typeof window !== 'undefined' ? window : this);
-                            var callbackTarget = typeof window !== 'undefined' ? window : root;
-                            var callbackId = nextWebViewControllerCallbackId();
-                            callbackTarget[callbackId] = function(result, isError) {
-                                delete callbackTarget[callbackId];
-                                try {
-                                    if (isError) {
-                                        reject(createUserFacingError(result.message, result));
-                                        return;
-                                    }
-                                    resolve(unwrapNativeResult(result));
-                                } catch (callbackError) {
-                                    reject(callbackError);
-                                }
-                            };
-                            try {
-                                NativeInterface.composeWebViewControllerCommandSuspend(
-                                    JSON.stringify({
-                                        command: String(command || ''),
-                                        key: controllerKey,
-                                        routeInstanceId: runtime.routeInstanceId || '',
-                                        executionContextKey: runtime.executionContextKey || '',
-                                        payload: normalizeSerializableValue(
-                                            payload && typeof payload === 'object'
-                                                ? payload
-                                                : {},
-                                            runtime,
-                                            []
-                                        )
-                                    }),
-                                    callbackId
-                                );
-                            } catch (invokeError) {
-                                delete callbackTarget[callbackId];
-                                reject(invokeError);
-                            }
-                        });
+                        return __operitInvokeHostAsync(__operitNativeComposeWebViewControllerCommandSuspend,
+                            [controllerRequest(command, payload)], unwrapHostResult);
                     }
                     function defineMethod(target, name, handler) {
                         Object.defineProperty(target, name, {
@@ -537,7 +440,44 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                     return controller;
                 }
 
+                var themeSnapshot;
+                var themeListeners = new Set();
+                /** Validates and detaches one resolved UI host theme. */
+                function readThemeSnapshot(value) {
+                    if (!value || (value.brightness !== 'light' && value.brightness !== 'dark') ||
+                        !value.colors || typeof value.colors !== 'object' || Array.isArray(value.colors)) {
+                        throw new Error('Theme requires a resolved UI host snapshot');
+                    }
+                    var colors = Object.assign({}, value.colors);
+                    Object.keys(colors).forEach(function(role) {
+                        if (typeof colors[role] !== 'string' || !/^#[0-9a-fA-F]{8}$/.test(colors[role])) {
+                            throw new Error('Invalid Theme color: ' + role);
+                        }
+                    });
+                    return Object.freeze({ brightness: value.brightness, colors: Object.freeze(colors) });
+                }
+                if (options.theme !== undefined) themeSnapshot = readThemeSnapshot(options.theme);
+                /** Delivers host theme changes through the existing UI action lifecycle. */
+                runtime.actionStore.__operit_theme_changed = async function(value) {
+                    var next = readThemeSnapshot(value);
+                    if (JSON.stringify(next) === JSON.stringify(themeSnapshot)) return;
+                    themeSnapshot = next;
+                    for (var listener of Array.from(themeListeners)) await listener(next);
+                };
                 var ctx = {
+                    Theme: {
+                        /** Returns the immutable snapshot owned by this UI context. */
+                        getCurrent: function() {
+                            if (!themeSnapshot) throw new Error('Theme is unavailable outside a configured UI host');
+                            return themeSnapshot;
+                        },
+                        /** Registers a listener until explicitly removed or the UI context is released. */
+                        subscribe: function(listener) {
+                            if (typeof listener !== 'function') throw new TypeError('Theme listener must be a function');
+                            themeListeners.add(listener);
+                            return function() { themeListeners.delete(listener); };
+                        }
+                    },
                     MaterialTheme: { colorScheme: colorScheme },
                     useState: function(key, initialValue) {
                         var stateKey = String(key || '').trim();
@@ -598,11 +538,18 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                             height: Math.min((request && request.maxHeight) || 100000, fontSize * 1.4)
                         };
                     },
+                    /** Reads literal environment values through the active execution context. */
                     getEnv: function(key) {
-                        if (typeof getEnv === 'function') {
-                            return unwrapNativeResult(getEnv(String(key || '')));
-                        }
-                        return undefined;
+                        return runtime.callRuntime.getEnv(String(key));
+                    },
+                    /** Writes one environment value through the structured host binding. */
+                    setEnv: async function(key, value) {
+                        __operitNativeSetEnv(String(globalThis.__operitCurrentCallId), String(key),
+                            value == null ? '' : String(value));
+                    },
+                    /** Writes an environment object without a JSON text bridge. */
+                    setEnvs: async function(values) {
+                        __operitNativeSetEnvs(String(globalThis.__operitCurrentCallId), values);
                     },
                     callTool: function(toolName, params) {
                         if (typeof toolCall === 'function') {
@@ -610,11 +557,21 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                         }
                         throw createUserFacingError('Tool call bridge is unavailable');
                     },
+                    /// Queues navigation independently of the action handler's return value.
                     navigate: function(route, args) {
-                        return { route: String(route || ''), args: args || {} };
+                        var routeId = String(route || '').trim();
+                        if (!routeId) {
+                            throw createUserFacingError('route is required');
+                        }
+                        var payload = args && typeof args === 'object' ? args : {};
+                        runtime.navigationCommands.push({
+                            route: routeId,
+                            args: normalizeSerializableValue(payload, runtime, [])
+                        });
+                        return Promise.resolve();
                     },
                     showToast: function(message) {
-                        console.log(String(message || ''));
+                        return toolCall('toast', { message: String(message || '') });
                     },
                     reportError: function(error) {
                         console.error(error);
@@ -622,36 +579,13 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                     createWebViewController: function(key) {
                         return createWebViewController(key);
                     },
+                    /** Opens a file picker through an owning-call structured host Promise. */
                     openFilePicker: function(options) {
-                        if (typeof Promise !== 'function') {
-                            throw new Error('Promise is required for openFilePicker');
-                        }
-                        return Promise.resolve().then(function() {
-                            if (
-                                typeof NativeInterface === 'undefined' ||
-                                !NativeInterface ||
-                                typeof NativeInterface.composeFilePickerCommand !== 'function'
-                            ) {
-                                throw createUserFacingError(
-                                    'NativeInterface.composeFilePickerCommand is unavailable'
-                                );
-                            }
-                            return unwrapNativeResult(
-                                NativeInterface.composeFilePickerCommand(
-                                    JSON.stringify({
-                                        routeInstanceId: runtime.routeInstanceId || '',
-                                        executionContextKey: runtime.executionContextKey || '',
-                                        options: normalizeSerializableValue(
-                                            options && typeof options === 'object'
-                                                ? options
-                                                : {},
-                                            runtime,
-                                            []
-                                        )
-                                    })
-                                )
-                            );
-                        });
+                        return __operitInvokeHostAsync(__operitNativeComposeFilePickerCommand, [{
+                            routeInstanceId: runtime.routeInstanceId || '',
+                            executionContextKey: runtime.executionContextKey || '',
+                            options: normalizeSerializableValue(options === undefined ? {} : options, runtime, [])
+                        }]);
                     },
                     getModuleSpec: function() {
                         return runtime.moduleSpec;
@@ -665,80 +599,38 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                     getCurrentUiModuleId: function() {
                         return runtime.uiModuleId;
                     },
+                    /** Queries package state through the required structured host Promise. */
                     isPackageImported: function(packageName) {
-                        var target = resolvePackageName(packageName);
-                        if (!target) {
-                            return Promise.resolve(false);
-                        }
-                        var result = invokeNative('isPackageImported', [target]);
-                        if (result === true || result === false || result === 'true' || result === 'false') {
-                            return Promise.resolve(result === true || result === 'true');
-                        }
-                        return toolCall('is_package_imported', { package_name: target });
+                        return __operitInvokeHostAsync(__operitNativeIsPackageImported,
+                            [resolvePackageName(packageName, runtime)]);
                     },
+                    /** Imports a package through the required structured host Promise. */
                     importPackage: function(packageName) {
-                        var target = resolvePackageName(packageName);
-                        if (!target) {
-                            return Promise.resolve('');
-                        }
-                        var result = invokeNative('importPackage', [target]);
-                        if (result !== undefined && result !== null) {
-                            return Promise.resolve(result);
-                        }
-                        return toolCall('import_package', { package_name: target });
+                        return __operitInvokeHostAsync(__operitNativeImportPackage,
+                            [resolvePackageName(packageName, runtime)]);
                     },
+                    /** Removes a package through the required structured host Promise. */
                     removePackage: function(packageName) {
-                        var target = resolvePackageName(packageName);
-                        if (!target) {
-                            return Promise.resolve('');
-                        }
-                        var result = invokeNative('removePackage', [target]);
-                        if (result !== undefined && result !== null) {
-                            return Promise.resolve(result);
-                        }
-                        return toolCall('remove_package', { package_name: target });
+                        return __operitInvokeHostAsync(__operitNativeRemovePackage,
+                            [resolvePackageName(packageName, runtime)]);
                     },
+                    /** Activates a package through the required structured host Promise. */
                     usePackage: function(packageName) {
-                        var target = resolvePackageName(packageName);
-                        if (!target) {
-                            return Promise.resolve('');
-                        }
-                        var result = invokeNative('usePackage', [target]);
-                        if (result !== undefined && result !== null) {
-                            return Promise.resolve(result);
-                        }
-                        return toolCall('use_package', { package_name: target });
+                        return __operitInvokeHostAsync(__operitNativeUsePackage,
+                            [resolvePackageName(packageName, runtime)]);
                     },
+                    /** Reads the structured package list from the required host binding. */
                     listImportedPackages: function() {
-                        var json = invokeNative('listImportedPackagesJson', []);
-                        if (typeof json === 'string' && json.trim()) {
-                            try {
-                                return Promise.resolve(JSON.parse(json));
-                            } catch (e) {
-                                return Promise.resolve([]);
-                            }
-                        }
-                        return toolCall('list_imported_packages', {});
+                        return __operitInvokeHostAsync(__operitNativeListImportedPackages, []);
                     },
+                    /** Resolves a tool identity through the required host binding. */
                     resolveToolName: function(request) {
-                        var req = request && typeof request === 'object' ? request : {};
-                        var packageName = String(req.packageName || runtime.packageName || '');
-                        var subpackageId = String(req.subpackageId || '');
-                        var toolName = String(req.toolName || '');
-                        var preferImported = req.preferImported === false ? 'false' : 'true';
-                        if (!toolName) {
-                            return Promise.resolve('');
-                        }
-                        var result = invokeNative('resolveToolName', [
-                            packageName,
-                            subpackageId,
-                            toolName,
-                            preferImported
+                        var req = request === undefined ? {} : request;
+                        return __operitInvokeHostAsync(__operitNativeResolveToolName, [
+                            String(req.packageName || runtime.packageName || ''),
+                            String(req.subpackageId || ''), String(req.toolName || ''),
+                            req.preferImported !== false
                         ]);
-                        if (typeof result === 'string' && result.trim()) {
-                            return Promise.resolve(result);
-                        }
-                        return Promise.resolve(normalizeToolName(packageName, toolName));
                     },
                     formatTemplate: function(template, values) {
                         var result = String(template || '');
@@ -758,6 +650,10 @@ pub fn buildComposeDslContextBridgeDefinition() -> String {
                 };
 
                 runtime.ctx = ctx;
+                /// Transfers each navigation request to exactly one render response.
+                runtime.takeNavigationCommands = function() {
+                    return runtime.navigationCommands.splice(0);
+                };
                 Object.defineProperty(runtime, 'state', {
                     get: function() { return cloneObject(runtime.stateStore); }
                 });

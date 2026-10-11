@@ -14,7 +14,7 @@ String svgStringFromPath(
     'viewBox='
     '"${viewBox.left} ${viewBox.top} ${viewBox.width} ${viewBox.height}" '
     '>'
-    '<path fill="rgb(${color.red},${color.green},${color.blue})" d="$path"></path>'
+    '<path fill="rgb(${(color.r * 255.0).round().clamp(0, 255)},${(color.g * 255.0).round().clamp(0, 255)},${(color.b * 255.0).round().clamp(0, 255)})" d="$path"></path>'
     '</svg>';
 
 final _alignmentToString = {

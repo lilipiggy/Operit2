@@ -12,7 +12,7 @@ use crate::SyncOperationStore::{
 pub const RUNTIME_FILE_SYNC_DOMAIN: &str = "runtime_file";
 const RUNTIME_FILE_SYNC_ENTITY_TYPE: &str = "file";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeFileSyncReference {
     pub contentHash: String,
     pub size: i64,
@@ -41,9 +41,20 @@ impl RuntimeFileSyncStore {
     #[allow(non_snake_case)]
     pub fn writeBytes(&self, storagePath: &str, content: &[u8]) -> Result<(), String> {
         requireSpaceFile(storagePath)?;
+        if storagePath.starts_with("workspaces/") {
+            return crate::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(self.storageHost.clone(), self.syncRootPath.clone())
+                .track(|| self.storageHost.writeBytes(storagePath, content).map_err(|e| e.to_string()));
+        }
         self.storageHost
             .writeBytes(storagePath, content)
             .map_err(|error| error.to_string())?;
+        self.recordSnapshot(storagePath, content)?;
+        Ok(())
+    }
+
+    /// Records observed bytes without rewriting an externally edited workspace file.
+    pub(crate) fn recordSnapshot(&self, storagePath: &str, content: &[u8]) -> Result<RuntimeFileSyncReference, String> {
+        requireSpaceFile(storagePath)?;
         let reference = self.storeBlob(content)?;
         let deviceId = self
             .syncOperationStore
@@ -58,11 +69,11 @@ impl RuntimeFileSyncStore {
                     entityId: storagePath.to_string(),
                     operation: "upsert".to_string(),
                     semantics: SyncOperationSemantics::EntityState,
-                    payload: serde_json::to_value(reference).map_err(|error| error.to_string())?,
+                    payload: serde_json::to_value(&reference).map_err(|error| error.to_string())?,
                 },
             )
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(reference)
     }
 
     /// Appends bytes to a Space file and records the resulting complete snapshot.
@@ -87,6 +98,15 @@ impl RuntimeFileSyncStore {
     /// Deletes a Space file and records a synchronized tombstone.
     pub fn delete(&self, storagePath: &str) -> Result<(), String> {
         requireSpaceFile(storagePath)?;
+        if storagePath.starts_with("workspaces/") {
+            return crate::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(self.storageHost.clone(), self.syncRootPath.clone())
+                .track(|| {
+                    if self.storageHost.exists(storagePath).map_err(|e| e.to_string())? {
+                        self.storageHost.delete(storagePath, false).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                });
+        }
         if self
             .storageHost
             .exists(storagePath)
@@ -96,6 +116,12 @@ impl RuntimeFileSyncStore {
                 .delete(storagePath, false)
                 .map_err(|error| error.to_string())?;
         }
+        self.recordDeletion(storagePath)
+    }
+
+    /// Records an observed deletion without deleting a possibly recreated local file.
+    pub(crate) fn recordDeletion(&self, storagePath: &str) -> Result<(), String> {
+        requireSpaceFile(storagePath)?;
         let deviceId = self
             .syncOperationStore
             .localDeviceId()
@@ -116,6 +142,73 @@ impl RuntimeFileSyncStore {
         Ok(())
     }
 
+    /// Tracks VFS mutations using declared storage ownership, without knowledge of file consumers.
+    /// Capturing before the operation preserves tombstones for recursive deletion and moves.
+    pub fn trackChanges<T>(
+        &self,
+        paths: &[String],
+        change: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let before = self.captureFiles(paths)?;
+        let result = change();
+        let after = self.captureFiles(paths)?;
+        // Publish partial changes too: a host may fail after modifying part of a directory.
+        for (path, bytes) in &after {
+            if before.get(path) != Some(bytes) {
+                self.writeBytes(path, bytes)?;
+            }
+        }
+        for path in before.keys().filter(|path| !after.contains_key(*path)) {
+            self.delete(path)?;
+        }
+        result
+    }
+
+    fn captureFiles(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+        let mut files = std::collections::BTreeMap::new();
+        for path in paths {
+            self.capturePath(path, &mut files)?;
+        }
+        Ok(files)
+    }
+
+    fn capturePath(
+        &self,
+        path: &str,
+        files: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), String> {
+        if !self.storageHost.exists(path).map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        let parent = path.rsplit_once('/').ok_or("Invalid runtime file path")?.0;
+        let entry = self
+            .storageHost
+            .list(parent)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .ok_or("Missing runtime file entry")?;
+        if entry.isDirectory {
+            for child in self.storageHost.list(path).map_err(|e| e.to_string())? {
+                if !child.path.starts_with(&format!("{path}/")) {
+                    return Err("Storage entry escaped directory".into());
+                }
+                self.capturePath(&child.path, files)?;
+            }
+        } else if runtimeStorageOwnership(path) == Ok(RuntimeStorageOwnership::Space) {
+            files.insert(
+                path.to_string(),
+                self.storageHost
+                    .readBytes(path)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(())
+    }
+
     /// Applies one validated runtime file operation without recording another local mutation.
     #[allow(non_snake_case)]
     pub fn applySyncedOperation(
@@ -126,6 +219,11 @@ impl RuntimeFileSyncStore {
         payload: serde_json::Value,
     ) -> Result<(), String> {
         requireSpaceFile(storagePath)?;
+        let syncRootPath = syncRootPath.into();
+        if storagePath.starts_with("workspaces/") {
+            return crate::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(storageHost, syncRootPath)
+                .apply(storagePath, operation, payload);
+        }
         let store = Self::new(storageHost.clone(), syncRootPath);
         match operation {
             "upsert" => {
@@ -252,7 +350,7 @@ impl RuntimeFileSyncStore {
 
     /// Reads and verifies one complete content-addressed blob.
     #[allow(non_snake_case)]
-    fn readBlob(&self, reference: &RuntimeFileSyncReference) -> Result<Vec<u8>, String> {
+    pub(crate) fn readBlob(&self, reference: &RuntimeFileSyncReference) -> Result<Vec<u8>, String> {
         validateBlobReference(reference)?;
         let content = self
             .storageHost

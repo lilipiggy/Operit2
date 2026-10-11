@@ -49,6 +49,41 @@ endfunction()
 
 # Flutter library and tool build rules.
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
+find_program(OPERIT_CARGO_EXECUTABLE
+  NAMES cargo cargo.exe
+  HINTS "$ENV{USERPROFILE}/.cargo/bin" "$ENV{CARGO_HOME}/bin"
+)
+if(OPERIT_CARGO_EXECUTABLE)
+  get_filename_component(OPERIT_CARGO_BIN_DIR "${OPERIT_CARGO_EXECUTABLE}" DIRECTORY)
+  get_filename_component(OPERIT_DERIVED_CARGO_HOME "${OPERIT_CARGO_BIN_DIR}" DIRECTORY)
+  get_filename_component(OPERIT_TOOLCHAIN_ROOT "${OPERIT_DERIVED_CARGO_HOME}" DIRECTORY)
+  if(DEFINED ENV{CARGO_HOME} AND NOT "$ENV{CARGO_HOME}" STREQUAL "")
+    set(OPERIT_CARGO_HOME "$ENV{CARGO_HOME}")
+  else()
+    set(OPERIT_CARGO_HOME "${OPERIT_DERIVED_CARGO_HOME}")
+  endif()
+  if(DEFINED ENV{RUSTUP_HOME} AND NOT "$ENV{RUSTUP_HOME}" STREQUAL "")
+    set(OPERIT_RUSTUP_HOME "$ENV{RUSTUP_HOME}")
+  elseif(EXISTS "${OPERIT_TOOLCHAIN_ROOT}/rustup")
+    set(OPERIT_RUSTUP_HOME "${OPERIT_TOOLCHAIN_ROOT}/rustup")
+  elseif(EXISTS "${OPERIT_TOOLCHAIN_ROOT}/.rustup")
+    set(OPERIT_RUSTUP_HOME "${OPERIT_TOOLCHAIN_ROOT}/.rustup")
+  endif()
+  if(OPERIT_CARGO_HOME)
+    list(APPEND FLUTTER_TOOL_ENVIRONMENT "CARGO_HOME=${OPERIT_CARGO_HOME}")
+  endif()
+  if(OPERIT_RUSTUP_HOME)
+    list(APPEND FLUTTER_TOOL_ENVIRONMENT "RUSTUP_HOME=${OPERIT_RUSTUP_HOME}")
+  endif()
+  if(DEFINED ENV{RUSTUP_TOOLCHAIN} AND NOT "$ENV{RUSTUP_TOOLCHAIN}" STREQUAL "")
+    list(APPEND FLUTTER_TOOL_ENVIRONMENT "RUSTUP_TOOLCHAIN=$ENV{RUSTUP_TOOLCHAIN}")
+  else()
+    list(APPEND FLUTTER_TOOL_ENVIRONMENT "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc")
+  endif()
+  if(DEFINED ENV{JAVA_HOME} AND NOT "$ENV{JAVA_HOME}" STREQUAL "")
+    list(APPEND FLUTTER_TOOL_ENVIRONMENT "JAVA_HOME=$ENV{JAVA_HOME}")
+  endif()
+endif()
 add_subdirectory(${FLUTTER_MANAGED_DIR})
 
 # Application build; see runner/CMakeLists.txt.
@@ -101,11 +136,16 @@ install(DIRECTORY "${NATIVE_ASSETS_DIR}"
    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
    COMPONENT Runtime)
 
-# Fully re-copy the assets directory on each build to avoid having stale files
-# from a previous install.
+# Release installs clean the assets directory so removed assets cannot remain
+# in a package. Debug/Profile installs keep the existing directory and let
+# CMake update changed files in place; deleting and re-copying the full bundle
+# on every edit is needlessly expensive during development.
 set(FLUTTER_ASSET_DIR_NAME "flutter_assets")
 install(CODE "
-  file(REMOVE_RECURSE \"${INSTALL_BUNDLE_DATA_DIR}/${FLUTTER_ASSET_DIR_NAME}\")
+  if(NOT \"\${CMAKE_INSTALL_CONFIG_NAME}\" STREQUAL \"Debug\" AND
+     NOT \"\${CMAKE_INSTALL_CONFIG_NAME}\" STREQUAL \"Profile\")
+    file(REMOVE_RECURSE \"${INSTALL_BUNDLE_DATA_DIR}/${FLUTTER_ASSET_DIR_NAME}\")
+  endif()
   " COMPONENT Runtime)
 install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)

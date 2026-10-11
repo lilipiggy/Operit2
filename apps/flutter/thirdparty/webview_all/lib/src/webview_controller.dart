@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart'
@@ -125,6 +126,26 @@ class WebViewController {
   /// Implementation of [PlatformWebViewController] for the current platform.
   final PlatformWebViewController platform;
 
+  /// Updates the browser color preference without navigating or reloading content.
+  Future<void> setPreferredColorScheme(Brightness brightness) =>
+      platform.setPreferredColorScheme(brightness);
+
+  /// Registers document-start JavaScript through the current WebView host.
+  Future<String> addDocumentStartJavaScript(String source) =>
+      platform.addUserScript(
+        WebViewUserScript(source: source, forMainFrameOnly: false),
+      );
+
+  /// Removes one document-start registration through the current WebView host.
+  Future<void> removeDocumentStartJavaScript(String identifier) =>
+      platform.removeUserScript(identifier);
+
+  /// Scheme for native, socket-free resources; null on unsupported platforms.
+  String? get localResourceScheme => platform.localResourceScheme;
+
+  Future<void> setLocalResourceHandler(WebViewLocalResourceHandler? handler) =>
+      platform.setLocalResourceHandler(handler);
+
   /// Loads the file located on the specified [absoluteFilePath].
   ///
   /// The [absoluteFilePath] parameter should contain the absolute path to the
@@ -246,12 +267,32 @@ class WebViewController {
   /// Runs the given JavaScript in the context of the current page, and returns
   /// the result.
   ///
-  /// The Future completes with an error if a JavaScript error occurred, or if
-  /// the type the given expression evaluates to is unsupported. Unsupported
-  /// values include certain non-primitive types on iOS, as well as `undefined`
-  /// or `null` on iOS 14+.
-  Future<Object> runJavaScriptReturningResult(String javaScript) {
-    return platform.runJavaScriptReturningResult(javaScript);
+  /// Returns JSON-compatible values on every platform. JavaScript `null` and
+  /// `undefined` both become Dart `null`. Strings are not decoded a second time.
+  /// The Future completes with an error if execution or serialization fails.
+  Future<Object?> runJavaScriptReturningResult(String javaScript) async {
+    // All native adapters can return a string, including when the script's
+    // actual result is null. Use one envelope for every platform so WebKit's
+    // non-null result restriction does not leak into the public API.
+    final result = await platform.runJavaScriptReturningResult('''
+(function() {
+  try {
+    const value = (0, eval)(${jsonEncode(javaScript)});
+    const encoded = JSON.stringify({ value: value === undefined ? null : value });
+    if (!Object.prototype.hasOwnProperty.call(JSON.parse(encoded), 'value')) {
+      throw new TypeError('The JavaScript result is not JSON-compatible.');
+    }
+    return encoded;
+  } catch (error) {
+    return JSON.stringify({ error: String(error) });
+  }
+})()
+''');
+    final envelope = jsonDecode(result as String) as Map<String, dynamic>;
+    if (envelope.containsKey('error')) {
+      throw StateError(envelope['error'] as String);
+    }
+    return envelope['value'];
   }
 
   /// Adds a new JavaScript channel to the set of enabled channels.

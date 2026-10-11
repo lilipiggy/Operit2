@@ -62,6 +62,8 @@ pub mod Memory;
 pub mod MemoryAutoSaveCandidate;
 #[path = "MemoryExportModel.rs"]
 pub mod MemoryExportModel;
+#[path = "MemorySettings.rs"]
+pub mod MemorySettings;
 #[path = "MemorySearchConfig.rs"]
 pub mod MemorySearchConfig;
 #[path = "MemorySearchDebugInfo.rs"]
@@ -112,10 +114,8 @@ pub mod ToolPrompt;
 pub mod TtsCatalog;
 #[path = "TtsConfig.rs"]
 pub mod TtsConfig;
-#[path = "Workflow.rs"]
-pub mod Workflow;
-#[path = "WorkflowExecutionLog.rs"]
-pub mod WorkflowExecutionLog;
+#[path = "Workspace.rs"]
+pub mod Workspace;
 #[path = "WorkspaceRenameResult.rs"]
 pub mod WorkspaceRenameResult;
 
@@ -175,6 +175,5 @@ pub use SttConfig::*;
 pub use ToolPrompt::*;
 pub use TtsCatalog::*;
 pub use TtsConfig::*;
-pub use Workflow::*;
-pub use WorkflowExecutionLog::*;
+pub use Workspace::*;
 pub use WorkspaceRenameResult::*;

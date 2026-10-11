@@ -1,21 +1,91 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
+use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_model::AttachmentInfo::AttachmentInfo;
+use operit_util::OperitPaths;
 use std::fs;
 use std::path::PathBuf;
 
 use super::app::{OperitTui, QueuedAttachmentToken, QueuedAttachmentTokenKind};
-use super::commands::{complete_command_input, matching_command_specs, TuiCommandSpec};
+use super::commands::{complete_command_input, matching_command_specs, TuiCommandSuggestion};
 use super::helpers::{char_to_byte_index, display_width, wrap_approx_lines};
-use crate::guess_mime_type;
 
 const PASTE_ATTACHMENT_CHAR_THRESHOLD: usize = 2_048;
 const PASTE_ATTACHMENT_LINE_THRESHOLD: usize = 8;
+/// How many submitted inputs stay recallable with the arrow keys.
+const INPUT_HISTORY_LIMIT: usize = 200;
+
+/// Readline-style input history for the input box.
+///
+/// Browsing holds the in-progress text as a draft, so stepping past the newest
+/// entry hands the reader back exactly what they were typing.
+#[derive(Clone, Debug, Default)]
+pub(super) struct InputHistory {
+    entries: Vec<String>,
+    /// Entry currently recalled; `None` while the draft itself is being edited.
+    index: Option<usize>,
+    draft: String,
+}
+
+impl InputHistory {
+    /// Records one submitted input, skipping blanks and consecutive repeats.
+    pub(super) fn record(&mut self, input: &str) {
+        let entry = input.trim_end();
+        if entry.is_empty() || self.entries.last().map(String::as_str) == Some(entry) {
+            self.reset();
+            return;
+        }
+        self.entries.push(entry.to_string());
+        if self.entries.len() > INPUT_HISTORY_LIMIT {
+            self.entries.remove(0);
+        }
+        self.reset();
+    }
+
+    /// Leaves history browsing, dropping any saved draft.
+    pub(super) fn reset(&mut self) {
+        self.index = None;
+        self.draft.clear();
+    }
+
+    /// Returns whether a recall is in progress, which keeps the arrow keys on
+    /// history instead of the command suggestion list.
+    pub(super) fn is_browsing(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// Recalls the previous submitted input, saving `draft` on the first step.
+    pub(super) fn previous(&mut self, draft: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = match self.index {
+            None => {
+                self.draft = draft.to_string();
+                self.entries.len() - 1
+            }
+            Some(0) => return None,
+            Some(index) => index - 1,
+        };
+        self.index = Some(index);
+        Some(self.entries[index].clone())
+    }
+
+    /// Recalls the next submitted input, or the saved draft past the newest.
+    pub(super) fn next(&mut self) -> Option<String> {
+        let index = self.index?;
+        if index + 1 < self.entries.len() {
+            self.index = Some(index + 1);
+            return Some(self.entries[index + 1].clone());
+        }
+        self.index = None;
+        Some(std::mem::take(&mut self.draft))
+    }
+}
 
 impl OperitTui {
+    /// Handles one bracketed paste payload for the input area.
     pub(super) async fn handle_paste(&mut self, text: String) -> Result<(), String> {
         if self.attach_pasted_paths(&text)? {
             return Ok(());
@@ -40,17 +110,27 @@ impl OperitTui {
         Ok(())
     }
 
+    /// Handles one keyboard event while the input area is focused.
     pub(super) async fn handle_input_key(&mut self, key: KeyEvent) -> Result<(), String> {
         match (key.code, key.modifiers) {
             (KeyCode::Tab, _) if self.has_command_suggestions() => {
                 self.complete_selected_command();
             }
-            (KeyCode::Up, _) if self.has_command_suggestions() => {
+            // A recall in progress keeps the arrow keys on history: a recalled
+            // slash command opens the suggestion list, and stepping through
+            // history must not be swallowed by it.
+            (KeyCode::Up, _)
+                if self.has_command_suggestions() && !self.input_history.is_browsing() =>
+            {
                 self.move_command_selection_up();
             }
-            (KeyCode::Down, _) if self.has_command_suggestions() => {
+            (KeyCode::Down, _)
+                if self.has_command_suggestions() && !self.input_history.is_browsing() =>
+            {
                 self.move_command_selection_down();
             }
+            (KeyCode::Up, _) => self.recall_previous_input(),
+            (KeyCode::Down, _) => self.recall_next_input(),
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 if self.should_complete_selected_command_on_enter() {
                     self.complete_selected_command();
@@ -82,10 +162,12 @@ impl OperitTui {
         Ok(())
     }
 
-    pub(super) fn command_suggestions(&self) -> Vec<TuiCommandSpec> {
-        matching_command_specs(&self.input)
+    /// Returns command suggestions matching the current input buffer.
+    pub(super) fn command_suggestions(&self) -> Vec<TuiCommandSuggestion> {
+        matching_command_specs(&self.input, &self.plugin_commands)
     }
 
+    /// Returns the selected command suggestion index within the available range.
     pub(super) fn selected_command_index(&self, suggestions_len: usize) -> usize {
         if suggestions_len == 0 {
             0
@@ -94,6 +176,7 @@ impl OperitTui {
         }
     }
 
+    /// Returns the visible input text window for the given terminal dimensions.
     pub(super) fn input_view_text(&self, width: usize, height: usize) -> String {
         let lines = wrap_approx_lines(&self.input, width.max(1));
         let visible_height = height.max(1);
@@ -101,6 +184,7 @@ impl OperitTui {
         lines[start..].join("\n")
     }
 
+    /// Returns the cursor position within the visible input window.
     pub(super) fn cursor_position(&self, width: usize, height: usize) -> (usize, usize) {
         let prefix = self
             .input
@@ -119,6 +203,7 @@ impl OperitTui {
         )
     }
 
+    /// Returns human-readable labels for queued input attachments.
     pub(super) fn queued_attachment_labels(&self) -> Vec<String> {
         let mut labels = self.queued_attachment_paths.clone();
         labels.extend(self.queued_inline_attachments.iter().map(|attachment| {
@@ -131,6 +216,7 @@ impl OperitTui {
         labels
     }
 
+    /// Clears all queued attachments and removes their tokens from the input.
     pub(super) fn clear_queued_attachments(&mut self) {
         let tokens = self
             .queued_attachment_tokens
@@ -147,22 +233,46 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Returns whether command suggestions are currently available.
     fn has_command_suggestions(&self) -> bool {
         !self.command_suggestions().is_empty()
     }
 
+    /// Replaces the input box with the previous submitted input.
+    fn recall_previous_input(&mut self) {
+        if let Some(recalled) = self.input_history.previous(&self.input) {
+            self.set_input_from_recall(recalled);
+        }
+    }
+
+    /// Replaces the input box with the next submitted input or the saved draft.
+    fn recall_next_input(&mut self) {
+        if let Some(recalled) = self.input_history.next() {
+            self.set_input_from_recall(recalled);
+        }
+    }
+
+    /// Shows one history entry in the input box with the cursor at its end.
+    fn set_input_from_recall(&mut self, recalled: String) {
+        self.input_cursor = recalled.chars().count();
+        self.input = recalled;
+        self.autocomplete_index = 0;
+    }
+
+    /// Applies the selected command suggestion to the input buffer.
     fn complete_selected_command(&mut self) {
         let suggestions = self.command_suggestions();
         if suggestions.is_empty() {
             return;
         }
         let index = self.selected_command_index(suggestions.len());
-        let (input, cursor) = complete_command_input(&self.input, suggestions[index]);
+        let (input, cursor) = complete_command_input(&self.input, &suggestions[index]);
         self.input = input;
         self.input_cursor = cursor;
         self.autocomplete_index = 0;
     }
 
+    /// Returns whether Enter should commit the selected command suggestion.
     fn should_complete_selected_command_on_enter(&self) -> bool {
         let suggestions = self.command_suggestions();
         if suggestions.is_empty() || self.input.contains('\n') {
@@ -176,9 +286,14 @@ impl OperitTui {
             .unwrap_or("")
             .trim_end()
             .to_ascii_lowercase();
-        !current.is_empty() && current != suggestions[index].name
+        let name = suggestions[index].name();
+        // Enter only completes while the buffer is still a prefix of the
+        // suggestion; once values follow (e.g. `/new character Alice `),
+        // remaining option suggestions must not swallow the submission.
+        !current.is_empty() && current != name && name.starts_with(&current)
     }
 
+    /// Moves the command suggestion selection up by one row.
     fn move_command_selection_up(&mut self) {
         let suggestions_len = self.command_suggestions().len();
         if suggestions_len == 0 {
@@ -191,6 +306,7 @@ impl OperitTui {
         }
     }
 
+    /// Moves the command suggestion selection down by one row.
     fn move_command_selection_down(&mut self) {
         let suggestions_len = self.command_suggestions().len();
         if suggestions_len == 0 {
@@ -199,6 +315,7 @@ impl OperitTui {
         self.autocomplete_index = (self.autocomplete_index + 1) % suggestions_len;
     }
 
+    /// Inserts one character at the current cursor position.
     fn insert_char(&mut self, ch: char) {
         let byte_index = char_to_byte_index(&self.input, self.input_cursor);
         self.input.insert(byte_index, ch);
@@ -206,6 +323,7 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Deletes the character or attachment token before the cursor.
     fn delete_before_cursor(&mut self) {
         if self.remove_attachment_token_before_cursor() {
             return;
@@ -220,6 +338,7 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Deletes the character or attachment token at the cursor.
     fn delete_at_cursor(&mut self) {
         if self.remove_attachment_token_at_cursor() {
             return;
@@ -233,10 +352,12 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Moves the input cursor one character left.
     fn move_cursor_left(&mut self) {
         self.input_cursor = self.input_cursor.saturating_sub(1);
     }
 
+    /// Moves the input cursor one character right.
     fn move_cursor_right(&mut self) {
         let char_count = self.input.chars().count();
         if self.input_cursor < char_count {
@@ -244,14 +365,17 @@ impl OperitTui {
         }
     }
 
+    /// Moves the input cursor to the start of the buffer.
     fn move_cursor_home(&mut self) {
         self.input_cursor = 0;
     }
 
+    /// Moves the input cursor to the end of the buffer.
     fn move_cursor_end(&mut self) {
         self.input_cursor = self.input.chars().count();
     }
 
+    /// Inserts text at the current cursor position.
     fn insert_text(&mut self, text: &str) {
         let byte_index = char_to_byte_index(&self.input, self.input_cursor);
         self.input.insert_str(byte_index, text);
@@ -259,6 +383,7 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Inserts an attachment token with surrounding spacing when needed.
     fn insert_attachment_token(&mut self, token: &str) {
         let needs_prefix_space = self.input_cursor > 0
             && self
@@ -287,10 +412,12 @@ impl OperitTui {
         self.autocomplete_index = 0;
     }
 
+    /// Creates one virtual text attachment for a large paste payload.
     fn create_paste_attachment(&mut self, content: String) -> AttachmentInfo {
         self.paste_attachment_counter += 1;
         let file_name = format!("pasted-text-{}.txt", self.paste_attachment_counter);
         AttachmentInfo {
+            nodeId: None,
             filePath: format!("tui-paste:{file_name}"),
             fileName: file_name,
             mimeType: "text/plain".to_string(),
@@ -299,19 +426,35 @@ impl OperitTui {
         }
     }
 
-    fn create_clipboard_image_attachment(&mut self, png: Vec<u8>) -> AttachmentInfo {
+    /// Creates one file-backed PNG attachment for a clipboard image payload.
+    fn create_clipboard_image_attachment(
+        &mut self,
+        png: Vec<u8>,
+    ) -> Result<AttachmentInfo, String> {
         self.paste_attachment_counter += 1;
-        let file_name = format!("clipboard-image-{}.png", self.paste_attachment_counter);
-        let content = format!("data:image/png;base64,{}", BASE64.encode(&png));
-        AttachmentInfo {
-            filePath: format!("tui-clipboard:{file_name}"),
-            fileName: file_name,
-            mimeType: "image/png".to_string(),
-            fileSize: png.len() as i64,
-            content,
-        }
+        let file_name = format!(
+            "clipboard-image-{}-{}.png",
+            currentTimeMillis(),
+            self.paste_attachment_counter
+        );
+        let file_path = clipboard_image_attachment_path(&file_name)?;
+        fs::write(&file_path, &png)
+            .map_err(|error| format!("clipboard image write failed: {file_name}: {error}"))?;
+        let file_path_text = file_path
+            .to_str()
+            .ok_or_else(|| format!("clipboard image path is not UTF-8: {}", file_path.display()))?
+            .to_string();
+        let mut attachment = AttachmentInfo::new(
+            file_path_text,
+            file_name,
+            "image/png".to_string(),
+            png.len() as i64,
+        );
+        attachment.nodeId = operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore::localNodeId();
+        Ok(attachment)
     }
 
+    /// Reads a clipboard image and queues it as a direct file attachment.
     fn attach_clipboard_image(&mut self) -> Result<(), String> {
         let Ok(mut clipboard) = arboard::Clipboard::new() else {
             self.status_message = self.text().clipboard_unavailable().to_string();
@@ -330,7 +473,7 @@ impl OperitTui {
                 ColorType::Rgba8.into(),
             )
             .map_err(|error| error.to_string())?;
-        let attachment = self.create_clipboard_image_attachment(png);
+        let attachment = self.create_clipboard_image_attachment(png)?;
         let token = format!("@{}", attachment.fileName);
         self.insert_attachment_token(&token);
         self.status_message = self
@@ -338,53 +481,36 @@ impl OperitTui {
             .attached_clipboard_image(&attachment.fileName, &format_bytes(attachment.fileSize));
         self.queued_attachment_tokens.push(QueuedAttachmentToken {
             token,
-            kind: QueuedAttachmentTokenKind::Inline {
-                file_path: attachment.filePath.clone(),
+            kind: QueuedAttachmentTokenKind::Path {
+                path: attachment.filePath.clone(),
             },
         });
-        self.queued_inline_attachments.push(attachment);
+        self.queued_attachment_paths.push(attachment.filePath);
         Ok(())
     }
 
+    /// Attaches pasted filesystem paths and inserts their input tokens.
     fn attach_pasted_paths(&mut self, text: &str) -> Result<bool, String> {
         let paths = pasted_file_paths(text);
         if paths.is_empty() {
             return Ok(false);
         }
         for path in paths {
-            let display_path = path.to_string_lossy().to_string();
+            let display_path = path
+                .to_str()
+                .ok_or_else(|| format!("pasted path is not UTF-8: {}", path.display()))?
+                .to_string();
             let file_name = path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| self.text().attachment_file_name_invalid(&display_path))?
                 .to_string();
             let token = format!("@{file_name}");
-            let mime_type = guess_mime_type(&display_path);
-            if mime_type.starts_with("image/") {
-                let bytes = fs::read(&path).map_err(|error| {
-                    self.text()
-                        .attachment_read_failed(&display_path, &error.to_string())
-                })?;
-                self.queued_inline_attachments.push(AttachmentInfo {
-                    filePath: display_path.clone(),
-                    fileName: file_name.clone(),
-                    mimeType: mime_type.to_string(),
-                    fileSize: bytes.len() as i64,
-                    content: format!("data:{mime_type};base64,{}", BASE64.encode(bytes)),
-                });
-                self.queued_attachment_tokens.push(QueuedAttachmentToken {
-                    token: token.clone(),
-                    kind: QueuedAttachmentTokenKind::Inline {
-                        file_path: display_path,
-                    },
-                });
-            } else {
-                self.queued_attachment_paths.push(display_path.clone());
-                self.queued_attachment_tokens.push(QueuedAttachmentToken {
-                    token: token.clone(),
-                    kind: QueuedAttachmentTokenKind::Path { path: display_path },
-                });
-            }
+            self.queued_attachment_paths.push(display_path.clone());
+            self.queued_attachment_tokens.push(QueuedAttachmentToken {
+                token: token.clone(),
+                kind: QueuedAttachmentTokenKind::Path { path: display_path },
+            });
             self.insert_attachment_token(&token);
         }
         self.status_message = self
@@ -393,6 +519,7 @@ impl OperitTui {
         Ok(true)
     }
 
+    /// Removes the attachment token directly before the cursor.
     fn remove_attachment_token_before_cursor(&mut self) -> bool {
         let cursor = self.input_cursor;
         let token_range = self
@@ -402,6 +529,7 @@ impl OperitTui {
         self.remove_attachment_token_range(token_range)
     }
 
+    /// Removes the attachment token directly under the cursor.
     fn remove_attachment_token_at_cursor(&mut self) -> bool {
         let cursor = self.input_cursor;
         let token_range = self
@@ -411,6 +539,7 @@ impl OperitTui {
         self.remove_attachment_token_range(token_range)
     }
 
+    /// Removes one attachment token and its queued attachment record.
     fn remove_attachment_token_range(&mut self, token_range: Option<AttachmentTokenRange>) -> bool {
         let Some(token_range) = token_range else {
             return false;
@@ -436,6 +565,7 @@ impl OperitTui {
         true
     }
 
+    /// Returns the input ranges occupied by queued attachment tokens.
     fn attachment_token_ranges(&self) -> Vec<AttachmentTokenRange> {
         let mut ranges = Vec::new();
         for attachment_token in &self.queued_attachment_tokens {
@@ -467,11 +597,13 @@ struct AttachmentTokenRange {
     kind: QueuedAttachmentTokenKind,
 }
 
+/// Returns whether pasted text should become a virtual text attachment.
 fn is_large_paste(text: &str) -> bool {
     text.chars().count() >= PASTE_ATTACHMENT_CHAR_THRESHOLD
         || text.lines().count() > PASTE_ATTACHMENT_LINE_THRESHOLD
 }
 
+/// Formats a byte count for TUI status text.
 fn format_bytes(size: i64) -> String {
     if size < 1024 {
         format!("{size} B")
@@ -482,6 +614,18 @@ fn format_bytes(size: i64) -> String {
     }
 }
 
+/// Writes the clean-on-exit marker and returns the target path for a clipboard image.
+fn clipboard_image_attachment_path(file_name: &str) -> Result<PathBuf, String> {
+    let dir = OperitPaths::cleanOnExitDir()?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("clipboard image directory creation failed: {error}"))?;
+    let marker = dir.join(".nomedia");
+    fs::write(&marker, b"")
+        .map_err(|error| format!("clipboard image media marker creation failed: {error}"))?;
+    Ok(dir.join(file_name))
+}
+
+/// Parses pasted text as filesystem paths when every parsed part is a file.
 fn pasted_file_paths(text: &str) -> Vec<PathBuf> {
     let parts = parse_pasted_path_parts(text);
     if parts.is_empty() {
@@ -495,6 +639,7 @@ fn pasted_file_paths(text: &str) -> Vec<PathBuf> {
     }
 }
 
+/// Splits pasted path text while preserving quoted paths with whitespace.
 fn parse_pasted_path_parts(text: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -523,10 +668,76 @@ fn parse_pasted_path_parts(text: &str) -> Vec<String> {
     parts
 }
 
+/// Pushes a non-empty parsed path segment.
 fn push_pasted_path_part(parts: &mut Vec<String>, current: &mut String) {
     let value = current.trim();
     if !value.is_empty() {
         parts.push(value.to_string());
     }
     current.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recalling walks backwards through submissions and keeps the in-progress
+    /// draft, so stepping past the newest entry hands the draft back.
+    #[test]
+    fn history_recalls_submissions_and_restores_the_draft() {
+        let mut history = InputHistory::default();
+        history.record("第一条");
+        history.record("第二条");
+
+        assert_eq!(history.previous("正在输入"), Some("第二条".to_string()));
+        assert_eq!(history.previous("ignored while browsing"), Some("第一条".to_string()));
+        assert_eq!(history.previous("ignored"), None, "the oldest entry is the end");
+        assert!(history.is_browsing());
+
+        assert_eq!(history.next(), Some("第二条".to_string()));
+        assert_eq!(history.next(), Some("正在输入".to_string()));
+        assert!(!history.is_browsing());
+        assert_eq!(history.next(), None, "browsing ended at the draft");
+    }
+
+    /// Blank submissions and consecutive repeats stay out of history.
+    #[test]
+    fn history_skips_blanks_and_consecutive_repeats() {
+        let mut history = InputHistory::default();
+        history.record("  ");
+        assert_eq!(history.previous("draft"), None);
+
+        history.record("go");
+        history.record("go");
+        assert_eq!(history.previous("draft"), Some("go".to_string()));
+        assert_eq!(history.previous("draft"), None);
+    }
+
+    /// Older entries leave history first once the cap is reached.
+    #[test]
+    fn history_drops_the_oldest_entry_at_its_limit() {
+        let mut history = InputHistory::default();
+        for index in 0..INPUT_HISTORY_LIMIT + 2 {
+            history.record(&format!("entry-{index}"));
+        }
+        let oldest = history.previous("draft").expect("the newest entry");
+        assert_eq!(oldest, format!("entry-{}", INPUT_HISTORY_LIMIT + 1));
+        let mut last = oldest;
+        while let Some(entry) = history.previous("draft") {
+            last = entry;
+        }
+        assert_eq!(last, "entry-2");
+    }
+
+    /// Submitting ends a browse, so the next arrow press starts from the newest
+    /// entry again instead of resuming the old position.
+    #[test]
+    fn recording_resets_browsing_state() {
+        let mut history = InputHistory::default();
+        history.record("one");
+        history.record("two");
+        assert_eq!(history.previous("draft"), Some("two".to_string()));
+        history.record("two");
+        assert!(!history.is_browsing());
+    }
 }

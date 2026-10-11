@@ -16,35 +16,16 @@ using BridgeCreateWithStorageRootsAndSystemLanguage =
 using BridgeCreateError = char* (*)();
 using BridgeDestroy = void (*)(BridgeHandle);
 
-struct OperitByteBuffer {
-  unsigned char* ptr;
-  size_t len;
-};
-
-using BridgeCall = OperitByteBuffer (*)(BridgeHandle, const unsigned char*, size_t);
-using BridgeNativeCall =
-    OperitByteBuffer (*)(const void*, const unsigned char*, size_t);
-using BridgePushClose = OperitByteBuffer (*)(BridgeHandle, const char*);
-using BridgeNextWatchChannelEvent = OperitByteBuffer (*)(BridgeHandle);
-using BridgeCloseWatchStream = OperitByteBuffer (*)(BridgeHandle, const char*);
-using BridgeFreeBytes = void (*)(OperitByteBuffer);
 using BridgeFreeString = void (*)(char*);
-using BridgeStartWebAccessServer = char* (*)(
-    BridgeHandle, const char*, const char*, const char*, const char*, const char*, const char*,
-    const char*);
-using BridgeStopWebAccessServer = char* (*)(BridgeHandle);
 using BridgeEmitRuntimeEvent = char* (*)(BridgeHandle, const char*);
 using BridgeRuntimeBootstrapRead = char* (*)(const char*);
 using BridgeRuntimeBootstrapWrite = char* (*)(const char*, const char*);
 
 class OperitBridgeLibrary {
  public:
-  /// Releases the loaded bridge library handle.
+  /// Keeps the bridge module mapped for retained FFI connections and VM finalizers.
   ~OperitBridgeLibrary() {
-    if (library_ != nullptr) {
-      dlclose(library_);
-      library_ = nullptr;
-    }
+    // The module stays mapped for Dart FFI callbacks and native finalizers.
   }
 
   /// Loads the Rust bridge library and resolves all exported symbols.
@@ -61,38 +42,21 @@ class OperitBridgeLibrary {
     create_with_storage_roots_ =
         Load<BridgeCreateWithStorageRootsAndSystemLanguage>(
             "operit_flutter_bridge_create_with_storage_roots_and_system_language");
+    if (Load<char* (*)(BridgeHandle)>("operit_flutter_bridge_ffi_connect") == nullptr) {
+      AssignError(error, "operit flutter FFI connect export is missing");
+      return false;
+    }
     create_error_ = Load<BridgeCreateError>("operit_flutter_bridge_create_error");
     destroy_ = Load<BridgeDestroy>("operit_flutter_bridge_destroy");
-    native_call_ = Load<BridgeNativeCall>("operit_flutter_bridge_native_call");
-    push_open_ = Load<BridgeCall>("operit_flutter_bridge_push_open");
-    push_item_ = Load<BridgeCall>("operit_flutter_bridge_push_item");
-    push_close_ = Load<BridgePushClose>("operit_flutter_bridge_push_close");
-    watch_snapshot_ = Load<BridgeCall>("operit_flutter_bridge_watch_snapshot");
-    watch_stream_ = Load<BridgeCall>("operit_flutter_bridge_watch_stream");
-    next_watch_channel_event_ =
-        Load<BridgeNextWatchChannelEvent>("operit_flutter_bridge_next_watch_channel_event");
-    close_watch_stream_ = Load<BridgeCloseWatchStream>("operit_flutter_bridge_close_watch_stream");
-    start_web_access_server_ =
-        Load<BridgeStartWebAccessServer>("operit_flutter_bridge_start_web_access_server");
-    stop_web_access_server_ =
-        Load<BridgeStopWebAccessServer>("operit_flutter_bridge_stop_web_access_server");
     emit_runtime_event_ = Load<BridgeEmitRuntimeEvent>("operit_flutter_bridge_emit_runtime_event");
     runtime_bootstrap_read_ =
         Load<BridgeRuntimeBootstrapRead>("operit_flutter_bridge_runtime_bootstrap_read");
     runtime_bootstrap_write_ =
         Load<BridgeRuntimeBootstrapWrite>("operit_flutter_bridge_runtime_bootstrap_write");
-    free_bytes_ = Load<BridgeFreeBytes>("operit_flutter_bridge_free_bytes");
+
     free_string_ = Load<BridgeFreeString>("operit_flutter_bridge_free_string");
     if (create_with_storage_roots_ == nullptr || create_error_ == nullptr || destroy_ == nullptr ||
-        native_call_ == nullptr || push_open_ == nullptr || push_item_ == nullptr ||
-        push_close_ == nullptr || watch_snapshot_ == nullptr || watch_stream_ == nullptr ||
-        next_watch_channel_event_ == nullptr || close_watch_stream_ == nullptr ||
-        start_web_access_server_ == nullptr || stop_web_access_server_ == nullptr ||
-        emit_runtime_event_ == nullptr || runtime_bootstrap_read_ == nullptr ||
-        runtime_bootstrap_write_ == nullptr ||
-        free_bytes_ == nullptr || free_string_ == nullptr) {
-      AssignError(error, "operit flutter bridge exports are incomplete");
-      return false;
+          return false;
     }
     return true;
   }
@@ -110,69 +74,13 @@ class OperitBridgeLibrary {
   /// Destroys one Rust runtime bridge handle.
   void Destroy(BridgeHandle handle) { destroy_(handle); }
 
-  /// Dispatches a Core Link call through the Rust bridge.
-  OperitByteBuffer Call(BridgeHandle handle, const unsigned char* data, size_t len) {
-    return native_call_(handle, data, len);
+  /// Creates one retained FFI connection using the host-loaded Rust library.
+  std::string ConnectCoreFfi(BridgeHandle handle) {
+    const auto connect = Load<char* (*)(BridgeHandle)>("operit_flutter_bridge_ffi_connect");
+    return TakeString(connect(handle));
   }
 
-  /// Opens a local Link push stream through the Rust bridge.
-  OperitByteBuffer PushOpen(BridgeHandle handle, const unsigned char* data, size_t len) {
-    return push_open_(handle, data, len);
-  }
 
-  /// Sends one local Link push item through the Rust bridge.
-  OperitByteBuffer PushItem(BridgeHandle handle, const unsigned char* data, size_t len) {
-    return push_item_(handle, data, len);
-  }
-
-  /// Closes one local Link push stream through the Rust bridge.
-  OperitByteBuffer PushClose(BridgeHandle handle, const std::string& push_id) {
-    return push_close_(handle, push_id.c_str());
-  }
-
-  /// Reads a watch snapshot through the Rust bridge.
-  OperitByteBuffer WatchSnapshot(BridgeHandle handle, const unsigned char* data, size_t len) {
-    return watch_snapshot_(handle, data, len);
-  }
-
-  /// Opens a watch stream through the Rust bridge.
-  OperitByteBuffer WatchStream(BridgeHandle handle, const unsigned char* data, size_t len) {
-    return watch_stream_(handle, data, len);
-  }
-
-  /// Blocks until the Rust bridge produces one watch-channel event.
-  OperitByteBuffer NextWatchChannelEvent(BridgeHandle handle) {
-    return next_watch_channel_event_(handle);
-  }
-
-  /// Closes a watch stream through the Rust bridge.
-  OperitByteBuffer CloseWatchStream(BridgeHandle handle, const std::string& subscription_id) {
-    return close_watch_stream_(handle, subscription_id.c_str());
-  }
-
-  /// Starts the Rust Web Access server.
-  std::string StartWebAccessServer(BridgeHandle handle,
-                                   const std::string& bind_address,
-                                   const std::string& token,
-                                   const std::string& shutdown_token,
-                                   const std::string& web_root,
-                                   const std::string& device_info_json,
-                                   const std::string& enable_web_access,
-                                   const std::string& enable_discovery) {
-    return TakeString(start_web_access_server_(handle,
-                                               bind_address.c_str(),
-                                               token.c_str(),
-                                               shutdown_token.c_str(),
-                                               web_root.c_str(),
-                                               device_info_json.c_str(),
-                                               enable_web_access.c_str(),
-                                               enable_discovery.c_str()));
-  }
-
-  /// Stops the Rust Web Access server.
-  std::string StopWebAccessServer(BridgeHandle handle) {
-    return TakeString(stop_web_access_server_(handle));
-  }
 
   /// Delivers one normalized OpenHarmony event through the Rust bridge.
   std::string EmitRuntimeEvent(BridgeHandle handle, const std::string& event_json) {
@@ -191,8 +99,6 @@ class OperitBridgeLibrary {
         runtime_bootstrap_write_(default_runtime_root.c_str(), content.c_str()));
   }
 
-  /// Frees an owned Rust byte buffer.
-  void FreeBytes(OperitByteBuffer buffer) { free_bytes_(buffer); }
 
  private:
   /// Resolves one bridge symbol from the loaded library.
@@ -223,20 +129,9 @@ class OperitBridgeLibrary {
   BridgeCreateWithStorageRootsAndSystemLanguage create_with_storage_roots_ = nullptr;
   BridgeCreateError create_error_ = nullptr;
   BridgeDestroy destroy_ = nullptr;
-  BridgeNativeCall native_call_ = nullptr;
-  BridgeCall push_open_ = nullptr;
-  BridgeCall push_item_ = nullptr;
-  BridgePushClose push_close_ = nullptr;
-  BridgeCall watch_snapshot_ = nullptr;
-  BridgeCall watch_stream_ = nullptr;
-  BridgeNextWatchChannelEvent next_watch_channel_event_ = nullptr;
-  BridgeCloseWatchStream close_watch_stream_ = nullptr;
-  BridgeStartWebAccessServer start_web_access_server_ = nullptr;
-  BridgeStopWebAccessServer stop_web_access_server_ = nullptr;
   BridgeEmitRuntimeEvent emit_runtime_event_ = nullptr;
   BridgeRuntimeBootstrapRead runtime_bootstrap_read_ = nullptr;
   BridgeRuntimeBootstrapWrite runtime_bootstrap_write_ = nullptr;
-  BridgeFreeBytes free_bytes_ = nullptr;
   BridgeFreeString free_string_ = nullptr;
 };
 
@@ -291,38 +186,6 @@ BridgeHandle ReadHandle(napi_env env, napi_value value) {
   return reinterpret_cast<BridgeHandle>(raw);
 }
 
-/// Reads one JavaScript ArrayBuffer into a native byte view.
-bool ReadArrayBuffer(napi_env env, napi_value value, unsigned char** data, size_t* len) {
-  void* raw = nullptr;
-  napi_status status = napi_get_arraybuffer_info(env, value, &raw, len);
-  if (status != napi_ok || raw == nullptr) {
-    napi_throw_error(env, "OPERIT_RUNTIME_NATIVE", "expected ArrayBuffer bytes");
-    return false;
-  }
-  *data = static_cast<unsigned char*>(raw);
-  return true;
-}
-
-/// Frees one Rust byte buffer after the JavaScript ArrayBuffer is collected.
-void FinalizeRustBytes(napi_env, void*, void* hint) {
-  auto* buffer = static_cast<OperitByteBuffer*>(hint);
-  g_bridge_library.FreeBytes(*buffer);
-  delete buffer;
-}
-
-/// Converts an owned Rust byte buffer into a JavaScript ArrayBuffer.
-napi_value OwnedBytes(napi_env env, OperitByteBuffer value) {
-  napi_value result = nullptr;
-  if (value.ptr == nullptr || value.len == 0) {
-    void* data = nullptr;
-    napi_create_arraybuffer(env, 0, &data, &result);
-    return result;
-  }
-  auto* buffer = new OperitByteBuffer{value.ptr, value.len};
-  napi_create_external_arraybuffer(env, value.ptr, value.len, FinalizeRustBytes, buffer, &result);
-  return result;
-}
-
 /// Converts a C++ string into a JavaScript string.
 napi_value StringValue(napi_env env, const std::string& value) {
   napi_value result = nullptr;
@@ -367,139 +230,9 @@ napi_value Destroy(napi_env env, napi_callback_info info) {
   return result;
 }
 
-/// Calls one Rust Core Link byte endpoint.
-napi_value CallBytes(napi_env env,
-                     napi_callback_info info,
-                     OperitByteBuffer (OperitBridgeLibrary::*method)(BridgeHandle,
-                                                                     const unsigned char*,
-                                                                     size_t)) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 2);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  unsigned char* data = nullptr;
-  size_t len = 0;
-  if (handle == nullptr || !ReadArrayBuffer(env, args[1], &data, &len)) {
-    return nullptr;
-  }
-  return OwnedBytes(env, (g_bridge_library.*method)(handle, data, len));
-}
-
-/// Calls the Rust call endpoint.
-napi_value Call(napi_env env, napi_callback_info info) {
-  return CallBytes(env, info, &OperitBridgeLibrary::Call);
-}
-
-/// Calls the Rust push-open endpoint.
-napi_value PushOpen(napi_env env, napi_callback_info info) {
-  return CallBytes(env, info, &OperitBridgeLibrary::PushOpen);
-}
-
-/// Calls the Rust push-item endpoint.
-napi_value PushItem(napi_env env, napi_callback_info info) {
-  return CallBytes(env, info, &OperitBridgeLibrary::PushItem);
-}
-
-/// Calls the Rust watch-snapshot endpoint.
-napi_value WatchSnapshot(napi_env env, napi_callback_info info) {
-  return CallBytes(env, info, &OperitBridgeLibrary::WatchSnapshot);
-}
-
-/// Calls the Rust watch-stream endpoint.
-napi_value WatchStream(napi_env env, napi_callback_info info) {
-  return CallBytes(env, info, &OperitBridgeLibrary::WatchStream);
-}
-
-/// Calls the Rust push-close endpoint.
-napi_value PushClose(napi_env env, napi_callback_info info) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 2);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  if (handle == nullptr) {
-    return nullptr;
-  }
-  return OwnedBytes(env, g_bridge_library.PushClose(handle, ReadString(env, args[1])));
-}
-
-/// Reads one Rust watch-channel event.
-napi_value NextWatchChannelEvent(napi_env env, napi_callback_info info) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 1);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  if (handle == nullptr) {
-    return nullptr;
-  }
-  return OwnedBytes(env, g_bridge_library.NextWatchChannelEvent(handle));
-}
-
-/// Calls the Rust close-watch-stream endpoint.
-napi_value CloseWatchStream(napi_env env, napi_callback_info info) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 2);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  if (handle == nullptr) {
-    return nullptr;
-  }
-  return OwnedBytes(env, g_bridge_library.CloseWatchStream(handle, ReadString(env, args[1])));
-}
-
 /// Starts the Rust Web Access server.
-napi_value StartWebAccessServer(napi_env env, napi_callback_info info) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 8);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  if (handle == nullptr) {
-    return nullptr;
-  }
-  return StringValue(env, g_bridge_library.StartWebAccessServer(handle,
-                                                                ReadString(env, args[1]),
-                                                                ReadString(env, args[2]),
-                                                                ReadString(env, args[3]),
-                                                                ReadString(env, args[4]),
-                                                                ReadString(env, args[5]),
-                                                                ReadString(env, args[6]),
-                                                                ReadString(env, args[7])));
-}
 
 /// Stops the Rust Web Access server.
-napi_value StopWebAccessServer(napi_env env, napi_callback_info info) {
-  if (!EnsureBridgeReady(env)) {
-    return nullptr;
-  }
-  auto args = CallbackArgs(env, info, 1);
-  if (args.empty()) {
-    return nullptr;
-  }
-  BridgeHandle handle = ReadHandle(env, args[0]);
-  if (handle == nullptr) {
-    return nullptr;
-  }
-  return StringValue(env, g_bridge_library.StopWebAccessServer(handle));
-}
 
 /// Delivers one normalized OpenHarmony event through Rust.
 napi_value EmitRuntimeEvent(napi_env env, napi_callback_info info) {
@@ -544,6 +277,16 @@ napi_value RuntimeBootstrapWrite(napi_env env, napi_callback_info info) {
           ReadString(env, args[0]), ReadString(env, args[1])));
 }
 
+/// Returns the versioned Rust FFI function table for this host runtime.
+napi_value ConnectCoreFfi(napi_env env, napi_callback_info info) {
+  if (!EnsureBridgeReady(env)) return nullptr;
+  auto args = CallbackArgs(env, info, 1);
+  if (args.empty()) return nullptr;
+  BridgeHandle handle = ReadHandle(env, args[0]);
+  if (handle == nullptr) return nullptr;
+  return StringValue(env, g_bridge_library.ConnectCoreFfi(handle));
+}
+
 /// Registers one named N-API function.
 void DefineFunction(napi_env env,
                     napi_value exports,
@@ -555,23 +298,14 @@ void DefineFunction(napi_env env,
 
 /// Initializes the OpenHarmony native runtime module.
 napi_value Init(napi_env env, napi_value exports) {
-  napi_property_descriptor descriptors[15];
+  napi_property_descriptor descriptors[6];
   DefineFunction(env, exports, "create", Create, &descriptors[0]);
   DefineFunction(env, exports, "destroy", Destroy, &descriptors[1]);
-  DefineFunction(env, exports, "call", Call, &descriptors[2]);
-  DefineFunction(env, exports, "pushOpen", PushOpen, &descriptors[3]);
-  DefineFunction(env, exports, "pushItem", PushItem, &descriptors[4]);
-  DefineFunction(env, exports, "pushClose", PushClose, &descriptors[5]);
-  DefineFunction(env, exports, "watchSnapshot", WatchSnapshot, &descriptors[6]);
-  DefineFunction(env, exports, "watchStream", WatchStream, &descriptors[7]);
-  DefineFunction(env, exports, "nextWatchChannelEvent", NextWatchChannelEvent, &descriptors[8]);
-  DefineFunction(env, exports, "closeWatchStream", CloseWatchStream, &descriptors[9]);
-  DefineFunction(env, exports, "startWebAccessServer", StartWebAccessServer, &descriptors[10]);
-  DefineFunction(env, exports, "stopWebAccessServer", StopWebAccessServer, &descriptors[11]);
-  DefineFunction(env, exports, "emitRuntimeEvent", EmitRuntimeEvent, &descriptors[12]);
-  DefineFunction(env, exports, "runtimeBootstrapRead", RuntimeBootstrapRead, &descriptors[13]);
-  DefineFunction(env, exports, "runtimeBootstrapWrite", RuntimeBootstrapWrite, &descriptors[14]);
-  napi_define_properties(env, exports, 15, descriptors);
+  DefineFunction(env, exports, "emitRuntimeEvent", EmitRuntimeEvent, &descriptors[2]);
+  DefineFunction(env, exports, "runtimeBootstrapRead", RuntimeBootstrapRead, &descriptors[3]);
+  DefineFunction(env, exports, "runtimeBootstrapWrite", RuntimeBootstrapWrite, &descriptors[4]);
+  DefineFunction(env, exports, "connectCoreFfi", ConnectCoreFfi, &descriptors[5]);
+  napi_define_properties(env, exports, 6, descriptors);
   return exports;
 }
 

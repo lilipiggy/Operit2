@@ -1,19 +1,21 @@
 // ignore_for_file: file_names
 
 import 'dart:convert';
-import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../../../core/bridge/OperitRuntimeBridge.dart';
 import '../../../../core/host/FileSaveService.dart';
-import '../../../../core/link/CoreLinkProtocol.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
+import '../../../common/components/OperitDialog.dart';
+import '../../../theme/OperitFormStyles.dart';
+import '../memory/MemoryOwnerControlsDialog.dart';
+import 'MemoryGraphCanvas.dart';
 
 const XTypeGroup _memoryJsonFileTypeGroup = XTypeGroup(
   label: 'Operit memory JSON',
@@ -59,23 +61,16 @@ class MemoryGraphScreen extends StatefulWidget {
 class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
   late Future<_MemoryGraphData> _future;
   final TextEditingController _searchController = TextEditingController();
-  _MemoryGraphLayout? _layout;
-  Size? _layoutSize;
-  String _layoutSignature = '';
   String? _selectedNodeId;
   int? _selectedEdgeId;
   Future<core_proxy.Memory?>? _selectedMemoryFuture;
   String _folderPath = '';
-  bool _folderPanelOpen = false;
   bool _busy = false;
   bool _linkMode = false;
   String? _linkSourceNodeId;
-  late final GeneratedCoreProxyClients _clients =
-      GeneratedCoreProxyClients(widget.bridge);
-  double _scale = 1;
-  Offset _offset = Offset.zero;
-  double _startScale = 1;
-  Offset _startOffset = Offset.zero;
+  late final GeneratedCoreProxyClients _clients = GeneratedCoreProxyClients(
+    widget.bridge,
+  );
 
   /// Returns the repository proxy scoped to the current owner key.
   GeneratedRepositoryMemoryRepositoryCoreProxy get _repository =>
@@ -165,9 +160,6 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
   void _reload() {
     setState(() {
       _future = _loadData();
-      _layout = null;
-      _layoutSize = null;
-      _layoutSignature = '';
       _selectedNodeId = null;
       _selectedEdgeId = null;
       _selectedMemoryFuture = null;
@@ -196,65 +188,10 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
     setState(() {
       _folderPath = folderPath;
       _future = _loadData();
-      _layout = null;
-      _layoutSize = null;
-      _layoutSignature = '';
       _selectedNodeId = null;
       _selectedEdgeId = null;
       _selectedMemoryFuture = null;
       _linkSourceNodeId = null;
-    });
-  }
-
-  /// Recomputes the graph layout when data or size changed.
-  void _ensureLayout(core_proxy.MemoryGraph graph, Size size) {
-    final signature = _graphSignature(graph);
-    final oldSize = _layoutSize;
-    final shouldCompute =
-        _layout == null ||
-        _layoutSignature != signature ||
-        oldSize == null ||
-        (oldSize.width - size.width).abs() > 32 ||
-        (oldSize.height - size.height).abs() > 32;
-    if (!shouldCompute) {
-      return;
-    }
-    _layout = _MemoryGraphLayout.compute(graph, size);
-    _layoutSize = size;
-    _layoutSignature = signature;
-    _scale = 1;
-    _offset = Offset.zero;
-  }
-
-  /// Handles graph taps for normal selection and link creation.
-  void _handleTap(
-    TapUpDetails details,
-    _MemoryGraphData data,
-    _MemoryGraphLayout layout,
-  ) {
-    final graph = data.displayGraph;
-    final world = (details.localPosition - _offset) / _scale;
-    final hitNode = graph.nodes.reversed.where((node) {
-      final center = layout.positions[node.id];
-      return center != null &&
-          _nodeWorldRect(node, center).inflate(16 / _scale).contains(world);
-    }).firstOrNull;
-    if (hitNode != null) {
-      _selectNode(hitNode, data);
-      return;
-    }
-    final hitEdge = graph.edges.where((edge) {
-      final start = layout.positions[edge.sourceId];
-      final end = layout.positions[edge.targetId];
-      if (start == null || end == null) {
-        return false;
-      }
-      return _distanceToSegment(world, start, end) < 18 / _scale;
-    }).firstOrNull;
-    setState(() {
-      _selectedNodeId = null;
-      _selectedEdgeId = hitEdge?.id;
-      _selectedMemoryFuture = null;
     });
   }
 
@@ -356,8 +293,6 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
       setState(() {
         _linkSourceNodeId = null;
         _future = _loadData();
-        _layout = null;
-        _layoutSignature = '';
       });
     } catch (error) {
       if (mounted) {
@@ -541,26 +476,6 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
     }
   }
 
-  /// Copies exported memory JSON to the clipboard.
-  Future<void> _copyJson() async {
-    setState(() => _busy = true);
-    try {
-      final jsonText = await _repository.exportMemoriesToJson();
-      await Clipboard.setData(ClipboardData(text: jsonText));
-      if (mounted) {
-        _showSnack('记忆 JSON 已复制');
-      }
-    } catch (error) {
-      if (mounted) {
-        _showSnack('复制失败：$error');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
   /// Imports memory JSON from a user-selected file.
   Future<void> _importJson() async {
     final file = await openFile(
@@ -617,10 +532,21 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
   }) async {
     final result = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
+      builder: (context) => OperitDialogScaffold(
+        title: title,
+        maxWidth: 420,
+        showCloseButton: true,
         actions: <Widget>[
+          IconButton(
+            tooltip: '导入文本／Markdown 文档',
+            onPressed: _busy ? null : _importDocument,
+            icon: const Icon(Icons.article_outlined),
+          ),
+          IconButton(
+            tooltip: 'AI 分类未归类记忆',
+            onPressed: _busy ? null : _autoCategorize,
+            icon: const Icon(Icons.auto_awesome),
+          ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('取消'),
@@ -630,6 +556,7 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
             child: Text(confirmLabel),
           ),
         ],
+        child: Text(message),
       ),
     );
     return result == true;
@@ -640,6 +567,95 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Opens the folder filter picker dialog.
+  Future<void> _openFolderPickerDialog(List<String> folders) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => OperitDialogScaffold(
+        title: '选择记忆文件夹',
+        maxWidth: 420,
+        maxHeight: 520,
+        showCloseButton: true,
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+        ],
+        child: SizedBox(
+          height: 360,
+          child: _MemoryFolderPanel(
+            folders: folders,
+            selectedFolderPath: _folderPath,
+            onSelected: (folder) => Navigator.of(context).pop(folder),
+          ),
+        ),
+      ),
+    );
+    if (selected != null) {
+      _selectFolder(selected);
+    }
+  }
+
+  Future<void> _importDocument() async {
+    final file = await openFile(
+      acceptedTypeGroups: [
+        const XTypeGroup(
+          label: 'Text document',
+          extensions: ['txt', 'md', 'markdown', 'csv', 'log'],
+        ),
+      ],
+    );
+    if (file == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final text = utf8.decode(await file.readAsBytes());
+      await _repository.createMemoryFromDocument(
+        documentName: file.name,
+        originalPath: file.path,
+        text: text,
+        folderPath: _folderPath,
+      );
+      if (mounted) {
+        _refresh();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('文档已分块入库')));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('文档导入失败：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _autoCategorize() async {
+    setState(() => _busy = true);
+    try {
+      final count = await _clients.application
+          .memoryManagementService(ownerKey: widget.ownerKey)
+          .autoCategorize();
+      if (mounted) {
+        _refresh();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('已分类 $count 条记忆')));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('自动分类：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   /// Builds the page scaffold and graph canvas.
@@ -658,6 +674,20 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
         ),
         actions: <Widget>[
           IconButton(
+            tooltip: '记忆设置',
+            icon: const Icon(Icons.tune),
+            onPressed: _busy
+                ? null
+                : () async {
+                    await MemoryOwnerControlsDialog.open(
+                      context,
+                      _clients,
+                      widget.ownerKey,
+                    );
+                    if (mounted) _refresh();
+                  },
+          ),
+          IconButton(
             tooltip: '导入 JSON',
             onPressed: _busy ? null : _importJson,
             icon: const Icon(Icons.upload_file_outlined),
@@ -668,38 +698,9 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
             icon: const Icon(Icons.download_outlined),
           ),
           IconButton(
-            tooltip: '复制 JSON',
-            onPressed: _busy ? null : _copyJson,
-            icon: const Icon(Icons.copy_all_outlined),
-          ),
-          IconButton(
             tooltip: l10n.refresh,
             onPressed: _busy ? null : _refresh,
             icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          FloatingActionButton.small(
-            heroTag: 'memory-link',
-            tooltip: '创建关系',
-            backgroundColor: _linkMode
-                ? colorScheme.primary
-                : colorScheme.secondaryContainer,
-            foregroundColor: _linkMode
-                ? colorScheme.onPrimary
-                : colorScheme.onSecondaryContainer,
-            onPressed: _busy ? null : _toggleLinkMode,
-            child: const Icon(Icons.link),
-          ),
-          const SizedBox(height: 10),
-          FloatingActionButton(
-            heroTag: 'memory-create',
-            tooltip: '新建记忆',
-            onPressed: _busy ? null : _createMemory,
-            child: const Icon(Icons.add),
           ),
         ],
       ),
@@ -713,168 +714,109 @@ class _MemoryGraphScreenState extends State<MemoryGraphScreen> {
           if (data == null) {
             return const M3LoadingPane();
           }
-          final graph = data.displayGraph;
           return Column(
             children: <Widget>[
               _MemoryToolbar(
                 controller: _searchController,
-                folderPath: _folderPath,
-                linkMode: _linkMode,
                 busy: _busy,
+                linkMode: _linkMode,
+                folderPath: _folderPath,
                 onSearch: _runSearch,
                 onClearSearch: _clearSearch,
-                onToggleFolders: () {
-                  setState(() => _folderPanelOpen = !_folderPanelOpen);
-                },
+                onOpenFolders: () => _openFolderPickerDialog(data.folders),
+                onToggleLinkMode: _toggleLinkMode,
+                onCreateMemory: _createMemory,
               ),
               if (_busy) const LinearProgressIndicator(minHeight: 2),
-              Expanded(
-                child: Row(
-                  children: <Widget>[
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.centerLeft,
-                      child: SizedBox(
-                        width: _folderPanelOpen ? 260 : 0,
-                        child: _folderPanelOpen
-                            ? _MemoryFolderPanel(
-                                folders: data.folders,
-                                selectedFolderPath: _folderPath,
-                                onSelected: _selectFolder,
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                    ),
-                    Expanded(
-                      child: graph.nodes.isEmpty
-                          ? _MemoryEmptyState(
-                              query: data.query,
-                              folderPath: data.folderPath,
-                              colorScheme: colorScheme,
-                              textTheme: textTheme,
-                            )
-                          : LayoutBuilder(
-                              builder: (context, constraints) {
-                                final size = Size(
-                                  constraints.maxWidth,
-                                  constraints.maxHeight,
-                                );
-                                _ensureLayout(graph, size);
-                                final layout = _layout;
-                                if (layout == null) {
-                                  return const M3LoadingPane();
-                                }
-                                final selectedNode = _selectedNodeId == null
-                                    ? null
-                                    : graph.nodes
-                                          .where(
-                                            (node) =>
-                                                node.id == _selectedNodeId,
-                                          )
-                                          .firstOrNull;
-                                final selectedEdge = _selectedEdgeId == null
-                                    ? null
-                                    : graph.edges
-                                          .where(
-                                            (edge) =>
-                                                edge.id == _selectedEdgeId,
-                                          )
-                                          .firstOrNull;
-                                return Stack(
-                                  children: <Widget>[
-                                    GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onScaleStart: (details) {
-                                        _startScale = _scale;
-                                        _startOffset = _offset;
-                                      },
-                                      onScaleUpdate: (details) {
-                                        setState(() {
-                                          final nextScale =
-                                              (_startScale * details.scale)
-                                                  .clamp(0.2, 5.0)
-                                                  .toDouble();
-                                          final focal = details.localFocalPoint;
-                                          _offset =
-                                              (_startOffset - focal) *
-                                                  (nextScale / _startScale) +
-                                              focal +
-                                              details.focalPointDelta;
-                                          _scale = nextScale;
-                                        });
-                                      },
-                                      onTapUp: (details) =>
-                                          _handleTap(details, data, layout),
-                                      child: CustomPaint(
-                                        painter: _MemoryGraphPainter(
-                                          graph: graph,
-                                          layout: layout,
-                                          scale: _scale,
-                                          offset: _offset,
-                                          colorScheme: colorScheme,
-                                          textTheme: textTheme,
-                                          selectedNodeId: _selectedNodeId,
-                                          selectedEdgeId: _selectedEdgeId,
-                                          linkSourceNodeId: _linkSourceNodeId,
-                                        ),
-                                        size: Size.infinite,
-                                      ),
-                                    ),
-                                    Positioned(
-                                      left: 16,
-                                      top: 12,
-                                      child: _MemoryGraphCounter(
-                                        text:
-                                            '${graph.nodes.length} 节点 · ${graph.edges.length} 关系',
-                                      ),
-                                    ),
-                                    if (_linkMode)
-                                      Positioned(
-                                        right: 16,
-                                        top: 12,
-                                        child: _MemoryGraphCounter(
-                                          text: _linkSourceNodeId == null
-                                              ? '关系模式：选择起点'
-                                              : '关系模式：选择终点',
-                                        ),
-                                      ),
-                                    if (selectedNode != null ||
-                                        selectedEdge != null)
-                                      Positioned(
-                                        left: 16,
-                                        right: 16,
-                                        bottom: 16,
-                                        child: _MemoryGraphSelectionCard(
-                                          node: selectedNode,
-                                          edge: selectedEdge,
-                                          graph: graph,
-                                          memoryFuture: _selectedMemoryFuture,
-                                          folders: data.folders,
-                                          onClose: () {
-                                            setState(() {
-                                              _selectedNodeId = null;
-                                              _selectedEdgeId = null;
-                                              _selectedMemoryFuture = null;
-                                            });
-                                          },
-                                          onEditMemory: _editMemory,
-                                          onDeleteMemory: _deleteMemory,
-                                          onDeleteEdge: _deleteEdge,
-                                        ),
-                                      ),
-                                  ],
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                ),
-              ),
+              Expanded(child: _buildGraphCanvas(data, colorScheme, textTheme)),
             ],
           );
         },
       ),
+    );
+  }
+
+  /// Builds the memory graph body below the toolbar.
+  Widget _buildGraphCanvas(
+    _MemoryGraphData data,
+    ColorScheme colorScheme,
+    TextTheme textTheme,
+  ) {
+    final graph = data.displayGraph;
+    if (graph.nodes.isEmpty) {
+      return _MemoryEmptyState(
+        query: data.query,
+        folderPath: data.folderPath,
+        colorScheme: colorScheme,
+        textTheme: textTheme,
+      );
+    }
+    final selectedNode = graph.nodes
+        .where((node) => node.id == _selectedNodeId)
+        .firstOrNull;
+    final selectedEdge = graph.edges
+        .where((edge) => edge.id == _selectedEdgeId)
+        .firstOrNull;
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        MemoryGraphCanvas(
+          key: ValueKey('${data.query}:${data.folderPath}'),
+          graph: graph,
+          selectedNodeId: _selectedNodeId,
+          selectedEdgeId: _selectedEdgeId,
+          linkSourceNodeId: _linkSourceNodeId,
+          onSelect: (node, edge) {
+            if (node != null) {
+              _selectNode(node, data);
+              return;
+            }
+            setState(() {
+              _selectedNodeId = null;
+              _selectedEdgeId = edge?.id;
+              _selectedMemoryFuture = null;
+            });
+          },
+        ),
+        Positioned(
+          left: 16,
+          top: 12,
+          child: _MemoryGraphCounter(
+            text: '${graph.nodes.length} 节点 · ${graph.edges.length} 关系',
+          ),
+        ),
+        if (_linkMode)
+          Positioned(
+            right: 16,
+            top: 12,
+            child: _MemoryGraphCounter(
+              text: _linkSourceNodeId == null ? '关系模式：选择起点' : '关系模式：选择终点',
+            ),
+          ),
+        if (selectedNode != null || selectedEdge != null)
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 72,
+            child: _MemoryGraphSelectionCard(
+              node: selectedNode,
+              edge: selectedEdge,
+              graph: graph,
+              memoryFuture: _selectedMemoryFuture,
+              folders: data.folders,
+              onClose: () {
+                setState(() {
+                  _selectedNodeId = null;
+                  _selectedEdgeId = null;
+                  _selectedMemoryFuture = null;
+                });
+              },
+              onEditMemory: _editMemory,
+              onDeleteMemory: _deleteMemory,
+              onDeleteEdge: _deleteEdge,
+            ),
+          ),
+      ],
     );
   }
 }
@@ -898,377 +840,131 @@ class _MemoryGraphData {
   final String folderPath;
 }
 
-class _MemoryGraphLayout {
-  /// Creates graph layout positions for each node id.
-  const _MemoryGraphLayout(this.positions);
-
-  final Map<String, Offset> positions;
-
-  /// Computes a deterministic clustered layout in linear graph time.
-  static _MemoryGraphLayout compute(core_proxy.MemoryGraph graph, Size size) {
-    final positions = <String, Offset>{};
-    final center = Offset(size.width / 2, size.height / 2);
-    final clusterInfo = _GraphClusterInfo.fromGraph(graph);
-    final clusters =
-        clusterInfo.clusterIds
-            .map(
-              (clusterId) => _ClusterPlacement(
-                id: clusterId,
-                nodeIds: clusterInfo.nodeIdsByCluster[clusterId]!,
-              ),
-            )
-            .toList(growable: false)
-          ..sort(
-            (left, right) =>
-                right.nodeIds.length.compareTo(left.nodeIds.length),
-          );
-    final clusterCount = clusters.length;
-    final columns = math.max(1, math.sqrt(clusterCount).ceil());
-    final cellWidth = math.max(size.width * 0.92, 860.0);
-    final cellHeight = math.max(size.height * 0.82, 680.0);
-    for (
-      var clusterIndex = 0;
-      clusterIndex < clusters.length;
-      clusterIndex += 1
-    ) {
-      final cluster = clusters[clusterIndex];
-      final row = clusterIndex ~/ columns;
-      final column = clusterIndex % columns;
-      final x = center.dx + (column - (columns - 1) / 2) * cellWidth;
-      final y =
-          center.dy + (row - ((clusterCount - 1) ~/ columns) / 2) * cellHeight;
-      _placeClusterNodes(
-        graph: graph,
-        cluster: cluster,
-        center: Offset(x, y),
-        positions: positions,
-      );
-    }
-    return _MemoryGraphLayout(Map.unmodifiable(positions));
-  }
-}
-
-class _ClusterPlacement {
-  /// Creates a cluster placement payload.
-  const _ClusterPlacement({required this.id, required this.nodeIds});
-
-  final int id;
-  final List<String> nodeIds;
-}
-
-class _GraphClusterInfo {
-  /// Creates cluster information derived from graph connectivity.
-  const _GraphClusterInfo({
-    required this.clusterByNodeId,
-    required this.nodeIdsByCluster,
-    required this.clusterIds,
-  });
-
-  final Map<String, int> clusterByNodeId;
-  final Map<int, List<String>> nodeIdsByCluster;
-  final List<int> clusterIds;
-
-  /// Groups nodes by non-cross-folder graph connectivity.
-  static _GraphClusterInfo fromGraph(core_proxy.MemoryGraph graph) {
-    final adjacency = <String, List<String>>{};
-    for (final node in graph.nodes) {
-      adjacency[node.id] = <String>[];
-    }
-    for (final edge in graph.edges) {
-      if (edge.isCrossFolderLink) {
-        continue;
-      }
-      adjacency[edge.sourceId]?.add(edge.targetId);
-      adjacency[edge.targetId]?.add(edge.sourceId);
-    }
-    final visited = <String>{};
-    final clusterByNodeId = <String, int>{};
-    final nodeIdsByCluster = <int, List<String>>{};
-    var clusterId = 0;
-    for (final node in graph.nodes) {
-      if (!visited.add(node.id)) {
-        continue;
-      }
-      clusterId += 1;
-      final nodeIds = <String>[];
-      final queue = <String>[node.id];
-      var index = 0;
-      while (index < queue.length) {
-        final current = queue[index];
-        index += 1;
-        clusterByNodeId[current] = clusterId;
-        nodeIds.add(current);
-        for (final neighbor in adjacency[current]!) {
-          if (visited.add(neighbor)) {
-            queue.add(neighbor);
-          }
-        }
-      }
-      nodeIdsByCluster[clusterId] = List<String>.unmodifiable(nodeIds);
-    }
-    return _GraphClusterInfo(
-      clusterByNodeId: Map.unmodifiable(clusterByNodeId),
-      nodeIdsByCluster: Map.unmodifiable(nodeIdsByCluster),
-      clusterIds: List<int>.unmodifiable(
-        nodeIdsByCluster.keys.toList()..sort(),
-      ),
-    );
-  }
-}
-
-class _MemoryGraphPainter extends CustomPainter {
-  /// Creates a painter for the memory graph.
-  const _MemoryGraphPainter({
-    required this.graph,
-    required this.layout,
-    required this.scale,
-    required this.offset,
-    required this.colorScheme,
-    required this.textTheme,
-    required this.selectedNodeId,
-    required this.selectedEdgeId,
-    required this.linkSourceNodeId,
-  });
-
-  final core_proxy.MemoryGraph graph;
-  final _MemoryGraphLayout layout;
-  final double scale;
-  final Offset offset;
-  final ColorScheme colorScheme;
-  final TextTheme textTheme;
-  final String? selectedNodeId;
-  final int? selectedEdgeId;
-  final String? linkSourceNodeId;
-
-  /// Paints the visible graph nodes and edges.
-  @override
-  void paint(Canvas canvas, Size size) {
-    final nodeById = {for (final node in graph.nodes) node.id: node};
-    final visibleRect = Offset.zero & size;
-    final outlinePaint = Paint()
-      ..strokeCap = StrokeCap.round
-      ..style = PaintingStyle.stroke;
-    for (final edge in graph.edges) {
-      final startWorld = layout.positions[edge.sourceId];
-      final endWorld = layout.positions[edge.targetId];
-      if (startWorld == null || endWorld == null) {
-        continue;
-      }
-      final start = startWorld * scale + offset;
-      final end = endWorld * scale + offset;
-      if (!_edgeMayBeVisible(start, end, visibleRect)) {
-        continue;
-      }
-      outlinePaint
-        ..color = edge.id == selectedEdgeId
-            ? colorScheme.error
-            : colorScheme.outline.withValues(alpha: 0.58)
-        ..strokeWidth = edge.isCrossFolderLink
-            ? (edge.weight * 2.6 * scale).clamp(1.0, 8.0).toDouble()
-            : (edge.weight * 5.8 * scale).clamp(1.2, 18.0).toDouble();
-      if (edge.isCrossFolderLink) {
-        _drawDashedLine(canvas, start, end, outlinePaint);
-      } else {
-        canvas.drawLine(start, end, outlinePaint);
-      }
-      final label = edge.label;
-      if (label != null && label.isNotEmpty) {
-        final center = (start + end) / 2;
-        if (visibleRect.contains(center)) {
-          final painter = _textPainter(
-            label,
-            textTheme.labelSmall?.copyWith(color: colorScheme.onSurfaceVariant),
-            maxWidth: 220,
-          );
-          painter.paint(
-            canvas,
-            center - Offset(painter.width / 2, painter.height / 2),
-          );
-        }
-      }
-    }
-    for (final node in graph.nodes) {
-      final world = layout.positions[node.id];
-      if (world == null) {
-        continue;
-      }
-      final screen = world * scale + offset;
-      final rect = _nodeScreenRect(node, screen, scale);
-      if (!rect.overlaps(visibleRect)) {
-        continue;
-      }
-      _drawNode(
-        canvas,
-        node,
-        nodeById[node.id]!,
-        screen,
-        scale,
-        node.id == selectedNodeId,
-        node.id == linkSourceNodeId,
-      );
-    }
-  }
-
-  /// Draws a single memory node.
-  void _drawNode(
-    Canvas canvas,
-    core_proxy.MemoryGraphNode node,
-    core_proxy.MemoryGraphNode visualNode,
-    Offset center,
-    double scale,
-    bool selected,
-    bool linkSource,
-  ) {
-    final visualScale = scale.clamp(0.15, 2.2).toDouble();
-    final textPainter = _textPainter(
-      visualNode.label,
-      textTheme.labelMedium?.copyWith(color: _nodeTextColor()),
-      maxWidth: 280,
-    );
-    final width = textPainter.width + 28;
-    final height = textPainter.height + 8;
-    final rect = Rect.fromCenter(
-      center: center,
-      width: width * visualScale,
-      height: height * visualScale,
-    );
-    final radius = Radius.circular(
-      math.min(rect.height * 0.48, 20 * visualScale),
-    );
-    final underlayRect = rect.translate(0, 1.2 * visualScale);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(underlayRect, radius),
-      Paint()..color = _nodeUnderlayColor(),
-    );
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(rect, radius),
-      Paint()..color = _nodeFillColor(node),
-    );
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(rect, radius),
-      Paint()
-        ..color = linkSource
-            ? colorScheme.tertiary
-            : selected
-            ? colorScheme.secondary
-            : colorScheme.outline
-        ..strokeWidth = linkSource || selected ? 2.4 : 1.7
-        ..style = PaintingStyle.stroke,
-    );
-    canvas.save();
-    canvas.translate(rect.left + 14 * visualScale, rect.top + 4 * visualScale);
-    canvas.scale(visualScale);
-    textPainter.paint(canvas, Offset.zero);
-    canvas.restore();
-  }
-
-  /// Returns text color for node labels.
-  Color _nodeTextColor() {
-    return colorScheme.surface.computeLuminance() < 0.42
-        ? const Color(0xFFE5E7EB)
-        : const Color(0xFF1F2937);
-  }
-
-  /// Returns fill color for a graph node.
-  Color _nodeFillColor(core_proxy.MemoryGraphNode node) {
-    final nodeColor = Color(node.color & 0xFFFFFFFF);
-    return Color.alphaBlend(
-      nodeColor.withValues(alpha: 0.22),
-      colorScheme.surface.computeLuminance() < 0.42
-          ? const Color(0xFF2B313D)
-          : const Color(0xFFE5E7EB),
-    );
-  }
-
-  /// Returns underlay color for graph nodes.
-  Color _nodeUnderlayColor() {
-    return colorScheme.surface.computeLuminance() < 0.42
-        ? const Color(0xFF1F2530)
-        : const Color(0xFFD1D5DB);
-  }
-
-  /// Reports whether repainting is required.
-  @override
-  bool shouldRepaint(_MemoryGraphPainter oldDelegate) {
-    return graph != oldDelegate.graph ||
-        layout != oldDelegate.layout ||
-        scale != oldDelegate.scale ||
-        offset != oldDelegate.offset ||
-        selectedNodeId != oldDelegate.selectedNodeId ||
-        selectedEdgeId != oldDelegate.selectedEdgeId ||
-        linkSourceNodeId != oldDelegate.linkSourceNodeId ||
-        colorScheme != oldDelegate.colorScheme;
-  }
-}
-
 class _MemoryToolbar extends StatelessWidget {
-  /// Creates the top filter and action toolbar.
+  /// Creates the memory graph search and action toolbar.
   const _MemoryToolbar({
     required this.controller,
-    required this.folderPath,
-    required this.linkMode,
     required this.busy,
+    required this.linkMode,
+    required this.folderPath,
     required this.onSearch,
     required this.onClearSearch,
-    required this.onToggleFolders,
+    required this.onOpenFolders,
+    required this.onToggleLinkMode,
+    required this.onCreateMemory,
   });
 
   final TextEditingController controller;
-  final String folderPath;
-  final bool linkMode;
   final bool busy;
+  final bool linkMode;
+  final String folderPath;
   final VoidCallback onSearch;
   final VoidCallback onClearSearch;
-  final VoidCallback onToggleFolders;
+  final VoidCallback onOpenFolders;
+  final VoidCallback onToggleLinkMode;
+  final VoidCallback onCreateMemory;
 
-  /// Builds the top memory toolbar.
+  /// Builds a search-first toolbar with fixed-width, labeled icon actions.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final folderLabel = folderPath.isEmpty ? '全部文件夹' : folderPath;
+    final actionStyle = IconButton.styleFrom(
+      minimumSize: const Size(40, 40),
+      maximumSize: const Size(40, 40),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    );
     return Material(
-      color: colorScheme.surface,
-      elevation: 1,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.32),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: colorScheme.outlineVariant.withValues(alpha: 0.2),
+            ),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
         child: Row(
           children: <Widget>[
-            IconButton(
-              tooltip: '文件夹',
-              onPressed: busy ? null : onToggleFolders,
-              icon: const Icon(Icons.folder_outlined),
-            ),
-            const SizedBox(width: 6),
             Expanded(
-              child: TextField(
-                controller: controller,
-                enabled: !busy,
-                textInputAction: TextInputAction.search,
-                onSubmitted: (_) => onSearch(),
-                decoration: InputDecoration(
-                  isDense: true,
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: controller.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: '清空',
-                          onPressed: busy ? null : onClearSearch,
-                          icon: const Icon(Icons.clear),
+              child: Tooltip(
+                message: '搜索标题、正文、来源或标签',
+                child: SizedBox(
+                  height: 40,
+                  child: TextField(
+                    controller: controller,
+                    enabled: !busy,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: (_) => onSearch(),
+                    style: Theme.of(context).textTheme.bodySmall,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 36),
+                      suffixIconConstraints: const BoxConstraints(minWidth: 32),
+                      suffixIcon: controller.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: '清空',
+                              padding: EdgeInsets.zero,
+                              iconSize: 16,
+                              onPressed: busy ? null : onClearSearch,
+                              icon: const Icon(Icons.clear),
+                            ),
+                      hintText: '搜索记忆',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(
+                          color: colorScheme.outlineVariant.withValues(
+                            alpha: 0.3,
+                          ),
                         ),
-                  hintText: '搜索标题、正文、来源或标签',
-                  border: const OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-            const SizedBox(width: 10),
-            FilledButton.icon(
-              onPressed: busy ? null : onSearch,
-              icon: const Icon(Icons.search, size: 18),
-              label: const Text('搜索'),
+            const SizedBox(width: 8),
+            IconButton.outlined(
+              tooltip: folderLabel,
+              onPressed: busy ? null : onOpenFolders,
+              style: actionStyle.copyWith(
+                foregroundColor: WidgetStatePropertyAll(
+                  folderPath.isNotEmpty
+                      ? colorScheme.primary
+                      : colorScheme.onSurface,
+                ),
+                side: WidgetStatePropertyAll(
+                  BorderSide(
+                    color: folderPath.isNotEmpty
+                        ? colorScheme.primary.withValues(alpha: 0.5)
+                        : colorScheme.outlineVariant.withValues(alpha: 0.35),
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.folder_outlined, size: 18),
             ),
-            const SizedBox(width: 10),
-            _MemoryStatusChip(
-              icon: linkMode ? Icons.link : Icons.account_tree_outlined,
-              text: linkMode ? '关系模式' : _folderLabel(folderPath),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              tooltip: '关系模式',
+              onPressed: busy ? null : onToggleLinkMode,
+              isSelected: linkMode,
+              style: actionStyle,
+              icon: const Icon(Icons.link, size: 18),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filled(
+              tooltip: '新建记忆',
+              onPressed: busy ? null : onCreateMemory,
+              style: actionStyle,
+              icon: const Icon(Icons.add, size: 18),
             ),
           ],
         ),
@@ -1397,44 +1093,6 @@ class _MemoryGraphCounter extends StatelessWidget {
   }
 }
 
-class _MemoryStatusChip extends StatelessWidget {
-  /// Creates a compact status chip.
-  const _MemoryStatusChip({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  /// Builds the compact status chip.
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: colorScheme.secondaryContainer.withValues(alpha: 0.62),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(icon, size: 17, color: colorScheme.onSecondaryContainer),
-          const SizedBox(width: 6),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 180),
-            child: Text(
-              text,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSecondaryContainer,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _MemoryEmptyState extends StatelessWidget {
   /// Creates the empty graph state.
   const _MemoryEmptyState({
@@ -1499,10 +1157,16 @@ class _MemoryGraphSelectionCard extends StatelessWidget {
     final subtitle = edge == null
         ? node?.id
         : '${_nodeLabel(edge!.sourceId)}  →  ${_nodeLabel(edge!.targetId)}';
+    final radius = BorderRadius.circular(12);
     return Material(
-      color: colorScheme.surfaceContainerHighest,
-      elevation: 3,
-      borderRadius: BorderRadius.circular(20),
+      color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.95),
+      shape: RoundedRectangleBorder(
+        borderRadius: radius,
+        side: BorderSide(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
         child: Column(
@@ -1853,95 +1517,11 @@ class _MemoryEditorDialogState extends State<_MemoryEditorDialog> {
       ...widget.folders,
       _folderController.text,
     }.map((folder) => folder.trim()).toSet().toList(growable: false)..sort();
-    return AlertDialog(
-      title: Text(widget.memory == null ? '新建记忆' : '编辑记忆'),
-      content: SizedBox(
-        width: 720,
-        child: Form(
-          key: _formKey,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                TextFormField(
-                  controller: _titleController,
-                  decoration: const InputDecoration(labelText: '标题'),
-                  validator: (value) =>
-                      value == null || value.trim().isEmpty ? '请输入标题' : null,
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  controller: _contentController,
-                  minLines: 8,
-                  maxLines: 14,
-                  decoration: const InputDecoration(
-                    labelText: '内容',
-                    alignLabelWithHint: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: TextFormField(
-                        controller: _contentTypeController,
-                        decoration: const InputDecoration(labelText: '内容类型'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _sourceController,
-                        decoration: const InputDecoration(labelText: '来源'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  initialValue:
-                      folderOptions.contains(_folderController.text.trim())
-                      ? _folderController.text.trim()
-                      : '',
-                  items: <DropdownMenuItem<String>>[
-                    for (final folder in folderOptions)
-                      DropdownMenuItem<String>(
-                        value: folder,
-                        child: Text(_folderLabel(folder)),
-                      ),
-                  ],
-                  decoration: const InputDecoration(labelText: '文件夹'),
-                  onChanged: (value) {
-                    _folderController.text = value ?? '';
-                  },
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  controller: _folderController,
-                  decoration: const InputDecoration(labelText: '文件夹路径'),
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  controller: _tagsController,
-                  decoration: const InputDecoration(labelText: '标签（逗号分隔）'),
-                ),
-                const SizedBox(height: 12),
-                _SliderEditor(
-                  label: '可信度',
-                  value: _credibility,
-                  onChanged: (value) => setState(() => _credibility = value),
-                ),
-                _SliderEditor(
-                  label: '重要性',
-                  value: _importance,
-                  onChanged: (value) => setState(() => _importance = value),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+    return OperitDialogScaffold(
+      title: widget.memory == null ? '新建记忆' : '编辑记忆',
+      maxWidth: 720,
+      maxHeight: 680,
+      showCloseButton: true,
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -1949,6 +1529,95 @@ class _MemoryEditorDialogState extends State<_MemoryEditorDialog> {
         ),
         FilledButton(onPressed: _save, child: const Text('保存')),
       ],
+      child: Form(
+        key: _formKey,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextFormField(
+                controller: _titleController,
+                decoration: const InputDecoration(labelText: '标题'),
+                validator: (value) =>
+                    value == null || value.trim().isEmpty ? '请输入标题' : null,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _contentController,
+                minLines: 8,
+                maxLines: 14,
+                decoration: const InputDecoration(
+                  labelText: '内容',
+                  alignLabelWithHint: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TextFormField(
+                      controller: _contentTypeController,
+                      decoration: const InputDecoration(labelText: '内容类型'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _sourceController,
+                      decoration: const InputDecoration(labelText: '来源'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              OperitFormStyles.dropdownButtonFormField<String>(
+                context,
+                initialValue:
+                    folderOptions.contains(_folderController.text.trim())
+                    ? _folderController.text.trim()
+                    : '',
+                items: <DropdownMenuItem<String>>[
+                  for (final folder in folderOptions)
+                    DropdownMenuItem<String>(
+                      value: folder,
+                      child: Text(_folderLabel(folder)),
+                    ),
+                ],
+                decoration: const InputDecoration(labelText: '文件夹'),
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() {
+                    _folderController.text = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _tagsController,
+                decoration: const InputDecoration(
+                  labelText: '标签',
+                  helperText: '多个标签请用逗号分隔',
+                ),
+              ),
+              const SizedBox(height: 10),
+              _SliderEditor(
+                label: '可信度',
+                value: _credibility,
+                onChanged: (value) => setState(() => _credibility = value),
+              ),
+              const SizedBox(height: 10),
+              _SliderEditor(
+                label: '重要度',
+                value: _importance,
+                onChanged: (value) => setState(() => _importance = value),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2063,39 +1732,10 @@ class _MemoryLinkEditorDialogState extends State<_MemoryLinkEditorDialog> {
   /// Builds the memory link dialog.
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('创建记忆关系'),
-      content: SizedBox(
-        width: 520,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Text('${widget.sourceTitle}  →  ${widget.targetTitle}'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _typeController,
-              decoration: const InputDecoration(labelText: '关系类型'),
-            ),
-            const SizedBox(height: 10),
-            _SliderEditor(
-              label: '权重',
-              value: _weight,
-              onChanged: (value) => setState(() => _weight = value),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _descriptionController,
-              minLines: 2,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                labelText: '描述',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-      ),
+    return OperitDialogScaffold(
+      title: '创建记忆关系',
+      maxWidth: 520,
+      showCloseButton: true,
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -2103,6 +1743,39 @@ class _MemoryLinkEditorDialogState extends State<_MemoryLinkEditorDialog> {
         ),
         FilledButton(onPressed: _save, child: const Text('创建')),
       ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text(
+            '${widget.sourceTitle}  →  ${widget.targetTitle}',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _typeController,
+            decoration: const InputDecoration(labelText: '关系类型'),
+          ),
+          const SizedBox(height: 10),
+          _SliderEditor(
+            label: '权重',
+            value: _weight,
+            onChanged: (value) => setState(() => _weight = value),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _descriptionController,
+            minLines: 2,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: '描述',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2124,9 +1797,10 @@ class _ImportStrategyDialog extends StatelessWidget {
   /// Builds the import strategy dialog.
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('导入记忆 JSON'),
-      content: const Text('请选择同名记忆的处理方式。'),
+    return OperitDialogScaffold(
+      title: '导入记忆 JSON',
+      maxWidth: 440,
+      showCloseButton: true,
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -2148,59 +1822,12 @@ class _ImportStrategyDialog extends StatelessWidget {
           child: const Text('创建新记忆'),
         ),
       ],
+      child: const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Text('请选择同名记忆的处理方式。'),
+      ),
     );
   }
-}
-
-/// Places all nodes in one cluster around a center point.
-void _placeClusterNodes({
-  required core_proxy.MemoryGraph graph,
-  required _ClusterPlacement cluster,
-  required Offset center,
-  required Map<String, Offset> positions,
-}) {
-  final degree = <String, int>{for (final nodeId in cluster.nodeIds) nodeId: 0};
-  for (final edge in graph.edges) {
-    if (degree.containsKey(edge.sourceId)) {
-      degree[edge.sourceId] = degree[edge.sourceId]! + 1;
-    }
-    if (degree.containsKey(edge.targetId)) {
-      degree[edge.targetId] = degree[edge.targetId]! + 1;
-    }
-  }
-  final nodeIds = cluster.nodeIds.toList(growable: false)
-    ..sort((left, right) {
-      final degreeOrder = degree[right]!.compareTo(degree[left]!);
-      if (degreeOrder != 0) {
-        return degreeOrder;
-      }
-      return left.compareTo(right);
-    });
-  if (nodeIds.length == 1) {
-    positions[nodeIds.single] = center;
-    return;
-  }
-  positions[nodeIds.first] = center;
-  var placed = 1;
-  var ring = 1;
-  const nodeSpacing = 240.0;
-  while (placed < nodeIds.length) {
-    final radius = 220.0 + (ring - 1) * 190.0;
-    final capacity = math.max(6, (math.pi * 2 * radius / nodeSpacing).floor());
-    final count = math.min(capacity, nodeIds.length - placed);
-    for (var index = 0; index < count; index += 1) {
-      final angle = -math.pi / 2 + math.pi * 2 * index / count;
-      positions[nodeIds[placed + index]] =
-          center + Offset(math.cos(angle), math.sin(angle)) * radius;
-    }
-    placed += count;
-    ring += 1;
-  }
-}
-
-/// Returns a stable signature for graph layout invalidation.
-String _graphSignature(core_proxy.MemoryGraph graph) {
-  return '${graph.nodes.length}:${graph.edges.length}:${graph.nodes.map((node) => node.id).join('|')}:${graph.edges.map((edge) => '${edge.id}:${edge.sourceId}:${edge.targetId}').join('|')}';
 }
 
 /// Returns a graph containing exactly the selected memory ids.
@@ -2279,89 +1906,4 @@ String _formatMillis(int millis) {
 /// Formats one integer as two digits.
 String _twoDigits(int value) {
   return value.toString().padLeft(2, '0');
-}
-
-/// Creates a text painter for graph labels.
-TextPainter _textPainter(
-  String text,
-  TextStyle? style, {
-  required double maxWidth,
-}) {
-  return TextPainter(
-    text: TextSpan(text: text, style: style),
-    maxLines: 3,
-    ellipsis: '...',
-    textDirection: TextDirection.ltr,
-    textScaler: TextScaler.noScaling,
-  )..layout(maxWidth: maxWidth);
-}
-
-/// Estimates a node world rectangle without measuring text every frame.
-Rect _nodeWorldRect(core_proxy.MemoryGraphNode node, Offset center) {
-  final width = _estimatedNodeWidth(node.label);
-  return Rect.fromCenter(center: center, width: width, height: 54);
-}
-
-/// Estimates a node screen rectangle without measuring text every frame.
-Rect _nodeScreenRect(
-  core_proxy.MemoryGraphNode node,
-  Offset center,
-  double scale,
-) {
-  final visualScale = scale.clamp(0.15, 2.2).toDouble();
-  final worldRect = _nodeWorldRect(node, center);
-  return Rect.fromCenter(
-    center: center,
-    width: worldRect.width * visualScale,
-    height: worldRect.height * visualScale,
-  );
-}
-
-/// Estimates rendered node width from label length.
-double _estimatedNodeWidth(String label) {
-  final textWidth = (label.length.clamp(4, 34) * 7.8).toDouble();
-  return (textWidth + 34).clamp(82.0, 314.0).toDouble();
-}
-
-/// Returns true when an edge intersects the visible canvas area.
-bool _edgeMayBeVisible(Offset start, Offset end, Rect visibleRect) {
-  if (visibleRect.contains(start) || visibleRect.contains(end)) {
-    return true;
-  }
-  return Rect.fromPoints(start, end).inflate(24).overlaps(visibleRect);
-}
-
-/// Computes the shortest distance from a point to a line segment.
-double _distanceToSegment(Offset point, Offset start, Offset end) {
-  final lengthSq = (start - end).distanceSquared;
-  if (lengthSq == 0) {
-    return (point - start).distance;
-  }
-  final t =
-      (((point.dx - start.dx) * (end.dx - start.dx) +
-                  (point.dy - start.dy) * (end.dy - start.dy)) /
-              lengthSq)
-          .clamp(0.0, 1.0)
-          .toDouble();
-  final projection = start + (end - start) * t;
-  return (point - projection).distance;
-}
-
-/// Draws a dashed line between two points.
-void _drawDashedLine(Canvas canvas, Offset start, Offset end, Paint paint) {
-  const dash = 12.0;
-  const gap = 12.0;
-  final delta = end - start;
-  final distance = delta.distance;
-  if (distance <= 0) {
-    return;
-  }
-  final direction = delta / distance;
-  var drawn = 0.0;
-  while (drawn < distance) {
-    final segmentStart = start + direction * drawn;
-    final segmentEnd = start + direction * math.min(drawn + dash, distance);
-    canvas.drawLine(segmentStart, segmentEnd, paint);
-    drawn += dash + gap;
-  }
 }

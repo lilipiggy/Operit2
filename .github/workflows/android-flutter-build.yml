@@ -56,12 +56,12 @@ jobs:
         with:
           name: operit2-android-runtime-${{ github.sha }}
           path: |
-            apps/flutter/app/android/app/src/main/jniLibs/*/libbash.so
-            apps/flutter/app/android/app/src/main/jniLibs/*/liboperit_busybox.so
-            apps/flutter/app/android/app/src/main/jniLibs/*/liboperit_loader.so
-            apps/flutter/app/android/app/src/main/jniLibs/*/liboperit_proot.so
-            apps/flutter/app/android/app/src/main/assets/android-runtime/*/rootfs.tar.gz.bin
-            apps/flutter/app/android/app/src/main/assets/android-runtime/*/rootfs.tar.gz.bin.sha256
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
           if-no-files-found: error
           retention-days: 1
 
@@ -72,12 +72,7 @@ jobs:
     env:
       RUSTFLAGS: -Awarnings
       RUST_TOOLCHAIN_VERSION: 1.95.0
-      FVM_VERSION: 4.1.2
-      TYPESCRIPT_VERSION: 5.9.3
-      WASM_BINDGEN_VERSION: 0.2.122
-      WASI_SDK_VERSION: "20.0"
-      QUICKJS_WASM_SYS_WASI_SDK_MAJOR_VERSION: 20
-      QUICKJS_WASM_SYS_WASI_SDK_MINOR_VERSION: 0
+      FVM_VERSION: 4.3.0
 
     steps:
       - name: Checkout
@@ -89,11 +84,10 @@ jobs:
           name: operit2-android-runtime-${{ github.sha }}
           path: apps/flutter/app/android/app/src/main
 
-      - name: Install bootstrap Flutter
-        uses: subosito/flutter-action@v2
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
         with:
-          channel: stable
-          cache: true
+          sdk: 3.11.5
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -121,7 +115,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,wasm32-unknown-unknown
+          targets: aarch64-linux-android
 
       - name: Prepare Android bindgen libclang
         shell: pwsh
@@ -170,11 +164,7 @@ jobs:
 
       - name: Check build environment
         shell: pwsh
-        run: python tools/build_scripts/check_environment.py --products app --github-runner
-
-      - name: Build Web Access assets
-        shell: pwsh
-        run: python tools/build_scripts/build_flutter_web_access.py --base-href /
+        run: python tools/build_scripts/check_build_environment.py --products app --github-runner
 
       - name: Build and package Android app
         shell: pwsh
@@ -189,6 +179,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: operit2-android-${{ github.sha }}
-          path: tools/release/dist/operit2-app-android-*.apk
+          path: tools/release/dist/operit2-app-android-arm64-v8a.apk
           if-no-files-found: error
           retention-days: 14

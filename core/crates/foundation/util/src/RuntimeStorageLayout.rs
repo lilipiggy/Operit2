@@ -148,12 +148,6 @@ pub const RUNTIME_COMPOSE_DSL_WEBVIEW_FILES: RuntimeStoragePathDefinition =
         RuntimeStorageOwnership::Ephemeral,
     );
 pub const RUNTIME_COMPOSE_DSL_WEBVIEW_FILES_DIR_PATH: &str = RUNTIME_COMPOSE_DSL_WEBVIEW_FILES.path;
-pub const RUNTIME_LINK_ACCESS_WEB_ASSETS: RuntimeStoragePathDefinition =
-    RuntimeStoragePathDefinition::tree(
-        "runtime/link_access/web_access_bundle",
-        RuntimeStorageOwnership::CoreNode,
-    );
-pub const RUNTIME_LINK_ACCESS_WEB_ASSETS_DIR_PATH: &str = RUNTIME_LINK_ACCESS_WEB_ASSETS.path;
 pub const RUNTIME_LINK_ACCESS_IDENTITY: RuntimeStoragePathDefinition =
     RuntimeStoragePathDefinition::exact(
         "runtime/link_access/identity.preferences.json",
@@ -200,6 +194,13 @@ pub const CLIENT_RUNTIME_BOOTSTRAP: RuntimeStoragePathDefinition =
         RuntimeStorageOwnership::CoreNode,
     );
 pub const CLIENT_RUNTIME_BOOTSTRAP_PATH: &str = CLIENT_RUNTIME_BOOTSTRAP.path;
+/// Owns interface zoom for this CoreNode, never replicated to the device Space.
+pub const RUNTIME_APPLICATION_ZOOM: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact(
+        "runtime/client/application_zoom.local",
+        RuntimeStorageOwnership::CoreNode,
+    );
+pub const RUNTIME_APPLICATION_ZOOM_PATH: &str = RUNTIME_APPLICATION_ZOOM.path;
 pub const RUNTIME_CLIENT_LOG: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::exact(
     "runtime/logs/client.log",
     RuntimeStorageOwnership::CoreNode,
@@ -212,17 +213,37 @@ pub const RUNTIME_SHARE_IMAGE_EXPORTS: RuntimeStoragePathDefinition =
     );
 pub const RUNTIME_SHARE_IMAGE_EXPORTS_DIR_PATH: &str = RUNTIME_SHARE_IMAGE_EXPORTS.path;
 
-pub const EXTENSIONS_SKILLS: RuntimeStoragePathDefinition =
-    RuntimeStoragePathDefinition::tree("runtime/extensions/skills", RuntimeStorageOwnership::Space);
+/// Owns portable extension installations and configurations shared with the device space.
+pub const EXTENSIONS_SPACE: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::tree("runtime/extensions/space", RuntimeStorageOwnership::Space);
+/// Owns device-local extension installations, settings and runtime state.
+pub const EXTENSIONS_DEVICE: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::tree(
+    "runtime/extensions/device",
+    RuntimeStorageOwnership::CoreNode,
+);
+pub const EXTENSIONS_SKILLS: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::tree(
+    "runtime/extensions/device/skills",
+    RuntimeStorageOwnership::CoreNode,
+);
 pub const EXTENSIONS_SKILLS_DIR_PATH: &str = EXTENSIONS_SKILLS.path;
-pub const EXTENSIONS_PACKAGES_DIR_PATH: &str = "runtime/extensions/packages";
+pub const EXTENSIONS_PACKAGES: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::tree(
+    "runtime/extensions/device/packages",
+    RuntimeStorageOwnership::CoreNode,
+);
+pub const EXTENSIONS_PACKAGES_DIR_PATH: &str = EXTENSIONS_PACKAGES.path;
 pub const EXTENSIONS_PLUGIN_CONFIGS: RuntimeStoragePathDefinition =
     RuntimeStoragePathDefinition::tree(
-        "runtime/extensions/plugins/configs",
-        RuntimeStorageOwnership::Space,
+        "runtime/extensions/device/plugins/configs",
+        RuntimeStorageOwnership::CoreNode,
     );
 pub const EXTENSIONS_PLUGIN_CONFIGS_DIR_PATH: &str = EXTENSIONS_PLUGIN_CONFIGS.path;
-pub const EXTENSIONS_MCP_DIR_PATH: &str = "runtime/extensions/mcp";
+/// Owns persistent files written through legacy shared-storage paths.
+pub const EXTENSIONS_PLUGIN_DATA: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::tree(
+    "runtime/extensions/device/plugins/data",
+    RuntimeStorageOwnership::CoreNode,
+);
+pub const EXTENSIONS_PLUGIN_DATA_DIR_PATH: &str = EXTENSIONS_PLUGIN_DATA.path;
+pub const EXTENSIONS_MCP_DIR_PATH: &str = "runtime/extensions/device/mcp";
 
 pub const RUNTIME_CLEAN_ON_EXIT: RuntimeStoragePathDefinition = RuntimeStoragePathDefinition::tree(
     "runtime/temp/clean_on_exit",
@@ -305,10 +326,14 @@ pub const ENV_PREFERENCES_PATH: &str =
     "runtime/config/preferences/env_preferences.preferences.json";
 pub const GITHUB_AUTH_PREFERENCES_PATH: &str =
     "runtime/config/preferences/github_auth_preferences.json";
+pub const CODEX_AUTH_PREFERENCES_PATH: &str =
+    "runtime/config/preferences/codex_auth_preferences.json";
 pub const CHARACTER_CARDS_PREFERENCES_PATH: &str =
     "runtime/config/preferences/character_cards.preferences.json";
 pub const CHARACTER_GROUPS_PREFERENCES_PATH: &str =
     "runtime/config/preferences/character_groups.preferences.json";
+pub const WORKSPACES_PREFERENCES_PATH: &str =
+    "runtime/config/preferences/workspaces.preferences.json";
 pub const PROMPT_TAGS_PREFERENCES_PATH: &str =
     "runtime/config/preferences/prompt_tags.preferences.json";
 pub const SHARED_MEMORY_STORES_PREFERENCES_PATH: &str =
@@ -346,8 +371,8 @@ pub const PERSONA_CARD_CHAT_HISTORY_PREFERENCES_PATH: &str =
     "runtime/config/preferences/persona_card_chat_history.preferences.json";
 pub const CURRENT_CHAT_ID_PREFERENCES_PATH: &str = "runtime/state/current_chat_id.preferences.json";
 pub const SQLITE_DATABASE_PATH: &str = "runtime/data/database/operit2.sqlite";
-pub const MCP_CONFIG_PATH: &str = "runtime/extensions/mcp/mcp_config.json";
-pub const MCP_SERVER_STATUS_PATH: &str = "runtime/extensions/mcp/server_status.json";
+pub const MCP_CONFIG_PATH: &str = "runtime/extensions/device/mcp/mcp_config.json";
+pub const MCP_SERVER_STATUS_PATH: &str = "runtime/extensions/device/mcp/server_status.json";
 pub const OPERIT1_SNAPSHOT_SQLITE_INSPECTION_PATH: &str =
     "runtime/temp/clean_on_exit/operit1_snapshot_import.sqlite";
 pub const OPERIT1_SNAPSHOT_SQLITE_INSPECTION_WAL_PATH: &str =
@@ -359,6 +384,7 @@ pub const OPERIT1_SNAPSHOT_OBJECTBOX_IMPORT_PATH: &str =
 
 /// Lists every runtime file path whose data ownership is explicitly declared.
 pub const RUNTIME_STORAGE_PATH_DEFINITIONS: &[RuntimeStoragePathDefinition] = &[
+    RuntimeStoragePathDefinition::tree(WORKSPACE_DIR_PATH, RuntimeStorageOwnership::Space),
     DATA_MEMORY_CHARACTERS_USER_MARKDOWN,
     DATA_MEMORY_SHARED_USER_MARKDOWN,
     RUNTIME_USER_ASSETS,
@@ -368,7 +394,6 @@ pub const RUNTIME_STORAGE_PATH_DEFINITIONS: &[RuntimeStoragePathDefinition] = &[
     RUNTIME_SHARE_IMAGE,
     RUNTIME_WORKSPACE_VIDEO,
     RUNTIME_COMPOSE_DSL_WEBVIEW_FILES,
-    RUNTIME_LINK_ACCESS_WEB_ASSETS,
     RUNTIME_LINK_ACCESS_IDENTITY,
     RUNTIME_LINK_ACCESS_INBOUND_SESSIONS,
     RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS,
@@ -376,10 +401,20 @@ pub const RUNTIME_STORAGE_PATH_DEFINITIONS: &[RuntimeStoragePathDefinition] = &[
     RUNTIME_LINK_ACCESS_PENDING_OUTBOUND_PAIRINGS,
     RUNTIME_LINK_ACCESS_HOST_CONFIG,
     CLIENT_RUNTIME_BOOTSTRAP,
+    RUNTIME_APPLICATION_ZOOM,
     RUNTIME_CLIENT_LOG,
     RUNTIME_SHARE_IMAGE_EXPORTS,
+    // Retain ownership for queued operations and legacy data during the non-destructive upgrade.
+    RuntimeStoragePathDefinition::tree("runtime/extensions/skills", RuntimeStorageOwnership::Space),
+    RuntimeStoragePathDefinition::tree("runtime/extensions/packages", RuntimeStorageOwnership::Space),
+    RuntimeStoragePathDefinition::tree("runtime/extensions/plugins/configs", RuntimeStorageOwnership::Space),
+    RuntimeStoragePathDefinition::tree("runtime/extensions/plugins/data", RuntimeStorageOwnership::Space),
+    EXTENSIONS_SPACE,
+    EXTENSIONS_DEVICE,
     EXTENSIONS_SKILLS,
+    EXTENSIONS_PACKAGES,
     EXTENSIONS_PLUGIN_CONFIGS,
+    EXTENSIONS_PLUGIN_DATA,
     RUNTIME_CLEAN_ON_EXIT,
     RUNTIME_SYNC,
     RUNTIME_IMPORTED_OPERIT1_FILES,
@@ -461,6 +496,10 @@ mod tests {
             RuntimeStorageOwnership::Space
         );
         assert_eq!(
+            runtimeStorageOwnership("runtime/extensions/packages/example.js").unwrap(),
+            RuntimeStorageOwnership::Space
+        );
+        assert_eq!(
             runtimeStorageOwnership("runtime/extensions/plugins/configs/example/env.json").unwrap(),
             RuntimeStorageOwnership::Space
         );
@@ -469,13 +508,28 @@ mod tests {
             RuntimeStorageOwnership::Ephemeral
         );
         assert_eq!(
-            runtimeStorageOwnership("runtime/link_access/web_access_bundle/index.html").unwrap(),
-            RuntimeStorageOwnership::CoreNode
-        );
-        assert_eq!(
             runtimeStorageOwnership(RUNTIME_CLIENT_LOG_PATH).unwrap(),
             RuntimeStorageOwnership::CoreNode
         );
+    }
+
+    #[test]
+    fn application_zoom_is_node_local_not_space_data() {
+        assert_eq!(
+            runtimeStorageOwnership(RUNTIME_APPLICATION_ZOOM_PATH).unwrap(),
+            RuntimeStorageOwnership::CoreNode
+        );
+        assert!(runtimeStorageOwnership(
+            "runtime/client/application_zoom.local/other"
+        ).is_err());
+    }
+
+    #[test]
+    fn extension_scopes_keep_device_data_local_and_space_data_shared() {
+        for relative in ["packages/demo.js", "skills/demo/SKILL.md", "records/skill-demo.json", "settings/skill-demo.preferences.json", "plugins/configs/demo/env.json"] {
+            assert_eq!(runtimeStorageOwnership(&format!("runtime/extensions/device/{relative}")).unwrap(), RuntimeStorageOwnership::CoreNode);
+            assert_eq!(runtimeStorageOwnership(&format!("runtime/extensions/space/{relative}")).unwrap(), RuntimeStorageOwnership::Space);
+        }
     }
 
     /// Verifies undeclared and structurally invalid paths are rejected.

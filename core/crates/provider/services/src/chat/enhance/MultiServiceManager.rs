@@ -23,6 +23,7 @@ use crate::chat::llmprovider::NvidiaAIProvider::NvidiaAIProvider;
 use crate::chat::llmprovider::OllamaProvider::OllamaProvider;
 use crate::chat::llmprovider::OpenAIProvider::OpenAIProvider;
 use crate::chat::llmprovider::OpenAIResponsesProvider::OpenAIResponsesProvider;
+use crate::chat::llmprovider::OpenCodeProvider::OpenCodeProvider;
 use crate::chat::llmprovider::OpenRouterProvider::OpenRouterProvider;
 use crate::chat::llmprovider::QwenAIProvider::QwenAIProvider;
 use crate::chat::llmprovider::RateLimitedAIService::RateLimitedAIService;
@@ -574,14 +575,21 @@ impl MultiServiceManager {
                 model_name,
                 custom_headers,
                 provider_type,
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
                 enable_tool_call,
-                ..
             } => Ok(Box::new(DeepseekProvider::new(
                 api_endpoint,
                 Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
                 model_name,
                 provider_type.name().to_string(),
                 custom_headers.into_iter().collect(),
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
                 enable_tool_call,
                 inner.runtime_context.clone(),
             ))),
@@ -594,6 +602,7 @@ impl MultiServiceManager {
                 supports_vision,
                 supports_audio,
                 supports_video,
+                builtin_tools,
                 enable_tool_call,
             } => Ok(Box::new(OpenAIResponsesProvider::new(
                 responses_api_endpoint,
@@ -604,9 +613,34 @@ impl MultiServiceManager {
                 supports_vision,
                 supports_audio,
                 supports_video,
+                builtin_tools,
                 enable_tool_call,
                 inner.runtime_context.clone(),
             ))),
+            ProviderCreateParams::OpenCodeProvider {
+                api_endpoint,
+                api_key_provider,
+                model_name,
+                custom_headers,
+                protocol,
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
+                enable_tool_call,
+            } => Ok(Box::new(OpenCodeProvider::new(
+                api_endpoint,
+                Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
+                model_name,
+                custom_headers.into_iter().collect(),
+                protocol,
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
+                enable_tool_call,
+                inner.runtime_context.clone(),
+            )?)),
             ProviderCreateParams::ClaudeProvider {
                 api_endpoint,
                 api_key_provider,
@@ -614,14 +648,18 @@ impl MultiServiceManager {
                 custom_headers,
                 provider_type,
                 enable_tool_call,
-            } => Ok(Box::new(ClaudeProvider::new(
-                api_endpoint,
-                Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
-                model_name,
-                provider_type.name().to_string(),
-                custom_headers.into_iter().collect(),
-                enable_tool_call,
-            ))),
+                enable_claude_1h_prompt_cache,
+            } => Ok(Box::new(
+                ClaudeProvider::new(
+                    api_endpoint,
+                    Self::resolveApiKeyProviderLocked(inner, api_key_provider)?,
+                    model_name,
+                    provider_type.name().to_string(),
+                    custom_headers.into_iter().collect(),
+                    enable_tool_call,
+                )
+                .with_claude_1h_prompt_cache(enable_claude_1h_prompt_cache),
+            )),
             ProviderCreateParams::GeminiProvider {
                 api_endpoint,
                 api_key_provider,

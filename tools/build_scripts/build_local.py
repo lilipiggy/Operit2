@@ -6,11 +6,12 @@ import os
 import sys
 from pathlib import Path
 
+from build_esp32 import build_esp32
 from common import DIST_DIR, host_arch, host_platform, run
 
 
 BUILD_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-PRODUCT_CHOICES = ("app", "cli", "all")
+PRODUCT_CHOICES = ("app", "cli", "esp32", "all")
 CLI_ARCH_CHOICES = ("host", "all", "x86_64", "aarch64")
 
 
@@ -78,7 +79,7 @@ def build_ios_app(enforce_lockfile: bool) -> None:
 def check_local_environment(products: str, cli_arches: str, include_ios: bool) -> None:
     command = [
         sys.executable,
-        os.path.join(BUILD_SCRIPTS_DIR, "check_environment.py"),
+        os.path.join(BUILD_SCRIPTS_DIR, "check_build_environment.py"),
         "--products",
         products,
         "--cli-arches",
@@ -89,33 +90,27 @@ def check_local_environment(products: str, cli_arches: str, include_ios: bool) -
     run(command)
 
 
-# Builds the selected native products after producing the shared Web Access bundle.
+# Builds the selected native products without embedding the Web client.
 def main() -> int:
     args = parse_args()
     platform_name = host_platform()
     if args.include_ios and platform_name != "macos":
         raise RuntimeError("--include-ios requires a macOS host")
-    if args.include_ios and args.products == "cli":
-        raise RuntimeError("--include-ios requires --products app or all")
+    if args.include_ios and args.products != "app":
+        raise RuntimeError("--include-ios requires --products app")
     if args.check:
         check_local_environment(args.products, args.cli_arches, args.include_ios)
         return 0
 
     os.environ["RUSTFLAGS"] = "-Awarnings"
-    run(
-        [
-            sys.executable,
-            os.path.join(BUILD_SCRIPTS_DIR, "build_flutter_web_access.py"),
-            "--base-href",
-            "/",
-        ]
-    )
     if args.products in ("app", "all"):
         build_local_app(platform_name, args.enforce_lockfile)
         if args.include_ios:
             build_ios_app(args.enforce_lockfile)
     if args.products in ("cli", "all"):
         build_local_cli(platform_name, args.cli_arches)
+    if args.products == "esp32":
+        build_esp32()
     return 0
 
 

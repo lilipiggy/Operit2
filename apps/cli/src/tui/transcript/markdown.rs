@@ -5,10 +5,15 @@ use operit_util::streamnative::NativeMarkdownStreamOperators::NativeMarkdownStre
 use operit_util::ChatMarkupRegex::{attr_value, tag_body, ChatMarkupRegex};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::BTreeMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use super::fold::{
+    count_search_nodes, count_tool_nodes, details_should_auto_expand, details_summary_and_body,
+    fold_group_kind, fold_group_title, group_markdown_nodes, group_should_auto_expand,
+    match_tool_merge, think_is_in_progress, think_should_auto_expand, xml_inner_body, xml_tag_name,
+    FoldRenderContext, FoldedLines, GroupedItem, ToolMergeNode,
+};
 use super::i18n::{TuiLanguage, TuiText};
 use super::theme;
 
@@ -40,8 +45,18 @@ pub(super) fn render_markdown_lines(
     content_width: usize,
     text: TuiText,
 ) -> Vec<Line<'static>> {
+    render_markdown_lines_folded(content, content_width, text, None).lines
+}
+
+/// Renders Markdown with main-app fold groups and tool call/result merge rows.
+pub(super) fn render_markdown_lines_folded(
+    content: &str,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
     let nodes = content.nativeMarkdownSplitByBlock();
-    render_markdown_nodes_lines(&nodes, content_width, text)
+    render_markdown_nodes_folded(&nodes, content_width, text, fold)
 }
 
 pub(super) fn render_markdown_lines_cached(
@@ -60,26 +75,79 @@ pub(super) fn render_markdown_nodes_lines(
     content_width: usize,
     text: TuiText,
 ) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+    render_markdown_nodes_folded(nodes, content_width, text, None).lines
+}
+
+/// Renders Markdown nodes with grouping, merge rows, and clickable fold headers.
+pub(super) fn render_markdown_nodes_folded(
+    nodes: &[MarkdownNodeStable],
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    let grouped = group_markdown_nodes(nodes);
+    let mut output = FoldedLines::default();
     let mut previous_kind: Option<RenderedBlockKind> = None;
-    for node in nodes {
-        if is_blank_text_block(node) {
-            continue;
-        }
-        let kind = rendered_block_kind(node);
-        if should_insert_block_spacing(previous_kind, kind) && !last_line_is_blank(&lines) {
-            lines.push(Line::from(""));
-        }
-        let before_len = lines.len();
-        lines.extend(render_markdown_block_lines(node, content_width, text));
-        if lines.len() > before_len {
-            previous_kind = Some(kind);
+    let mut item_offset = 0usize;
+    while item_offset < grouped.len() {
+        match &grouped[item_offset] {
+            GroupedItem::Group {
+                start_index,
+                end_index_inclusive,
+                stable_key,
+            } => {
+                let kind = RenderedBlockKind::Tool;
+                if should_insert_block_spacing(previous_kind, kind)
+                    && !last_line_is_blank(&output.lines)
+                {
+                    output.lines.push(Line::from(""));
+                }
+                let before = output.lines.len();
+                output.extend(render_fold_group(
+                    nodes,
+                    *start_index,
+                    *end_index_inclusive,
+                    stable_key,
+                    content_width,
+                    text,
+                    fold,
+                ));
+                if output.lines.len() > before {
+                    previous_kind = Some(kind);
+                }
+                item_offset += 1;
+            }
+            GroupedItem::Single(start) => {
+                let range_start = *start;
+                let mut range_end = range_start;
+                item_offset += 1;
+                while item_offset < grouped.len() {
+                    match grouped[item_offset] {
+                        GroupedItem::Single(next) if next == range_end + 1 => {
+                            range_end = next;
+                            item_offset += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                output.extend(render_merged_range(
+                    nodes,
+                    range_start,
+                    range_end,
+                    content_width,
+                    text,
+                    fold,
+                    true,
+                    0,
+                    &mut previous_kind,
+                ));
+            }
         }
     }
-    if lines.is_empty() {
-        lines.push(Line::from(""));
+    if output.lines.is_empty() {
+        output.lines.push(Line::from(""));
     }
-    lines
+    output
 }
 
 pub(super) fn render_markdown_nodes_lines_cached(
@@ -141,6 +209,466 @@ enum RenderedBlockKind {
     HorizontalRule,
     Code,
     Other,
+}
+
+/// Renders one collapsed thinking/tool/search group with an expandable body.
+fn render_fold_group(
+    nodes: &[MarkdownNodeStable],
+    start_index: usize,
+    end_index_inclusive: usize,
+    stable_key: &str,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    let tool_count = count_tool_nodes(nodes, start_index, end_index_inclusive);
+    let search_count = count_search_nodes(nodes, start_index, end_index_inclusive);
+    let title = fold_group_title(
+        fold_group_kind(stable_key, tool_count, search_count),
+        tool_count,
+        text,
+    );
+    let auto_expand = fold
+        .map(|context| group_should_auto_expand(nodes, end_index_inclusive, context.is_streaming))
+        .unwrap_or(false);
+    let expanded = fold
+        .map(|context| context.is_expanded(stable_key, auto_expand))
+        .unwrap_or(auto_expand);
+    let mut output = FoldedLines::default();
+    let header_start = output.lines.len();
+    output
+        .lines
+        .push(fold_header_line(expanded, title_line(&title)));
+    if expanded {
+        let inner_width = content_width.saturating_sub(2).max(1);
+        let mut inner_kind = None;
+        let mut inner = render_merged_range(
+            nodes,
+            start_index,
+            end_index_inclusive,
+            inner_width,
+            text,
+            fold,
+            false,
+            2,
+            &mut inner_kind,
+        );
+        indent_folded_lines(&mut inner, 2);
+        output.extend(inner);
+    }
+    if let Some(context) = fold {
+        // The whole disclosure is one click target: a reader deep inside a long
+        // thinking or tool block collapses it by clicking the body text instead
+        // of scrolling back to the header.
+        output.push_hit_range(
+            header_start..output.lines.len(),
+            context.target(stable_key.to_string(), expanded),
+        );
+    }
+    output
+}
+
+/// Renders a node range after applying tool call/result merge matching.
+fn render_merged_range(
+    nodes: &[MarkdownNodeStable],
+    start_index: usize,
+    end_index_inclusive: usize,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+    render_non_xml: bool,
+    indent: usize,
+    previous_kind: &mut Option<RenderedBlockKind>,
+) -> FoldedLines {
+    let mut output = FoldedLines::default();
+    let mut index = start_index;
+    while index <= end_index_inclusive {
+        if let Some(merge) = match_tool_merge(nodes, index, end_index_inclusive) {
+            let kind = RenderedBlockKind::Tool;
+            if should_insert_block_spacing(*previous_kind, kind)
+                && !last_line_is_blank(&output.lines)
+            {
+                output.lines.push(Line::from(""));
+            }
+            for (pair_index, pair) in merge.pairs.iter().enumerate() {
+                output.extend(render_merged_tool_pair(
+                    pair,
+                    content_width,
+                    fold,
+                    format!(
+                        "merged-tool-{}-{}-{pair_index}",
+                        merge.start_index, merge.end_index_inclusive
+                    ),
+                    indent,
+                ));
+            }
+            *previous_kind = Some(kind);
+            index = merge.end_index_inclusive + 1;
+            continue;
+        }
+        let node = &nodes[index];
+        let should_render = if render_non_xml {
+            !is_blank_text_block(node)
+        } else {
+            node.r#type == MarkdownProcessorType::XmlBlock
+        };
+        if should_render {
+            let kind = rendered_block_kind(node);
+            if should_insert_block_spacing(*previous_kind, kind)
+                && !last_line_is_blank(&output.lines)
+            {
+                output.lines.push(Line::from(""));
+            }
+            let before = output.lines.len();
+            output.extend(render_foldable_node(node, index, content_width, text, fold));
+            if output.lines.len() > before {
+                *previous_kind = Some(kind);
+            }
+        }
+        index += 1;
+    }
+    output
+}
+
+/// Renders one node, using fold panels for thinking, search, and details tags.
+fn render_foldable_node(
+    node: &MarkdownNodeStable,
+    index: usize,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    match xml_tag_name(node).as_deref() {
+        Some("think") | Some("thinking") => {
+            render_think_panel(node, index, content_width, text, fold)
+        }
+        Some("search") => render_search_panel(node, index, content_width, text, fold),
+        Some("details") => render_details_panel(node, index, content_width, text, fold),
+        _ => {
+            let lines = render_markdown_block_lines(node, content_width, text);
+            let mut output = FoldedLines {
+                lines,
+                ..Default::default()
+            };
+            if let (Some(context), Some(tag)) = (fold, xml_tag_name(node)) {
+                output.xml.push(super::compose::XmlSurfaceSlot {
+                    key: (context.message_timestamp, index, tag.clone()),
+                    tag,
+                    content: node.content.clone(),
+                    lines: 0..output.lines.len(),
+                });
+            }
+            output
+        }
+    }
+}
+
+/// Renders one completed tool invocation as a compact merged row.
+fn render_merged_tool_pair(
+    pair: &(ToolMergeNode, ToolMergeNode),
+    content_width: usize,
+    fold: Option<&FoldRenderContext>,
+    stable_key: String,
+    indent: usize,
+) -> FoldedLines {
+    let expanded = fold
+        .map(|context| context.is_expanded(&stable_key, false))
+        .unwrap_or(false);
+    let inner_width = content_width.saturating_sub(indent).max(1);
+    let mut output = FoldedLines::default();
+    let header_start = output.lines.len();
+    output.lines.push(render_merged_tool_call_result_line(
+        &pair.0.tool_name,
+        &pair.0.params,
+        pair.1.is_success,
+        inner_width,
+    ));
+    if expanded {
+        output
+            .lines
+            .extend(render_merged_tool_detail_lines(pair, inner_width));
+    }
+    if let Some(context) = fold {
+        output.push_hit_range(
+            header_start..output.lines.len(),
+            context.target(stable_key.clone(), expanded),
+        );
+    }
+    output
+}
+
+/// Renders a disclosure panel for assistant thinking content.
+fn render_think_panel(
+    node: &MarkdownNodeStable,
+    index: usize,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    let stable_key = format!("think-{index}");
+    let in_progress = think_is_in_progress(node);
+    let auto_expand = think_should_auto_expand(node);
+    let expanded = fold
+        .map(|context| context.is_expanded(&stable_key, auto_expand))
+        .unwrap_or(auto_expand);
+    let title = if in_progress {
+        fold.and_then(|context| context.thinking_line.cloned())
+            .unwrap_or_else(|| title_line(text.thinking_process()))
+    } else {
+        title_line(text.thinking_process())
+    };
+    let mut output = FoldedLines::default();
+    let header_start = output.lines.len();
+    output.lines.push(fold_header_line(expanded, title));
+    if expanded {
+        let body = xml_inner_body(&node.content).trim();
+        if !body.is_empty() {
+            let inner_width = content_width.saturating_sub(2).max(1);
+            let mut inner = render_markdown_lines(body, inner_width, text);
+            indent_lines(&mut inner, 2);
+            output.lines.extend(inner);
+        }
+    }
+    if let Some(context) = fold {
+        output.push_hit_range(
+            header_start..output.lines.len(),
+            context.target(stable_key, expanded),
+        );
+    }
+    output
+}
+
+/// Renders a disclosure panel for search XML content.
+fn render_search_panel(
+    node: &MarkdownNodeStable,
+    index: usize,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    render_named_fold_panel(
+        node,
+        format!("search-{index}"),
+        text.search_sources(),
+        false,
+        content_width,
+        text,
+        fold,
+    )
+}
+
+/// Renders a disclosure panel for HTML details tags.
+fn render_details_panel(
+    node: &MarkdownNodeStable,
+    index: usize,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    let (summary, body) = details_summary_and_body(&node.content);
+    let title = if summary.is_empty() {
+        text.details_summary().to_string()
+    } else {
+        summary
+    };
+    let stable_key = format!("details-{index}");
+    let auto_expand = details_should_auto_expand(&node.content);
+    let expanded = fold
+        .map(|context| context.is_expanded(&stable_key, auto_expand))
+        .unwrap_or(auto_expand);
+    let mut output = FoldedLines::default();
+    let header_start = output.lines.len();
+    output
+        .lines
+        .push(fold_header_line(expanded, title_line(&title)));
+    if expanded && !body.is_empty() {
+        let inner_width = content_width.saturating_sub(2).max(1);
+        let mut inner = render_markdown_lines(&body, inner_width, text);
+        indent_lines(&mut inner, 2);
+        output.lines.extend(inner);
+    }
+    if let Some(context) = fold {
+        output.push_hit_range(
+            header_start..output.lines.len(),
+            context.target(stable_key, expanded),
+        );
+    }
+    output
+}
+
+/// Renders a named disclosure panel whose body is the XML inner text.
+fn render_named_fold_panel(
+    node: &MarkdownNodeStable,
+    stable_key: String,
+    title: &str,
+    auto_expand: bool,
+    content_width: usize,
+    text: TuiText,
+    fold: Option<&FoldRenderContext>,
+) -> FoldedLines {
+    let expanded = fold
+        .map(|context| context.is_expanded(&stable_key, auto_expand))
+        .unwrap_or(auto_expand);
+    let mut output = FoldedLines::default();
+    let header_start = output.lines.len();
+    output
+        .lines
+        .push(fold_header_line(expanded, title_line(title)));
+    if expanded {
+        let body = xml_inner_body(&node.content).trim();
+        if !body.is_empty() {
+            let inner_width = content_width.saturating_sub(2).max(1);
+            let mut inner = render_markdown_lines(body, inner_width, text);
+            indent_lines(&mut inner, 2);
+            output.lines.extend(inner);
+        }
+    }
+    if let Some(context) = fold {
+        output.push_hit_range(
+            header_start..output.lines.len(),
+            context.target(stable_key, expanded),
+        );
+    }
+    output
+}
+
+/// Builds one compact merged tool row with a trailing success or error mark.
+fn render_merged_tool_call_result_line(
+    tool_name: &str,
+    params: &[(String, String)],
+    is_success: bool,
+    content_width: usize,
+) -> Line<'static> {
+    let (display_name, display_params) = normalize_tool_display_for_strict_proxy(tool_name, params);
+    let display_name = display_name.trim().to_string();
+    let summary = render_tool_param_summary(&display_params, "");
+    let leading_symbol = tool_leading_symbol(&display_name);
+    let status_mark = if is_success { "✓" } else { "×" };
+    let prefix_width = display_width(leading_symbol) + 1 + display_width(&display_name);
+    let status_width = 1 + display_width(status_mark);
+    let summary_limit = content_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(status_width)
+        .saturating_sub(1)
+        .min(TOOL_CALL_INLINE_DETAIL_CHAR_LIMIT);
+    let mut spans = vec![
+        Span::styled(
+            leading_symbol.to_string(),
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            display_name,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let summary = if summary_limit >= 4 {
+        compact_tool_summary(&summary, summary_limit)
+    } else {
+        String::new()
+    };
+    if !summary.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            summary,
+            Style::default().fg(theme::TEXT_SUBTLE),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        status_mark.to_string(),
+        Style::default().fg(if is_success {
+            theme::TOOL_RESULT
+        } else {
+            theme::ERROR
+        }),
+    ));
+    Line::from(spans)
+}
+
+/// Renders expanded call parameters and result text under a merged tool row.
+fn render_merged_tool_detail_lines(
+    pair: &(ToolMergeNode, ToolMergeNode),
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let (_, display_params) =
+        normalize_tool_display_for_strict_proxy(&pair.0.tool_name, &pair.0.params);
+    for (name, value) in &display_params {
+        let raw = format!("{name}={}", normalize_tool_display_text(value));
+        lines.push(Line::from(Span::styled(
+            compact_tool_summary(&raw, content_width.saturating_sub(2).max(1)),
+            Style::default().fg(theme::TEXT_MUTED),
+        )));
+    }
+    if !pair.1.result_text.trim().is_empty() {
+        let result = normalize_tool_display_text(&pair.1.result_text);
+        for raw in result.lines() {
+            lines.push(Line::from(Span::styled(
+                compact_tool_summary(raw, content_width.saturating_sub(2).max(1)),
+                Style::default().fg(if pair.1.is_success {
+                    theme::TOOL_RESULT
+                } else {
+                    theme::ERROR
+                }),
+            )));
+        }
+    }
+    indent_lines(&mut lines, 2);
+    lines
+}
+
+/// Builds a fold disclosure header with a triangle and title.
+fn fold_header_line(expanded: bool, mut title: Line<'static>) -> Line<'static> {
+    let arrow = if expanded { "▾ " } else { "▸ " };
+    title.spans.insert(
+        0,
+        Span::styled(arrow.to_string(), Style::default().fg(theme::TEXT_MUTED)),
+    );
+    title
+}
+
+/// Builds a muted fold title line.
+fn title_line(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(theme::TEXT_MUTED),
+    ))
+}
+
+/// Indents every line in a folded block.
+fn indent_folded_lines(block: &mut FoldedLines, indent: usize) {
+    indent_lines(&mut block.lines, indent);
+}
+
+/// Prepends the indent of an expanded fold body to every rendered line.
+///
+/// The indent doubles as a muted gutter rule and demotes unstyled prose one
+/// step, so expanded thinking, search, tool, and details content stays
+/// distinguishable from the conversation text around it - including when the
+/// reader has scrolled far enough that the fold header is off screen.
+fn indent_lines(lines: &mut [Line<'static>], indent: usize) {
+    if indent == 0 {
+        return;
+    }
+    let gutter = if indent >= 2 {
+        Span::styled(
+            format!("{}│ ", " ".repeat(indent - 2)),
+            Style::default().fg(theme::TEXT_SUBTLE),
+        )
+    } else {
+        Span::raw(" ".repeat(indent))
+    };
+    for line in lines {
+        line.spans.insert(0, gutter.clone());
+        for span in line.spans.iter_mut().skip(1) {
+            if span.style.fg.is_none() {
+                span.style = span.style.fg(theme::FOLD_BODY_TEXT);
+            }
+        }
+    }
 }
 
 fn render_cached_markdown_block(
@@ -1326,6 +1854,9 @@ fn strip_inline_latex_delimiters(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_tool_call_part;
+    use super::*;
+    use crate::tui::fold::TranscriptFoldState;
+    use operit_util::streamnative::NativeMarkdownStreamOperators::NativeMarkdownStreamOperators;
 
     /// Verifies that a generated switch_core tool card renders successfully.
     #[test]
@@ -1341,5 +1872,76 @@ mod tests {
         let params = vec![("node_id".to_string(), "core-test".to_string())];
         let lines = render_tool_call_part("\n switch_core \r\n", &params, 80);
         assert_eq!(lines.len(), 1);
+    }
+
+    /// An expanded group is one click target down to its last body line, and a
+    /// nested tool row inside it keeps its own later hit so clicking that row
+    /// toggles the row rather than collapsing the group.
+    #[test]
+    fn expanded_group_body_records_hits_and_nested_rows_win() {
+        let markup = concat!(
+            "<tool name=\"read_file\" call_id=\"a\"><param name=\"path\">a.txt</param></tool>",
+            "<tool_result name=\"read_file\" status=\"success\"><content>ok</content></tool_result>",
+            "<tool name=\"list_files\" call_id=\"b\"><param name=\"path\">.</param></tool>",
+            "<tool_result name=\"list_files\" status=\"success\"><content>ok2</content></tool_result>",
+        );
+        let nodes = markup.nativeMarkdownSplitByBlock();
+        let mut fold_state = TranscriptFoldState::default();
+        fold_state.set_user_expanded(7, "tools-only-0", true);
+        let context = FoldRenderContext {
+            message_timestamp: 7,
+            is_streaming: false,
+            fold_state: &fold_state,
+            thinking_line: None,
+        };
+
+        let rendered = render_fold_group(
+            &nodes,
+            0,
+            nodes.len() - 1,
+            "tools-only-0",
+            60,
+            TuiLanguage::English.text(),
+            Some(&context),
+        );
+
+        let line_text = |line: &Line<'static>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let nested_line = rendered
+            .lines
+            .iter()
+            .position(|line| line_text(line).contains("list_files"))
+            .expect("the second tool row must render inside the expanded group");
+        assert!(
+            rendered.hits.len() > 2,
+            "every line of the expanded group must be clickable, hits={:?}",
+            rendered
+                .hits
+                .iter()
+                .map(|hit| (hit.line_index, hit.target.stable_key.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            rendered
+                .hits
+                .iter()
+                .any(|hit| hit.line_index == nested_line && hit.target.stable_key == "tools-only-0"),
+            "the group must cover its body lines"
+        );
+        let innermost = rendered
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| hit.line_index == nested_line)
+            .expect("the nested row must record a hit");
+        assert!(
+            innermost.target.stable_key.starts_with("merged-tool-"),
+            "the innermost hit must be the nested tool row, got {}",
+            innermost.target.stable_key
+        );
     }
 }

@@ -8,8 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use operit_host_api::{
     AppListData, AppOperationData, AppUsageTimeEntry, AppUsageTimeResultData, DeviceInfoData,
     HostError, HostResult, LocationData, NotificationData, OCRLanguage, OCRQuality,
-    SystemNotificationActivation, SystemNotificationRequest, SystemOperationHost,
-    SystemSettingData,
+    SystemNotificationRequest, SystemOperationHost, SystemSettingData,
 };
 use uuid::Uuid;
 
@@ -24,23 +23,35 @@ impl AppleSystemOperationHost {
 
 impl SystemOperationHost for AppleSystemOperationHost {
     fn getSystemLanguageCode(&self) -> HostResult<String> {
+        #[cfg(target_os = "ios")]
+        {
+            use core_foundation::base::TCFType;
+            use core_foundation::string::CFString;
+            extern "C" {
+                fn CFLocaleCopyCurrent() -> core_foundation::base::CFTypeRef;
+                fn CFLocaleGetIdentifier(locale: core_foundation::base::CFTypeRef)
+                    -> core_foundation::string::CFStringRef;
+            }
+            unsafe {
+                let locale = CFLocaleCopyCurrent();
+                if locale.is_null() {
+                    return Err(HostError::new("Current iOS locale is unavailable"));
+                }
+                let value = CFString::wrap_under_get_rule(CFLocaleGetIdentifier(locale))
+                    .to_string().replace('_', "-");
+                core_foundation::base::CFRelease(locale.cast());
+                return Ok(value);
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
         let output = run_command_output("defaults", &["read", "-g", "AppleLocale"])?;
         let value = output.trim().replace('_', "-");
         if value.is_empty() {
             return Err(HostError::new("AppleLocale is empty"));
         }
         Ok(value)
-    }
-
-    fn toast(&self, message: &str) -> HostResult<()> {
-        if message.trim().is_empty() {
-            return Err(HostError::new("message parameter is required"));
         }
-        self.sendNotification(&SystemNotificationRequest {
-            title: "Operit".to_string(),
-            message: message.to_string(),
-            activation: SystemNotificationActivation::OpenApplication,
-        })
     }
 
     fn sendNotification(&self, request: &SystemNotificationRequest) -> HostResult<()> {
@@ -529,11 +540,9 @@ fn get_apple_device_info() -> HostResult<DeviceInfoData> {
     let model = "apple".to_string();
     #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     let osVersion = String::new();
-    let hostName = env::var("HOSTNAME").map_err(|error| {
-        HostError::new(format!(
-            "HOSTNAME is required for Apple device info: {error}"
-        ))
-    })?;
+    let hostName = gethostname::gethostname()
+        .into_string()
+        .map_err(|error| HostError::new(format!("Apple host name is not valid UTF-8: {error:?}")))?;
     let mut additionalInfo = BTreeMap::new();
     additionalInfo.insert("Platform".to_string(), apple_platform_name().to_string());
     additionalInfo.insert("Host name".to_string(), hostName.clone());

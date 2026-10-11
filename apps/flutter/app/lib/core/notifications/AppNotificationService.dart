@@ -39,7 +39,6 @@ class AppNotificationService with WidgetsBindingObserver {
         .ownerHostInteractionEvents(
           kinds: <RuntimeHostInteractionKind>[
             RuntimeHostInteractionKind.appNotification,
-            RuntimeHostInteractionKind.toolPermission,
           ],
         )
         .listen(
@@ -67,8 +66,6 @@ class AppNotificationService with WidgetsBindingObserver {
     switch (request.kind) {
       case RuntimeHostInteractionKind.appNotification:
         await _handleAppNotification(request);
-      case RuntimeHostInteractionKind.toolPermission:
-        await _handleToolPermission(request);
       case RuntimeHostInteractionKind.browserAutomation:
       case RuntimeHostInteractionKind.browserSession:
       case RuntimeHostInteractionKind.webVisit:
@@ -86,7 +83,6 @@ class AppNotificationService with WidgetsBindingObserver {
       case RuntimeHostInteractionKind.ttsSynthesis:
       case RuntimeHostInteractionKind.ttsPlayback:
       case RuntimeHostInteractionKind.localInference:
-      case RuntimeHostInteractionKind.webAccessPairing:
         throw StateError(
           'unexpected application notification kind: ${request.kind.name}',
         );
@@ -116,30 +112,6 @@ class AppNotificationService with WidgetsBindingObserver {
       );
     } finally {
       await _acknowledge(request.requestId);
-    }
-  }
-
-  /// Delivers a background notification when an AI tool requires approval.
-  Future<void> _handleToolPermission(
-    RuntimeHostInteractionRequest request,
-  ) async {
-    try {
-      final payload = request.toolPermission;
-      if (payload == null) {
-        throw StateError('tool permission payload is missing');
-      }
-      await _sendWhenBackground(
-        'Operit',
-        'AI tool permission requires approval: ${payload.tool.name}',
-        chatId: null,
-      );
-    } catch (error, stackTrace) {
-      ClientLogger.e(
-        'tool permission notification delivery failed requestId=${request.requestId}',
-        tag: _logTag,
-        error: error,
-        stackTrace: stackTrace,
-      );
     }
   }
 

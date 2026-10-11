@@ -349,7 +349,7 @@ src/lib.rs
 职责：
 
 ```text
-targetObjectId
+target
 CoreCallRequest
 CoreCallResponse
 CoreWatchRequest
@@ -687,7 +687,7 @@ target_arch = "wasm32" -> operit_host_web
 
 ```text
 hosts/web
-apps/web_access/web/operit_runtime_bridge.js
+apps/flutter/app/web/runtime/generated/operit_runtime_bridge.js
 ```
 
 Web host 由浏览器 JS 安装：
@@ -1346,7 +1346,7 @@ Access signed headers：
 
 ```text
 content-type: application/msgpack
-x-operit-link-version: 3
+x-operit-link-version: 4
 x-operit-session
 x-operit-device
 x-operit-signature
@@ -1706,7 +1706,7 @@ JsEngine
 JsToolManager
 JsTools
 JsToolPkgRegistration
-JsNativeInterfaceDelegates
+JsHostOperations
 JsInitRuntimeScriptBuilder
 JsExecutionScriptBuilder
 JsExecutionResultProtocol

@@ -182,7 +182,7 @@ class Math extends StatelessWidget {
       }
 
       final textScaleFactor =
-          this.textScaleFactor ?? MediaQuery.textScaleFactorOf(context);
+          this.textScaleFactor ?? MediaQuery.textScalerOf(context).scale(1.0);
 
       options = MathOptions(
         style: mathStyle,

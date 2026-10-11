@@ -25,6 +25,7 @@ import android.media.projection.MediaProjection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
@@ -109,6 +110,7 @@ class OwnerSystemCapabilityChannel(
     private var musicVolume: Double = 1.0
     private var musicLoopPlayback: Boolean = false
     private var musicMessage: String = "android music player idle"
+    private val locationReader = AndroidLocationReader(activity)
     private val bluetoothClassicSockets = ConcurrentHashMap<String, BluetoothSocket>()
     private val bluetoothClassicServers = ConcurrentHashMap<String, BluetoothServerSocket>()
     private val bluetoothBleSessions = ConcurrentHashMap<String, BluetoothBleSession>()
@@ -242,6 +244,11 @@ class OwnerSystemCapabilityChannel(
     }
 
     /** Executes one generic Core-owned system operation. */
+    /** Delivers the permission result to the location request that owns it. */
+    fun onRequestPermissionsResult(requestCode: Int): Boolean =
+        locationReader.onRequestPermissionsResult(requestCode)
+
+    /** Dispatches owner system operations on the runtime worker. */
     private fun ownerSystemOperation(call: MethodCall, result: MethodChannel.Result) {
         val payload = call.arguments as? Map<*, *>
         if (payload == null) {
@@ -259,6 +266,20 @@ class OwnerSystemCapabilityChannel(
                 val response =
                     when (operation) {
                         "send_notification" -> systemSendNotification(JSONObject(paramsJson))
+                        "get_device_location" -> mapOf(
+                            "resultJson" to JSONObject(locationReader.read(JSONObject(paramsJson))).toString(),
+                        )
+                        "get_notifications" -> {
+                            val params = JSONObject(paramsJson)
+                            mapOf("resultJson" to JSONObject(OperitNotificationListener.read(
+                                activity, params.getInt("limit"), params.getBoolean("includeOngoing"),
+                            )).toString())
+                        }
+                        "get_device_info" -> mapOf(
+                            "resultJson" to AndroidHostDeviceInfo.read(activity.applicationContext),
+                        )
+                        "get_system_setting" -> systemGetSystemSetting(JSONObject(paramsJson))
+                        "modify_system_setting" -> systemModifySystemSetting(JSONObject(paramsJson))
                         "execute_privileged_command" -> systemExecutePrivilegedCommand(JSONObject(paramsJson))
                         else -> throw IllegalArgumentException("unsupported system operation: $operation")
                     }
@@ -269,6 +290,50 @@ class OwnerSystemCapabilityChannel(
                 }
             }
         }
+    }
+
+    /** Reads one exact Android settings namespace and returns its stored value. */
+    private fun systemGetSystemSetting(params: JSONObject): Map<String, String> {
+        val namespace = params.getString("namespace")
+        val setting = params.getString("setting")
+        require(setting.isNotBlank()) { "Android system setting name must not be blank" }
+        val resolver = activity.contentResolver
+        val value = when (namespace) {
+            "system" -> Settings.System.getString(resolver, setting)
+            "secure" -> Settings.Secure.getString(resolver, setting)
+            "global" -> Settings.Global.getString(resolver, setting)
+            else -> throw IllegalArgumentException("unsupported Android settings namespace: $namespace")
+        } ?: throw IllegalStateException("Android system setting does not exist: $namespace/$setting")
+        return mapOf(
+            "resultJson" to JSONObject()
+                .put("namespace", namespace)
+                .put("setting", setting)
+                .put("value", value)
+                .toString(),
+        )
+    }
+
+    /** Writes one Android setting and reads back the value accepted by its provider. */
+    private fun systemModifySystemSetting(params: JSONObject): Map<String, String> {
+        val namespace = params.getString("namespace")
+        val setting = params.getString("setting")
+        val value = params.getString("value")
+        require(setting.isNotBlank()) { "Android system setting name must not be blank" }
+        require(value.isNotEmpty()) { "Android system setting value must not be empty" }
+        val resolver = activity.contentResolver
+        val written = when (namespace) {
+            "system" -> {
+                check(Settings.System.canWrite(activity)) {
+                    "Android WRITE_SETTINGS permission is not granted for $namespace/$setting"
+                }
+                Settings.System.putString(resolver, setting, value)
+            }
+            "secure" -> Settings.Secure.putString(resolver, setting, value)
+            "global" -> Settings.Global.putString(resolver, setting, value)
+            else -> throw IllegalArgumentException("unsupported Android settings namespace: $namespace")
+        }
+        check(written) { "Android system setting write was rejected: $namespace/$setting" }
+        return systemGetSystemSetting(params)
     }
 
     /** Posts one native Android notification requested by the Runtime. */
@@ -329,6 +394,7 @@ class OwnerSystemCapabilityChannel(
     private fun systemExecutePrivilegedCommand(params: JSONObject): Map<String, String> {
         val target =
             when (params.getString("target")) {
+                "root", "root_auto" -> AndroidPrivilegedCommandTarget.RootAuto
                 "root_libsu" -> AndroidPrivilegedCommandTarget.RootLibsu
                 "root_exec" -> AndroidPrivilegedCommandTarget.RootExec
                 "shizuku" -> AndroidPrivilegedCommandTarget.Shizuku
@@ -340,6 +406,7 @@ class OwnerSystemCapabilityChannel(
                 target = target,
                 command = params.getString("command"),
                 timeoutMillis = params.getLong("timeoutMillis"),
+                rootSettings = AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
             )
         return mapOf(
             "resultJson" to
@@ -354,6 +421,7 @@ class OwnerSystemCapabilityChannel(
     /** Verifies the existing host authorization for one privileged command transport. */
     private fun requirePrivilegedCommandAuthorization(target: AndroidPrivilegedCommandTarget) {
         when (target) {
+            AndroidPrivilegedCommandTarget.RootAuto,
             AndroidPrivilegedCommandTarget.RootLibsu,
             AndroidPrivilegedCommandTarget.RootExec -> check(
                 AndroidPrivilegeAuthorization.isRootAuthorized(activity),
@@ -2022,8 +2090,9 @@ class OwnerSystemCapabilityChannel(
     private fun captureScreenshotWithRoot(file: File) {
         val result =
             AndroidPrivilegedCommandExecutor.execute(
-                target = AndroidPrivilegedCommandTarget.RootLibsu,
+                target = AndroidPrivilegedCommandTarget.RootAuto,
                 command = "/system/bin/screencap -p ${shellQuote(file.absolutePath)}",
+                rootSettings = AndroidPrivilegeAuthorization.rootExecutionSettings(activity),
             )
         if (result.exitCode != 0) {
             file.delete()

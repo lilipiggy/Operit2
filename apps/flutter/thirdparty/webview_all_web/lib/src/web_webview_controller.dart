@@ -158,6 +158,28 @@ class WebWebViewController extends PlatformWebViewController {
     });
   }
 
+  // Scale the iframe element itself, not its document: this also supports
+  // cross-origin pages and pages with JavaScript disabled. Keep the host viewport
+  // clipped and resize the CSS viewport inversely so content zoom causes reflow.
+  late final web.HTMLDivElement _viewportElement = web.HTMLDivElement()
+    ..style.width = '100%'
+    ..style.height = '100%'
+    ..style.overflow = 'hidden'
+    ..appendChild(_webWebViewParams.iFrame);
+
+  @override
+  Future<void> setZoomFactor(double zoomFactor) async {
+    if (!zoomFactor.isFinite || zoomFactor <= 0) {
+      throw ArgumentError.value(zoomFactor, 'zoomFactor');
+    }
+    final style = _webWebViewParams.iFrame.style;
+    style.width = '${100 / zoomFactor}%';
+    style.height = '${100 / zoomFactor}%';
+    style.transformOrigin = '0 0';
+    style.transform = 'scale($zoomFactor)';
+    style.display = 'block';
+  }
+
   static const String _scrollBarStyleId = '__webview_all_scrollbars';
   static const String _channelMessageType = '__webview_all_type';
   static const String _javaScriptChannelMessageType = 'javascriptChannel';
@@ -189,6 +211,9 @@ class WebWebViewController extends PlatformWebViewController {
   bool _verticalScrollBarEnabled = true;
   bool _horizontalScrollBarEnabled = true;
   JavaScriptMode _javaScriptMode = JavaScriptMode.unrestricted;
+  final Map<String, String> _userScripts = <String, String>{};
+  int _nextUserScriptIdentifier = 0;
+
   final Map<String, JavaScriptChannelParams> _javaScriptChannels =
       <String, JavaScriptChannelParams>{};
   void Function(JavaScriptConsoleMessage consoleMessage)? _onConsoleMessage;
@@ -237,7 +262,7 @@ class WebWebViewController extends PlatformWebViewController {
     _lastXhrRequestParams = null;
     _lastLoadedType = _NavigationLoadType.html;
     _markLogicalUrlHistoryEntry(_currentUrl!);
-    _webWebViewParams.iFrame.srcdoc = content.toJS;
+    _webWebViewParams.iFrame.srcdoc = _injectDocumentStartScripts(content).toJS;
   }
 
   @override
@@ -293,7 +318,9 @@ class WebWebViewController extends PlatformWebViewController {
   @override
   Future<void> reload() async {
     if (_lastLoadedType == _NavigationLoadType.html) {
-      _webWebViewParams.iFrame.srcdoc = (_lastHtmlStringContent ?? '').toJS;
+      _webWebViewParams.iFrame.srcdoc = _injectDocumentStartScripts(
+        _lastHtmlStringContent!,
+      ).toJS;
       return;
     }
 
@@ -527,6 +554,12 @@ class WebWebViewController extends PlatformWebViewController {
     } else {
       _webWebViewParams.iFrame.style.setProperty('touch-action', 'pan-x pan-y');
     }
+  }
+
+  /// Lets the browser propagate the iframe's color scheme to embedded media queries.
+  @override
+  Future<void> setPreferredColorScheme(Brightness brightness) async {
+    _webWebViewParams.iFrame.style.setProperty('color-scheme', brightness.name);
   }
 
   @override
@@ -816,6 +849,29 @@ class WebWebViewController extends PlatformWebViewController {
       })();
       ''';
   }
+
+  /// Registers document-start code for application-owned browser documents.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    final identifier = 'operit-user-script-${++_nextUserScriptIdentifier}';
+    _userScripts[identifier] = buildUserScriptSource(
+      userScript,
+      platformHandlesMainFrameOnly: true,
+    );
+    return identifier;
+  }
+
+  /// Removes one script from future iframe documents.
+  @override
+  Future<void> removeUserScript(String identifier) async {
+    if (_userScripts.remove(identifier) == null) {
+      throw ArgumentError.value(identifier, 'identifier');
+    }
+  }
+
+  /// Removes all application-owned iframe scripts without removing channels.
+  @override
+  Future<void> removeAllUserScripts() async => _userScripts.clear();
 
   @override
   Future<void> addJavaScriptChannel(
@@ -1239,6 +1295,13 @@ class WebWebViewController extends PlatformWebViewController {
   }
 
   Future<void> _loadUrl(String url, {required bool updateHistory}) async {
+    if (_userScripts.isNotEmpty) {
+      await _updateIFrameFromXhr(
+        LoadRequestParams(uri: Uri.parse(url)),
+        updateHistory: updateHistory,
+      );
+      return;
+    }
     if (!await _shouldNavigate(url)) {
       return;
     }
@@ -1259,6 +1322,7 @@ class WebWebViewController extends PlatformWebViewController {
     _lastLoadedType = _NavigationLoadType.url;
     _lastXhrRequestParams = null;
     _webWebViewParams.iFrame.src = url;
+    _webWebViewParams.iFrame.removeAttribute('srcdoc');
   }
 
   Future<bool> _shouldNavigate(String url) async {
@@ -1346,11 +1410,42 @@ class WebWebViewController extends PlatformWebViewController {
 
     _lastXhrRequestParams = params;
     _lastLoadedType = _NavigationLoadType.xhrResponse;
+    var document = (await response.text().toDart).toDart;
+    if ((_userScripts.isNotEmpty || _javaScriptChannels.isNotEmpty) &&
+        contentType.mimeType == 'text/html') {
+      document = _injectDocumentStartScripts(
+        _injectBaseUrl(document, params.uri.toString()),
+      );
+      _webWebViewParams.iFrame.srcdoc = document.toJS;
+      return;
+    }
+    _webWebViewParams.iFrame.removeAttribute('srcdoc');
     _webWebViewParams.iFrame.src = Uri.dataFromString(
-      (await response.text().toDart).toDart,
+      document,
       mimeType: contentType.mimeType,
       encoding: encoding,
     ).toString();
+  }
+
+  /// Installs channels before user scripts while constructing an owned iframe document.
+  String _injectDocumentStartScripts(String html) {
+    if (_userScripts.isEmpty && _javaScriptChannels.isEmpty) {
+      return html;
+    }
+    final scripts =
+        [
+              for (final name in _javaScriptChannels.keys)
+                _javaScriptChannelScript(name),
+              ..._userScripts.values,
+            ]
+            .map(
+              (source) =>
+                  '<script>${source.replaceAll("</script>", "<\\/script>")}</script>',
+            )
+            .join();
+    final head = RegExp(r'<head[^>]*>', caseSensitive: false).firstMatch(html);
+    final offset = head == null ? 0 : head.end;
+    return html.replaceRange(offset, offset, scripts);
   }
 
   String _injectBaseUrl(String html, String? baseUrl) {
@@ -1546,7 +1641,7 @@ class WebWebViewWidget extends PlatformWebViewWidget {
     final controller = params.controller as WebWebViewController;
     ui_web.platformViewRegistry.registerViewFactory(
       controller._webWebViewParams.iFrame.id,
-      (int viewId) => controller._webWebViewParams.iFrame,
+      (int viewId) => controller._viewportElement,
     );
   }
 

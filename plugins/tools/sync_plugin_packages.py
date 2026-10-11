@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import zipfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,7 +120,10 @@ def _collect_sync_plan(source_dir: Path) -> list[SyncPlanItem]:
     return plans
 
 
-# Runs one command and reports the exact command line on failure.
+# Runs one command and reports the exact command line on failure. The child's
+# stderr is captured and printed when the command fails, so failures carry the
+# actual tool output (pnpm version checks, compile errors) instead of a bare
+# exit code.
 def _run_checked_command(
     command: list[str],
     cwd: Path,
@@ -129,8 +136,13 @@ def _run_checked_command(
         print(f"DRY-RUN-CMD: (cd {cwd}) {command_text}")
         return
     print(f"RUN-CMD: (cd {cwd}) {command_text}")
-    completed = subprocess.run(command, cwd=str(cwd), env=env)
+    completed = subprocess.run(
+        command, cwd=str(cwd), env=env, stderr=subprocess.PIPE, text=True, errors="replace"
+    )
     if completed.returncode != 0:
+        stderr_tail = (completed.stderr or "").strip()[-4000:]
+        if stderr_tail:
+            print(stderr_tail, flush=True)
         raise RuntimeError(f"Command failed with exit code {completed.returncode}: {command_text}")
 
 
@@ -147,13 +159,162 @@ def _host_cargo_environment() -> dict[str, str]:
             text=True,
         )
         environment["SDKROOT"] = completed.stdout.strip()
+    _apply_rustup_proxy_environment(environment)
     return environment
 
 
+# Fills rustup proxy variables when MSBuild or IDE builds omit the user env.
+def _apply_rustup_proxy_environment(environment: dict[str, str]) -> None:
+    if environment.get("RUSTUP_HOME") and environment.get("CARGO_HOME"):
+        return
+    derived: dict[str, str] = {}
+    cargo = shutil.which("cargo")
+    if cargo is not None:
+        cargo_path = Path(cargo)
+        derived.update(_environment_from_cargo_cmd(cargo_path))
+        derived.update(_rustup_proxy_environment_from_cargo(cargo_path))
+    if "RUSTUP_HOME" not in derived or "CARGO_HOME" not in derived:
+        derived.update(_rustup_proxy_environment_from_path(environment.get("PATH", os.environ.get("PATH", ""))))
+    for key, value in derived.items():
+        if not environment.get(key):
+            environment[key] = value
+
+
+# Reads rustup variables assigned by a cargo.cmd wrapper.
+def _environment_from_cargo_cmd(cargo: Path) -> dict[str, str]:
+    if cargo.suffix.lower() not in {".cmd", ".bat"}:
+        sibling = cargo.with_name("cargo.cmd")
+        if not sibling.is_file():
+            sibling = cargo.with_name("cargo.bat")
+        cargo = sibling
+    if not cargo.is_file():
+        return {}
+    derived: dict[str, str] = {}
+    dp0 = str(cargo.parent) + os.sep
+    try:
+        lines = cargo.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.lower().startswith("set "):
+            continue
+        assignment = stripped[4:].strip().strip('"')
+        if "=" not in assignment:
+            continue
+        key, value = assignment.split("=", 1)
+        key = key.strip()
+        if key not in {"CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"}:
+            continue
+        derived[key] = value.replace("%~dp0", dp0).replace("%~DP0", dp0)
+    return derived
+
+
+# Walks PATH for a rustup-proxy cargo.exe when the first cargo is a wrapper.
+def _rustup_proxy_environment_from_path(path_value: str) -> dict[str, str]:
+    names = ("cargo.exe", "cargo")
+    for directory in path_value.split(os.pathsep):
+        if not directory:
+            continue
+        for name in names:
+            candidate = Path(directory) / name
+            derived = _rustup_proxy_environment_from_cargo(candidate)
+            if derived.get("RUSTUP_HOME") and derived.get("CARGO_HOME"):
+                return derived
+    return {}
+
+
+# Derives CARGO_HOME/RUSTUP_HOME from a rustup-proxy cargo executable.
+def _rustup_proxy_environment_from_cargo(cargo: Path) -> dict[str, str]:
+    if not cargo.exists():
+        return {}
+    bin_dir = cargo.resolve().parent
+    rustup_names = ("rustup.exe", "rustup")
+    if not any((bin_dir / name).exists() for name in rustup_names):
+        return {}
+    cargo_home = bin_dir.parent
+    root = cargo_home.parent
+    # Distro rustup shims (for example /usr/bin/cargo next to /usr/bin/rustup)
+    # resolve to system directories; deriving CARGO_HOME from them poisons the
+    # environment with paths like /usr. Only trust a full rustup-managed
+    # layout where the sibling rustup home also exists.
+    for rustup_home in (root / "rustup", root / ".rustup"):
+        if not rustup_home.is_dir():
+            continue
+        derived = {
+            "CARGO_HOME": str(cargo_home),
+            "RUSTUP_HOME": str(rustup_home),
+        }
+        toolchain = _rustup_default_toolchain(rustup_home)
+        if toolchain:
+            derived["RUSTUP_TOOLCHAIN"] = toolchain
+        return derived
+    return {}
+
+
+# Reads the default toolchain pinned by a rustup home.
+def _rustup_default_toolchain(rustup_home: Path) -> str | None:
+    settings = rustup_home / "settings.toml"
+    if not settings.is_file():
+        return None
+    for line in settings.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("default_toolchain"):
+            continue
+        _, _, value = stripped.partition("=")
+        toolchain = value.strip().strip('"').strip("'")
+        return toolchain or None
+    return None
+
+
+# Resolves host tools through the configured toolchain before handing them to subprocess.
 def _platform_command(executable: str) -> str:
+    candidates = [executable]
     if os.name == "nt":
-        return f"{executable}.cmd"
-    return executable
+        # The repository-managed Windows toolchain ships a cargo.cmd wrapper
+        # which pins the rustup toolchain. Prefer it over cargo.exe, because
+        # cargo.exe is a rustup proxy and otherwise depends on the caller's
+        # default-toolchain state (which is often stale inside VS Code).
+        cargo_home = os.environ.get("CARGO_HOME", "").strip()
+        if not cargo_home:
+            derived: dict[str, str] = {}
+            _apply_rustup_proxy_environment(derived)
+            cargo_home = derived.get("CARGO_HOME", "").strip()
+        if cargo_home:
+            configured_wrapper = Path(cargo_home) / "bin" / f"{executable}.cmd"
+            if configured_wrapper.is_file():
+                return str(configured_wrapper)
+        candidates.insert(0, f"{executable}.cmd")
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved is not None:
+            return resolved
+    raise FileNotFoundError(
+        f"Required executable is not available on PATH: {', '.join(candidates)}"
+    )
+
+
+def _typescript_command(repo_root: Path, *, dry_run: bool) -> str:
+    """Resolves the repository-managed TypeScript compiler before PATH."""
+    executable = "tsc.cmd" if os.name == "nt" else "tsc"
+    repository_executable = (
+        repo_root / ".ci-tools" / "typescript" / "node_modules" / ".bin" / executable
+    )
+    if repository_executable.is_file():
+        return str(repository_executable)
+
+    resolved_executable = shutil.which(executable)
+    if resolved_executable is not None:
+        return resolved_executable
+
+    if dry_run:
+        return executable
+
+    raise FileNotFoundError(
+        "TypeScript compiler not found. Expected the repository-managed compiler at "
+        f"{repository_executable} or '{executable}' on PATH."
+    )
 
 
 def _generate_plugin_sdk_types(repo_root: Path, *, dry_run: bool) -> None:
@@ -162,7 +323,7 @@ def _generate_plugin_sdk_types(repo_root: Path, *, dry_run: bool) -> None:
     declaration_root = repo_root / "plugins" / "types"
     _run_checked_command(
         [
-            "cargo",
+            _platform_command("cargo"),
             "run",
             "-p",
             "operit-plugin-sdk-codegen",
@@ -278,27 +439,108 @@ def _compute_hot_reload_signature(output_dir: Path) -> str:
     return digest.hexdigest()
 
 
+# Lists command lines of currently running processes for VM service discovery.
+def _running_process_command_lines() -> list[str]:
+    if os.name == "nt":
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine",
+        ]
+    else:
+        command = ["ps", "-Ao", "args="]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
-def _maybe_hot_reload_buildin(
+
+# Finds the authenticated VM service URI created by Flutter's development service.
+def _discover_vm_service() -> str:
+    uri_pattern = re.compile(
+        r"--vm-service-uri=(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
+    )
+    candidates: set[str] = set()
+    for command_line in _running_process_command_lines():
+        if not re.search(r"\bdevelopment-service\b", command_line):
+            continue
+        match = uri_pattern.search(command_line)
+        if match is None:
+            continue
+        candidate = next(value for value in match.groups() if value)
+        parsed = urllib.parse.urlsplit(candidate)
+        if parsed.scheme in {"http", "https", "ws", "wss"} and parsed.netloc:
+            candidates.add(candidate)
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "Expected exactly one running Flutter development service with an authenticated VM Service URI; "
+            f"found {len(candidates)}"
+        )
+    discovered = next(iter(candidates))
+    print(f"AUTO-DISCOVERED-VM-SERVICE: {discovered}")
+    return discovered
+
+
+# Uploads packages and waits for the running application's reload acknowledgement.
+def _maybe_hot_reload_output(
     source_dir: Path,
     output_dir: Path,
     *,
+    state_key: str,
+    label: str,
     dry_run: bool,
     disabled: bool,
     timeout_seconds: float,
+    vm_service: str | None,
 ) -> None:
     if dry_run or disabled:
         return
+    if vm_service is None:
+        vm_service = _discover_vm_service()
+    parsed = urllib.parse.urlsplit(vm_service)
+    if parsed.scheme not in {"http", "https", "ws", "wss"} or not parsed.netloc:
+        raise ValueError("--vm-service must be a complete authenticated VM Service URL")
+    scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme)
+    path = parsed.path.removesuffix("/ws").rstrip("/") + "/"
+    endpoint = urllib.parse.urlunsplit((scheme, parsed.netloc, path, "", ""))
+
+    # Calls the VM service HTTP interface and rejects protocol errors.
+    def call(method: str, **params: str) -> dict:
+        url = endpoint + method + "?" + urllib.parse.urlencode(params)
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+            payload = json.load(response)
+        if "error" in payload:
+            raise RuntimeError(f"Plugin hot reload failed: {payload['error']}")
+        return payload["result"]
+
+    isolates = []
+    for isolate in call("getVM")["isolates"]:
+        info = call("getIsolate", isolateId=isolate["id"])
+        if "ext.operit.reloadPlugins" in info.get("extensionRPCs", []):
+            isolates.append(isolate["id"])
+    if len(isolates) != 1:
+        raise RuntimeError("Expected exactly one app isolate with ext.operit.reloadPlugins; restart the debug app with the new endpoint")
+    isolate_id = isolates[0]
+    call("ext.operit.reloadPlugins", isolateId=isolate_id, action="begin")
+    for artifact in _iter_signature_files(_collect_hot_reload_outputs(output_dir)):
+        content = base64.b64encode(artifact.read_bytes()).decode("ascii")
+        for offset in range(0, len(content), 24000):
+            call("ext.operit.reloadPlugins", isolateId=isolate_id, action="chunk",
+                 name=artifact.name, content=content[offset:offset + 24000])
+    call("ext.operit.reloadPlugins", isolateId=isolate_id, action="commit")
     signature = _compute_hot_reload_signature(output_dir)
     state_file = source_dir / HOT_RELOAD_STATE_FILE
     state = _load_state(state_file)
-    key = "buildin-output"
-    if state.get(key) == signature:
-        print("HOT-RELOAD-SKIP: buildin output signature unchanged")
-        return
-    state[key] = signature
+    state[state_key] = signature
     _save_state(state_file, state)
-    print("HOT-RELOAD-DONE: buildin output signature recorded")
+    print(f"HOT-RELOAD-DONE: {label} application acknowledged reload")
 
 
 # Builds ToolPkg sources before their synchronization operations run.
@@ -306,6 +548,17 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
     state_file = source_dir / ".sync_state.json"
     state = _load_state(state_file)
     changed = False
+    typescript_command: str | None = None
+
+    def run_typescript(tsconfig: Path) -> None:
+        nonlocal typescript_command
+        if typescript_command is None:
+            typescript_command = _typescript_command(repo_root, dry_run=dry_run)
+        _run_checked_command(
+            [typescript_command, "-p", str(tsconfig)],
+            repo_root,
+            dry_run=dry_run,
+        )
 
     if any(plan.mode == "compile-ts" for plan in plans):
         tsconfig = source_dir / "tsconfig.json"
@@ -313,10 +566,16 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
             raise ValueError(f"Missing tsconfig.json for TypeScript plugins: {source_dir}")
         signature = _compute_paths_signature(repo_root, _collect_root_prebuild_inputs(source_dir))
         key = "prebuild:."
-        if state.get(key) == signature:
+        # A saved input signature does not guarantee that generated files survived cleanup.
+        compiled_outputs_exist = all(
+            (_plugins_root() / ".out" / source_dir.name / f"{plan.source.stem}.js").is_file()
+            for plan in plans
+            if plan.mode == "compile-ts"
+        )
+        if state.get(key) == signature and compiled_outputs_exist:
             print(f"SKIP-PREBUILD: {source_dir}")
         else:
-            _run_checked_command([_platform_command("tsc"), "-p", str(tsconfig)], repo_root, dry_run=dry_run)
+            run_typescript(tsconfig)
             state[key] = signature
             changed = True
 
@@ -326,7 +585,14 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
     )
     for child_dir in child_dirs:
         if _is_script_packed_toolpkg(child_dir):
-            _run_checked_command(["pnpm", "run", "pack:toolpkg"], child_dir, dry_run=dry_run)
+            corepack_command = shutil.which("corepack")
+            if corepack_command is None:
+                raise FileNotFoundError("Corepack is required to build script-packed ToolPkgs")
+            _run_checked_command(
+                [corepack_command, "pnpm", "run", "pack:toolpkg"],
+                child_dir,
+                dry_run=dry_run,
+            )
             continue
 
         tsconfig = child_dir / "tsconfig.json"
@@ -337,7 +603,7 @@ def _prebuild_plans(repo_root: Path, source_dir: Path, plans: list[SyncPlanItem]
         if state.get(key) == signature:
             print(f"SKIP-PREBUILD: {child_dir}")
         else:
-            _run_checked_command([_platform_command("tsc"), "-p", str(tsconfig)], repo_root, dry_run=dry_run)
+            run_typescript(tsconfig)
             state[key] = signature
             changed = True
 
@@ -461,6 +727,7 @@ def main() -> int:
         default=str(plugins_root / ".out" / "examples"),
     )
     parser.add_argument("--no-hot-reload", action="store_true")
+    parser.add_argument("--vm-service", help="Authenticated VM Service URL printed by fvm flutter run")
     parser.add_argument("--hot-reload-timeout", type=float, default=5.0)
     args = parser.parse_args()
 
@@ -484,12 +751,26 @@ def main() -> int:
         total_deleted += deleted
 
     if args.source in {"buildin", "runtime", "all"}:
-        _maybe_hot_reload_buildin(
+        _maybe_hot_reload_output(
             _plugin_packages_root() / "buildin",
             Path(args.buildin_output),
+            state_key="buildin-output",
+            label="buildin",
             dry_run=args.dry_run,
             disabled=bool(args.no_hot_reload),
             timeout_seconds=float(args.hot_reload_timeout),
+            vm_service=args.vm_service,
+        )
+    if args.source in {"external", "runtime", "all"}:
+        _maybe_hot_reload_output(
+            _plugin_packages_root() / "external",
+            Path(args.external_output),
+            state_key="external-output",
+            label="external",
+            dry_run=args.dry_run,
+            disabled=bool(args.no_hot_reload),
+            timeout_seconds=float(args.hot_reload_timeout),
+            vm_service=args.vm_service,
         )
 
     print(

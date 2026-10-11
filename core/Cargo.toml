@@ -9,12 +9,14 @@ members = [
     "crates/provider/local-model",
     "crates/tool/services",
     "crates/plugin/sdk",
+    "crates/plugin/sdk-ipc",
+    "crates/plugin/sdk-ipc-bridge",
     "crates/plugin/codegen",
     "crates/plugin/javascript-bridge",
     "crates/runtime/application",
     "crates/node/route-macros",
     "crates/node/runtime",
-    "crates/access/runtime",
+    "crates/node/peer-link",
     "crates/rslink/runtime",
     "crates/rslink/codegen",
     "crates/proxy/scan",
@@ -23,6 +25,9 @@ members = [
     "crates/proxy/bridge",
     "crates/proxy/local",
     "crates/application/core",
+    "crates/node/edge-contract",
+    "crates/node/edge",
+    "crates/proxy/edge",
     "crates/command/core"
 ]
 resolver = "2"
@@ -35,6 +40,7 @@ publish = false
 [workspace.dependencies]
 async-trait = "0.1"
 futures-util = "0.3"
+getrandom = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "blocking", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

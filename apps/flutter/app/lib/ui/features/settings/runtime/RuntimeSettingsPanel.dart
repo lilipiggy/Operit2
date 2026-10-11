@@ -1,52 +1,89 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
+
+import '../../../common/components/PageActivityMixin.dart';
 
 import '../../../../core/bridge/PlatformCoreProxy.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as generated;
+import '../../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/DeviceSpaceDiscoveryPanel.dart';
+import '../../../common/SpaceJoinWidgets.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../theme/OperitGlassSurface.dart';
+import '../../../theme/OperitTheme.dart';
 import '../components/SettingsControlStyles.dart';
+import '../profile/UserProfileSummaryTile.dart';
+import 'DeviceSpaceGraph.dart';
+import 'NetworkControlPanel.dart';
+import 'SpaceIdentityLabels.dart';
+
+String _deviceInfoName(generated.LinkDeviceInfo info) {
+  final parts = [
+    info.platform.trim(),
+    info.model.trim(),
+  ].where((part) => part.isNotEmpty).toList();
+  return parts.isEmpty ? 'Unknown device' : parts.join('-');
+}
 
 class RuntimeSettingsPanel extends StatefulWidget {
-  const RuntimeSettingsPanel({super.key, this.embedded = false});
+  const RuntimeSettingsPanel({
+    super.key,
+    this.embedded = false,
+    required this.onOpenProfile,
+    this.clients,
+  });
 
   final bool embedded;
+  final VoidCallback onOpenProfile;
+
+  /// Supplies Core clients for tests; the platform link is used by default.
+  final GeneratedCoreProxyClients? clients;
 
   @override
   State<RuntimeSettingsPanel> createState() => _RuntimeSettingsPanelState();
 }
 
-class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
+class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
+    with PageActivityMixin<RuntimeSettingsPanel> {
   bool _busy = false;
+  int _pageGeneration = 0;
+  Map<String, generated.SpaceJoinRequest> _spaceJoins = {};
   String? _connectionMessage;
   bool _connectionFailed = false;
   generated.CoreSpace? _currentDeviceSpace;
+  generated.RuntimeDeviceSpaceTopology? _topology;
+  generated.NetworkControlState? _control;
   Map<String, _PairedRemoteProbeState> _pairedRemoteStates =
       <String, _PairedRemoteProbeState>{};
   Map<String, generated.RuntimePairedDevice> _pairedDevices =
       <String, generated.RuntimePairedDevice>{};
-  final Set<String> _removedSpacePrompted = <String>{};
-  final Set<String> _invalidPairingPrompted = <String>{};
-  int _pairedRemoteProbeGeneration = 0;
   StreamSubscription<Map<String, generated.RuntimePairedDevice>>?
   _pairedDevicesSubscription;
   StreamSubscription<Map<String, generated.RuntimePairedDeviceStatus>>?
   _pairedDeviceStatusesSubscription;
 
-  static const GeneratedCoreProxyClients _clients = GeneratedCoreProxyClients(
-    ProxyCoreRuntimeBridge(coreProxy: platformCoreProxy),
-  );
+  late final GeneratedCoreProxyClients _clients =
+      widget.clients ??
+      const GeneratedCoreProxyClients(
+        ProxyCoreRuntimeBridge(coreProxy: platformCoreProxy),
+      );
 
+  /// Watches device presentation state only while this page is active.
   @override
-  void initState() {
-    super.initState();
+  void onPageActivityChanged(bool active) {
+    _pageGeneration += 1;
+    if (!active) {
+      _pairedDevicesSubscription?.cancel();
+      _pairedDevicesSubscription = null;
+      _pairedDeviceStatusesSubscription?.cancel();
+      _pairedDeviceStatusesSubscription = null;
+      return;
+    }
     unawaited(_refreshCurrentDeviceSpace());
     _watchPairedDevices();
     _watchPairedDeviceStatuses();
@@ -70,7 +107,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
     _pairedDevicesSubscription = _clients.server.runtimeRemoteLinkService
         .pairedDevicesFlow()
         .listen(
-          (devices) => unawaited(_applyPairedDevices(devices)),
+          _applyPairedDevices,
           onError: (Object error, StackTrace stackTrace) {
             if (!mounted) {
               return;
@@ -105,7 +142,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
   void _applyPairedDeviceStatuses(
     Map<String, generated.RuntimePairedDeviceStatus> statuses,
   ) {
-    if (!mounted) {
+    if (!mounted || !isPageActive) {
       return;
     }
     setState(() {
@@ -122,55 +159,35 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
       }
       _pairedRemoteStates = nextStates;
     });
+    unawaited(_refreshCurrentDeviceSpace());
   }
 
   /// Reads the synchronized device space projection from the current device.
   Future<void> _refreshCurrentDeviceSpace() async {
+    if (!mounted || !isPageActive) return;
+    final generation = _pageGeneration;
     try {
       final deviceSpace = await _clients.server.runtimeRemoteLinkService
           .deviceSpace();
-      if (mounted) {
-        setState(() => _currentDeviceSpace = deviceSpace);
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _connectionMessage = error.toString();
-          _connectionFailed = true;
-        });
-      }
-    }
-  }
-
-  /// Opens the synchronized direct-connection graph for the current device space.
-  Future<void> _openDeviceSpaceTopology() async {
-    final currentDeviceSpace = _currentDeviceSpace;
-    if (currentDeviceSpace == null) {
-      throw StateError('current device space is not loaded');
-    }
-    setState(() => _busy = true);
-    try {
+      if (!mounted || !isPageActive || generation != _pageGeneration) return;
       final topology = await _clients.server.runtimeRemoteLinkService
           .deviceSpaceTopology();
-      if (!mounted) {
-        return;
+      if (!mounted || !isPageActive || generation != _pageGeneration) return;
+      final control = await _clients.server.runtimeRemoteLinkService
+          .deviceSpaceControl();
+      if (mounted && isPageActive && generation == _pageGeneration) {
+        setState(() {
+          _currentDeviceSpace = deviceSpace;
+          _topology = topology;
+          _control = control;
+        });
       }
-      await _DeviceSpaceTopologyDialog.show(
-        context,
-        spaceName: currentDeviceSpace.spaceName,
-        topology: topology,
-        onDisconnectDevice: _disconnectDeviceSpaceConnection,
-      );
     } catch (error) {
-      if (mounted) {
+      if (mounted && isPageActive && generation == _pageGeneration) {
         setState(() {
           _connectionMessage = error.toString();
           _connectionFailed = true;
         });
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
       }
     }
   }
@@ -183,18 +200,630 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
         .disconnectDeviceSpaceConnection(deviceId: deviceId);
     final refreshedDeviceSpace = await _clients.server.runtimeRemoteLinkService
         .deviceSpace();
+    final refreshedTopology = await _clients.server.runtimeRemoteLinkService
+        .deviceSpaceTopology();
     if (mounted) {
-      setState(() => _currentDeviceSpace = refreshedDeviceSpace);
+      setState(() {
+        _currentDeviceSpace = refreshedDeviceSpace;
+        _topology = refreshedTopology;
+      });
     }
     return _clients.server.runtimeRemoteLinkService.deviceSpaceTopology();
   }
 
-  /// Applies one paired-device snapshot and refreshes direct connection states.
-  Future<void> _applyPairedDevices(
-    Map<String, generated.RuntimePairedDevice> devices,
+  /// Builds the device rows of the device section.
+  ///
+  /// Membership and direct pairing are independent axes: a relayed member stays
+  /// visible here even though this device never paired with it.
+  List<Widget> _deviceRows(AppLocalizations l10n) {
+    final names = _deviceNames();
+    return <Widget>[
+      ..._pairedRows(l10n, names),
+      ..._memberRows(l10n, names),
+    ];
+  }
+
+  /// Renders the device section content, or the empty hint without any device.
+  List<Widget> _deviceSectionChildren(AppLocalizations l10n) {
+    final rows = _deviceRows(l10n);
+    if (rows.isEmpty) {
+      return <Widget>[
+        Text(
+          l10n.settingsRuntimeNoPairedRemote,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ];
+    }
+    return <Widget>[
+      for (var index = 0; index < rows.length; index++) ...<Widget>[
+        if (index > 0) const SizedBox(height: 10),
+        rows[index],
+      ],
+    ];
+  }
+
+  /// Maps device identifiers to display names for relay-path resolution.
+  Map<String, String> _deviceNames() {
+    return <String, String>{
+      for (final device
+          in _topology?.devices ??
+              const <generated.RuntimeDeviceSpaceDevice>[])
+        device.deviceId: device.deviceName,
+    };
+  }
+
+  /// Returns the synchronized projection of one Space member, when it exists.
+  generated.RuntimeDeviceSpaceDevice? _projectedDevice(String deviceId) {
+    for (final device
+        in _topology?.devices ?? const <generated.RuntimeDeviceSpaceDevice>[]) {
+      if (device.deviceId == deviceId) {
+        return device;
+      }
+    }
+    return null;
+  }
+
+  /// Builds one row per device with a local pairing record.
+  List<Widget> _pairedRows(AppLocalizations l10n, Map<String, String> names) {
+    return <Widget>[
+      for (final device in _pairedDevices.values) _pairedRow(l10n, names, device),
+    ];
+  }
+
+  /// Builds the row of one paired device.
+  ///
+  /// Pairing is a local trust record, so the row stays readable even when the
+  /// device is no longer in the Space: identity and route are simply absent.
+  Widget _pairedRow(
+    AppLocalizations l10n,
+    Map<String, String> names,
+    generated.RuntimePairedDevice device,
+  ) {
+    final deviceId = device.deviceId;
+    final probeState =
+        _pairedRemoteStates[deviceId] ?? _PairedRemoteProbeState.checking;
+    final request = _spaceJoins[deviceId];
+    final pendingJoin = request != null && spaceJoinIsActive(request.status);
+    final member = _currentDeviceSpace?.members.contains(deviceId) ?? false;
+    final projected = _projectedDevice(deviceId);
+    final status =
+        '${_remoteProbeLabel(probeState, l10n)}'
+        '${_reachabilitySuffix(l10n, projected)}';
+    final path = _relayPathText(l10n, names, projected);
+    return _DeviceSpaceRow(
+      leading: _pairedLeading(probeState),
+      title: _deviceInfoName(device.deviceInfo),
+      identity: _identityLabel(l10n, projected),
+      status: status,
+      tag: pendingJoin
+          ? '${spaceJoinStatusText(request, l10n)}${request.reviewerName == null ? '' : ' · ${request.reviewerName}'}'
+          : member
+          ? l10n.deviceSpaceMemberPaired
+          : l10n.deviceSpacePairedOnly,
+      path: path,
+      actions: _pairedActions(
+        l10n,
+        device,
+        request,
+        probeState,
+        pendingJoin,
+        member,
+        projected,
+      ),
+      onTap: () => _showDeviceDetails(
+        icon: _remoteProbeIconData(probeState),
+        name: _deviceInfoName(device.deviceInfo),
+        deviceId: deviceId,
+        statusText: status,
+        pathText: path,
+        hardwareText: _hardwareText(projected, device.deviceInfo),
+        identityLabel: _identityLabel(l10n, projected),
+        capabilityLabels: _capabilityLabels(l10n, projected),
+      ),
+    );
+  }
+
+  /// Builds the paired-device entries: local trust actions for every identity,
+  /// plus the managed-device commands while the device is a Space member.
+  ///
+  /// Joining, reviewing, and unpairing are applicant-side actions, so they are
+  /// offered to every identity; a removed-from-space device keeps its recovery
+  /// action visible until the local record is dropped.
+  List<Widget> _pairedActions(
+    AppLocalizations l10n,
+    generated.RuntimePairedDevice device,
+    generated.SpaceJoinRequest? request,
+    _PairedRemoteProbeState probeState,
+    bool pendingJoin,
+    bool member,
+    generated.RuntimeDeviceSpaceDevice? projected,
+  ) {
+    return <Widget>[
+      if (pendingJoin && request != null)
+        MenuItemButton(
+          onPressed: _busy ? null : () => _showJoinProgress(request),
+          child: Text(l10n.deviceSpaceViewRequest),
+        ),
+      if (device.outbound &&
+          !pendingJoin &&
+          !member &&
+          probeState == _PairedRemoteProbeState.online)
+        MenuItemButton(
+          onPressed: _busy
+              ? null
+              : () => _offerJoiningExistingPairedDeviceSpace(device),
+          child: Text(l10n.settingsRuntimeJoinSpace),
+        ),
+      if (projected != null) ..._managedDeviceActions(l10n, projected),
+      if (probeState == _PairedRemoteProbeState.removedFromSpace)
+        MenuItemButton(
+          onPressed: _busy ? null : _handleRemovedFromSpace,
+          child: Text(l10n.settingsRuntimeRemovedFromSpaceConfirm),
+        ),
+      MenuItemButton(
+        onPressed: _busy ? null : () => _deletePairedDevice(device.deviceId),
+        child: Text(l10n.deviceSpaceUnpair),
+      ),
+    ];
+  }
+
+  /// Opens the join-request progress of one paired device.
+  Future<void> _showJoinProgress(generated.SpaceJoinRequest request) async {
+    final space = await showSpaceJoinProgress(
+      context,
+      clients: _clients,
+      request: request,
+    );
+    if (mounted && space != null) {
+      await _handleJoinedDeviceSpace(space);
+    }
+  }
+
+  /// Builds one row per Space member without a direct pairing.
+  List<Widget> _memberRows(AppLocalizations l10n, Map<String, String> names) {
+    final topology = _topology;
+    if (topology == null) {
+      return const <Widget>[];
+    }
+    return <Widget>[
+      for (final device in topology.devices)
+        if (device.deviceId != topology.currentDeviceId &&
+            !_pairedDevices.containsKey(device.deviceId))
+          _memberRow(l10n, names, device),
+    ];
+  }
+
+  /// Builds the row of one relayed Space member.
+  Widget _memberRow(
+    AppLocalizations l10n,
+    Map<String, String> names,
+    generated.RuntimeDeviceSpaceDevice device,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final icon = device.online ? Icons.lan_outlined : Icons.link_off_outlined;
+    final status =
+        '${_onlineText(l10n, device.online)}'
+        '${_reachabilitySuffix(l10n, device)}';
+    final path = _relayPathText(l10n, names, device);
+    return _DeviceSpaceRow(
+      leading: Icon(icon, color: device.online ? scheme.primary : scheme.error),
+      title: device.deviceName,
+      identity: _identityLabel(l10n, device),
+      status: status,
+      tag: l10n.deviceSpaceMemberNotPaired,
+      path: path,
+      actions: _managedDeviceActions(l10n, device, offerDirectLink: true),
+      onTap: () => _showDeviceDetails(
+        icon: icon,
+        name: device.deviceName,
+        deviceId: device.deviceId,
+        statusText: status,
+        pathText: path,
+        hardwareText: _hardwareText(device, null),
+        identityLabel: _identityLabel(l10n, device),
+        capabilityLabels: _capabilityLabels(l10n, device),
+      ),
+    );
+  }
+
+  /// Builds the managed-device entries the local identity may run.
+  ///
+  /// Command entries appear only when the synchronized policy grants the
+  /// matching capability; an identity without any of them gets no menu unless a
+  /// link-layer entry below applies. Pairing is irrelevant here: a paired member
+  /// and a relayed member are managed alike. `offerDirectLink` adds the
+  /// link-layer entry a relayed member can always run: pairing it adds this
+  /// device's own edge and needs no Space capability, which is why it stays
+  /// outside the capability gates below.
+  ///
+  /// Isolation is a single slot derived from `disconnectedNodeIds`, matching
+  /// the TUI device manager: a quarantined device only offers the lift action,
+  /// an unrestricted one only the isolate action - never both at once.
+  List<Widget> _managedDeviceActions(
+    AppLocalizations l10n,
+    generated.RuntimeDeviceSpaceDevice device, {
+    bool offerDirectLink = false,
+  }) {
+    final isolated = _disconnectedDeviceIds.contains(device.deviceId);
+    return <Widget>[
+      if (offerDirectLink && !isolated)
+        MenuItemButton(
+          onPressed: _busy
+              ? null
+              : () => unawaited(_connectDirectly(device, l10n)),
+          child: Text(l10n.deviceSpaceConnectDirect),
+        ),
+      if (isolated && _localHasCapability('network.members.join'))
+        MenuItemButton(
+          onPressed: () => _runDeviceCommand(
+            () => _clients.server.runtimeRemoteLinkService
+                .admitDeviceSpaceMember(deviceId: device.deviceId),
+            l10n.settingsRuntimeControlDeviceAdmitted,
+          ),
+          child: Text(l10n.settingsRuntimeControlAdmitDevice),
+        ),
+      if (device.currentIdentity != null &&
+          _localHasCapability('network.identity.manage'))
+        MenuItemButton(
+          onPressed: () => _runDeviceCommand(
+            () => _clients.server.runtimeRemoteLinkService
+                .clearDeviceSpaceIdentity(nodeId: device.deviceId),
+            l10n.settingsRuntimeControlIdentityResetDone,
+          ),
+          child: Text(l10n.settingsRuntimeControlClearIdentity),
+        ),
+      if (_localHasCapability('network.identity.assign') &&
+          _assignableRoles().isNotEmpty)
+        MenuItemButton(
+          onPressed: () => unawaited(_assignMemberIdentity(device, l10n)),
+          child: Text(l10n.settingsRuntimeControlAssignIdentity),
+        ),
+      if (!isolated && _localHasCapability('network.connections.disconnect'))
+        MenuItemButton(
+          onPressed: () => _runDeviceCommand(
+            () => _clients.server.runtimeRemoteLinkService
+                .disconnectDeviceSpaceNode(deviceId: device.deviceId),
+            l10n.settingsRuntimeControlDisconnected,
+          ),
+          child: Text(l10n.settingsRuntimeControlDisconnectDevice),
+        ),
+      if (_localHasCapability('network.members.remove'))
+        MenuItemButton(
+          onPressed: () => _runDeviceCommand(
+            () => _clients.server.runtimeRemoteLinkService
+                .removeDeviceSpaceMember(deviceId: device.deviceId),
+            l10n.settingsRuntimeControlRemoved,
+          ),
+          child: Text(l10n.settingsRuntimeControlRemoveDevice),
+        ),
+    ];
+  }
+
+  /// Device ids the Space policy restricts to no direct connection or transit.
+  Set<String> get _disconnectedDeviceIds {
+    final raw = _control?.disconnectedNodeIds;
+    if (raw is Iterable) {
+      return raw.whereType<String>().toSet();
+    }
+    return const <String>{};
+  }
+
+  /// Pairs one relayed member directly without joining the Space again.
+  ///
+  /// The shared pairing dialog owns the whole link-level flow - scanning or an
+  /// explicit address plus the receiver's token, then its six-digit code - and
+  /// completes without a join request because the device is already a member.
+  Future<void> _connectDirectly(
+    generated.RuntimeDeviceSpaceDevice device,
+    AppLocalizations l10n,
   ) async {
-    final generation = ++_pairedRemoteProbeGeneration;
-    if (!mounted || generation != _pairedRemoteProbeGeneration) {
+    await showDeviceSpacePairingDialog(
+      context,
+      clients: _clients,
+      title: l10n.deviceSpaceConnectDirect,
+      hint: l10n.deviceSpaceConnectDirectHint,
+      onlyNodeId: device.deviceId,
+    );
+    if (mounted) {
+      await _refreshCurrentDeviceSpace();
+    }
+  }
+
+  /// Opens the read-only device details reachable without any capability.
+  ///
+  /// The Space projection already carries every member's identity and route,
+  /// so the information stays visible to identities that cannot manage it.
+  Future<void> _showDeviceDetails({
+    required IconData icon,
+    required String name,
+    required String deviceId,
+    required String statusText,
+    required String? pathText,
+    required String? hardwareText,
+    required String? identityLabel,
+    required List<String> capabilityLabels,
+  }) async {
+    final l10n = AppLocalizations.of(context)!;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final scheme = Theme.of(dialogContext).colorScheme;
+        final textTheme = Theme.of(dialogContext).textTheme;
+        final lines = <Widget>[
+          if (identityLabel != null)
+            Text(
+              '${l10n.settingsRuntimeControlCurrentIdentity}: $identityLabel',
+              style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          if (capabilityLabels.isNotEmpty)
+            Text(
+              '${l10n.settingsRuntimeControlCurrentCapabilities}: ${capabilityLabels.join('、')}',
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          Text(
+            statusText,
+            style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          if (pathText != null)
+            Text(
+              pathText,
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          if (hardwareText != null)
+            Text(
+              hardwareText,
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          Text(
+            '${l10n.settingsRuntimeControlDeviceId}: $deviceId',
+            style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ];
+        return AlertDialog(
+          title: Row(
+            children: <Widget>[
+              Icon(icon, color: scheme.primary),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 380,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                for (final line in lines)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: line,
+                  ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(
+                MaterialLocalizations.of(dialogContext).closeButtonLabel,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Names one device state.
+  String _onlineText(AppLocalizations l10n, bool online) => online
+      ? l10n.settingsRuntimePairedOnline
+      : l10n.settingsRuntimePairedOffline;
+
+  /// Describes how one member is currently reached: directly or through relays.
+  String _reachabilitySuffix(
+    AppLocalizations l10n,
+    generated.RuntimeDeviceSpaceDevice? device,
+  ) {
+    if (device == null || !device.online) {
+      return '';
+    }
+    final hops = device.relayHops;
+    return ' · ${hops == null ? l10n.deviceSpaceDirectLink : l10n.deviceSpaceRelayHops(hops)}';
+  }
+
+  /// Renders the planned relay path from this device through every hop to the member.
+  String? _relayPathText(
+    AppLocalizations l10n,
+    Map<String, String> names,
+    generated.RuntimeDeviceSpaceDevice? device,
+  ) {
+    final path = device?.relayPath ?? const <String>[];
+    if (path.isEmpty) {
+      return null;
+    }
+    return '${l10n.deviceSpaceRelayPath}: ${[
+      l10n.deviceSpaceLocalDevice,
+      for (final hop in path) names[hop] ?? hop,
+    ].join(' → ')}';
+  }
+
+  /// Names the Space identity of one member, when the projection carries it.
+  String? _identityLabel(
+    AppLocalizations l10n,
+    generated.RuntimeDeviceSpaceDevice? device,
+  ) {
+    final identity = device?.currentIdentity;
+    return identity == null
+        ? null
+        : spaceIdentityDisplayName(identity.displayName, l10n);
+  }
+
+  /// Lists the readable capabilities of one member's identity.
+  List<String> _capabilityLabels(
+    AppLocalizations l10n,
+    generated.RuntimeDeviceSpaceDevice? device,
+  ) {
+    final identity = device?.currentIdentity;
+    if (identity == null) {
+      return const <String>[];
+    }
+    return spaceCapabilityValues(identity.capabilities)
+        .map((value) => spaceCapabilityLabel(value, l10n))
+        .toList(growable: false);
+  }
+
+  /// Describes platform and Core version of one device for the details view.
+  String? _hardwareText(
+    generated.RuntimeDeviceSpaceDevice? device,
+    generated.LinkDeviceInfo? fallback,
+  ) {
+    final values = device != null
+        ? <String>[device.platform, device.coreVersion ?? '']
+        : <String>[fallback?.platform ?? '', fallback?.model ?? ''];
+    final text = values
+        .where((value) => value.trim().isNotEmpty)
+        .join(' · ');
+    return text.isEmpty ? null : text;
+  }
+
+  /// Builds the leading status glyph of one paired device.
+  Widget _pairedLeading(_PairedRemoteProbeState state) {
+    if (state == _PairedRemoteProbeState.checking) {
+      return const SizedBox(
+        width: 24,
+        height: 24,
+        child: Center(child: M3LoadingIndicator(size: 18)),
+      );
+    }
+    return Icon(
+      _remoteProbeIconData(state),
+      color: _remoteProbeColor(Theme.of(context).colorScheme, state),
+    );
+  }
+
+  /// Reports whether the current device identity holds one capability.
+  bool _localHasCapability(String capability) {
+    final topology = _topology;
+    if (topology == null) {
+      return false;
+    }
+    for (final device in topology.devices) {
+      if (device.deviceId != topology.currentDeviceId) {
+        continue;
+      }
+      final identity = device.currentIdentity;
+      if (identity == null) {
+        return false;
+      }
+      return identity.capabilities.contains('*') ||
+          identity.capabilities.contains(capability);
+    }
+    return false;
+  }
+
+  /// Lists the identities this device may assign: every capability must already be held.
+  List<generated.NetworkControlRole> _assignableRoles() {
+    final control = _control;
+    if (control == null) {
+      return const <generated.NetworkControlRole>[];
+    }
+    return control.roles.values
+        .where(
+          (role) => _capabilityValues(
+            role.capabilities,
+          ).every(_localHasCapability),
+        )
+        .toList(growable: false);
+  }
+
+  /// Executes one device-management command and refreshes the projection.
+  Future<void> _runDeviceCommand(
+    Future<void> Function() command,
+    String feedback,
+  ) async {
+    try {
+      await command();
+      await _refreshCurrentDeviceSpace();
+      if (mounted) {
+        _showDeviceFeedback(feedback);
+      }
+    } catch (error) {
+      if (mounted) {
+        _showDeviceFeedback(error.toString());
+      }
+    }
+  }
+
+  /// Assigns one of the locally assignable identities to a Space member.
+  Future<void> _assignMemberIdentity(
+    generated.RuntimeDeviceSpaceDevice device,
+    AppLocalizations l10n,
+  ) async {
+    final roles = _assignableRoles();
+    if (roles.isEmpty) {
+      return;
+    }
+    final roleId = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: Text(l10n.settingsRuntimeControlAssignIdentity),
+        children: <Widget>[
+          for (final role in roles)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(dialogContext).pop(role.roleId),
+              child: Text(role.displayName),
+            ),
+        ],
+      ),
+    );
+    if (roleId == null || !mounted) {
+      return;
+    }
+    await _runDeviceCommand(
+      () => _clients.server.runtimeRemoteLinkService.setDeviceSpaceIdentity(
+        assignment: generated.NetworkControlIdentityAssignment(
+          nodeId: device.deviceId,
+          roleId: roleId,
+        ),
+      ),
+      l10n.settingsRuntimeControlIdentityAssignment,
+    );
+  }
+
+  /// Surfaces one device-management outcome without leaving the settings page.
+  void _showDeviceFeedback(String message) {
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Normalizes the generated identity capability container into plain strings.
+  List<String> _capabilityValues(Object? capabilities) {
+    if (capabilities is Iterable<Object?>) {
+      return capabilities
+          .map((capability) => capability.toString())
+          .toList(growable: false);
+    }
+    return const <String>[];
+  }
+
+  /// Applies one paired-device snapshot without network probing.
+  void _applyPairedDevices(Map<String, generated.RuntimePairedDevice> devices) {
+    if (!mounted || !isPageActive) {
       return;
     }
     setState(() {
@@ -205,101 +834,6 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
               _pairedRemoteStates[deviceId] ?? _PairedRemoteProbeState.checking,
       };
     });
-    final results = await Future.wait(
-      devices.keys.map((deviceId) async {
-        final state = await _probePairedDevice(deviceId);
-        return MapEntry(deviceId, state);
-      }),
-    );
-    if (!mounted || generation != _pairedRemoteProbeGeneration) {
-      return;
-    }
-    setState(() {
-      final nextStates = Map<String, _PairedRemoteProbeState>.from(
-        _pairedRemoteStates,
-      );
-      for (final entry in results) {
-        final currentState = nextStates[entry.key];
-        if (entry.value == _PairedRemoteProbeState.error &&
-            currentState != null &&
-            currentState != _PairedRemoteProbeState.checking &&
-            currentState != _PairedRemoteProbeState.error) {
-          continue;
-        }
-        nextStates[entry.key] = entry.value;
-      }
-      _pairedRemoteStates = nextStates;
-    });
-    final removedDeviceIds = results
-        .where(
-          (entry) => entry.value == _PairedRemoteProbeState.removedFromSpace,
-        )
-        .map((entry) => entry.key)
-        .toSet();
-    _removedSpacePrompted.removeWhere(
-      (deviceId) => !removedDeviceIds.contains(deviceId),
-    );
-    final newlyRemovedDeviceId = removedDeviceIds
-        .where((deviceId) => !_removedSpacePrompted.contains(deviceId))
-        .firstOrNull;
-    if (newlyRemovedDeviceId != null) {
-      _removedSpacePrompted.add(newlyRemovedDeviceId);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          unawaited(_handleRemovedFromSpace());
-        }
-      });
-    }
-    final invalidDeviceIds = results
-        .where((entry) => entry.value == _PairedRemoteProbeState.invalid)
-        .map((entry) => entry.key)
-        .toSet();
-    _invalidPairingPrompted.removeWhere(
-      (deviceId) => !invalidDeviceIds.contains(deviceId),
-    );
-    final newlyInvalidDeviceId = invalidDeviceIds
-        .where((deviceId) => !_invalidPairingPrompted.contains(deviceId))
-        .firstOrNull;
-    if (newlyInvalidDeviceId != null) {
-      _invalidPairingPrompted.add(newlyInvalidDeviceId);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          unawaited(_handleInvalidPairing(newlyInvalidDeviceId));
-        }
-      });
-    }
-  }
-
-  /// Reads the active direct-connection state for one paired device.
-  Future<_PairedRemoteProbeState> _probePairedDevice(String deviceId) async {
-    try {
-      final status = await _clients.server.runtimeRemoteLinkService
-          .pairedDeviceStatus(deviceId: deviceId);
-      return _pairedRemoteStateFromStatus(status);
-    } catch (_) {
-      return _PairedRemoteProbeState.error;
-    }
-  }
-
-  /// Informs the user that the remote device has revoked this pairing.
-  Future<void> _handleInvalidPairing(String deviceId) async {
-    if (!mounted || !_pairedDevices.containsKey(deviceId)) {
-      return;
-    }
-    final l10n = AppLocalizations.of(context)!;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(l10n.settingsRuntimePairingRevokedTitle),
-        content: Text(l10n.settingsRuntimePairingRevokedMessage),
-        actions: <Widget>[
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: Text(l10n.settingsRuntimePairingRevokedConfirm),
-          ),
-        ],
-      ),
-    );
   }
 
   /// Removes every local pairing record associated with one device.
@@ -372,35 +906,6 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
     }
   }
 
-  /// Persists the explicit Link carrier selected for one outbound paired device.
-  Future<void> _setPairedDeviceTransport(
-    generated.RuntimePairedDevice device,
-    generated.LinkTransportPreference transport,
-  ) async {
-    final name = device.outboundSessionName;
-    if (name == null) {
-      return;
-    }
-    setState(() => _busy = true);
-    try {
-      await _clients.server.runtimeRemoteLinkService.setPairedRemoteTransport(
-        name: name,
-        transport: transport,
-      );
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _connectionMessage = error.toString();
-          _connectionFailed = true;
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
   /// Prompts for and persists a new name for the current device space.
   Future<void> _renameCurrentDeviceSpace() async {
     final currentDeviceSpace = _currentDeviceSpace;
@@ -421,6 +926,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
       if (mounted) {
         setState(() => _currentDeviceSpace = renamed);
       }
+      await _refreshTopology();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -469,6 +975,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
           _connectionFailed = false;
         });
       }
+      await _refreshTopology();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -487,8 +994,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
   Future<void> _offerJoiningExistingPairedDeviceSpace(
     generated.RuntimePairedDevice device,
   ) async {
-    final sessionName = device.outboundSessionName;
-    if (sessionName == null) {
+    if (!device.outbound) {
       throw StateError('joining a device space requires an outbound pairing');
     }
     final deviceInfo = device.deviceInfo;
@@ -497,8 +1003,8 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
       final joined = await confirmAndJoinPairedDeviceSpace(
         context: context,
         clients: _clients,
-        sessionName: sessionName,
-        deviceName: '${deviceInfo.platform}-${deviceInfo.model}',
+        deviceId: device.deviceId,
+        deviceName: _deviceInfoName(deviceInfo),
       );
       if (mounted && joined != null) {
         setState(() {
@@ -526,11 +1032,23 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
     if (!mounted) {
       return;
     }
+    final topology = await _clients.server.runtimeRemoteLinkService
+        .deviceSpaceTopology();
     setState(() {
       _currentDeviceSpace = deviceSpace;
+      _topology = topology;
       _connectionMessage = null;
       _connectionFailed = false;
     });
+  }
+
+  /// Refreshes the visible device graph after a space mutation.
+  Future<void> _refreshTopology() async {
+    final topology = await _clients.server.runtimeRemoteLinkService
+        .deviceSpaceTopology();
+    if (mounted) {
+      setState(() => _topology = topology);
+    }
   }
 
   /// Mirrors discovery activity so the surrounding settings actions stay stable.
@@ -540,60 +1058,61 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
     }
   }
 
+  void _applySpaceJoins(List<generated.SpaceJoinRequest> requests) {
+    final next = <String, generated.SpaceJoinRequest>{};
+    for (final request in requests) {
+      final old = next[request.targetDeviceId];
+      if (old == null || request.createdAt > old.createdAt) {
+        next[request.targetDeviceId] = request;
+      }
+    }
+    if (next.length == _spaceJoins.length &&
+        next.entries.every((e) {
+          final old = _spaceJoins[e.key];
+          return old?.requestId == e.value.requestId &&
+              old?.status == e.value.status &&
+              old?.assignmentVersion == e.value.assignmentVersion &&
+              old?.reviewerName == e.value.reviewerName;
+        })) {
+      return;
+    }
+    if (mounted) setState(() => _spaceJoins = next);
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final children = <Widget>[
+      _DeviceSpaceOverviewCard(
+        deviceSpace: _currentDeviceSpace,
+        topology: _topology,
+        busy: _busy,
+        onRename: _renameCurrentDeviceSpace,
+        onLeave: _leaveCurrentDeviceSpace,
+        onOpenProfile: widget.onOpenProfile,
+        onDisconnectDevice: _disconnectDeviceSpaceConnection,
+        connectionMessage: _connectionMessage,
+        connectionFailed: _connectionFailed,
+      ),
       _SectionCard(
-        title: l10n.settingsRuntimeCurrentSpace,
+        title: l10n.deviceSpaceDevices,
+        headerActions: DeviceSpaceDiscoveryPanel(
+          clients: _clients,
+          enabled: !_busy,
+          onJoined: _handleJoinedDeviceSpace,
+          onBusyChanged: _handleDiscoveryBusyChanged,
+          onRequestsChanged: _applySpaceJoins,
+        ),
         children: <Widget>[
-          _CurrentDeviceSpaceLine(
-            deviceSpace: _currentDeviceSpace,
-            busy: _busy,
-            onViewTopology: _openDeviceSpaceTopology,
-            onRename: _renameCurrentDeviceSpace,
-            onLeave: _leaveCurrentDeviceSpace,
-          ),
-          if (_connectionMessage != null) ...<Widget>[
-            const SizedBox(height: 8),
-            _InlineStatus(
-              message: _connectionMessage!,
-              failed: _connectionFailed,
-            ),
-          ],
+          ..._deviceSectionChildren(l10n),
         ],
       ),
       _SectionCard(
-        title: l10n.settingsRuntimeRemoteTitle,
+        title: l10n.settingsRuntimeIdentitiesAndPermissions,
         children: <Widget>[
-          Text(
-            l10n.settingsRuntimeRemoteDescription,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 8),
-          _PairedDeviceList(
-            devices: _pairedDevices,
-            busy: _busy,
-            states: _pairedRemoteStates,
-            currentMemberIds:
-                _currentDeviceSpace?.members.toSet() ?? <String>{},
-            onJoin: _offerJoiningExistingPairedDeviceSpace,
-            onDelete: _deletePairedDevice,
-            onTransportChanged: _setPairedDeviceTransport,
-            onRemovedFromSpace: _handleRemovedFromSpace,
-          ),
-        ],
-      ),
-      _SectionCard(
-        title: l10n.settingsRuntimeDiscoverSpaces,
-        children: <Widget>[
-          DeviceSpaceDiscoveryPanel(
+          NetworkControlPanel(
             clients: _clients,
-            enabled: !_busy,
-            onJoined: _handleJoinedDeviceSpace,
-            onBusyChanged: _handleDiscoveryBusyChanged,
+            onChanged: _refreshCurrentDeviceSpace,
           ),
         ],
       ),
@@ -604,10 +1123,85 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel> {
         children: children,
       );
     }
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-      children: children,
+    return _DeviceSpaceBackdrop(
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+        children: children,
+      ),
     );
+  }
+}
+
+class _DeviceSpaceBackdrop extends StatelessWidget {
+  const _DeviceSpaceBackdrop({required this.child});
+
+  final Widget child;
+
+  /// Paints the violet starfield behind the complete device-space workflow.
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _DeviceSpaceBackdropPainter(
+        base: Theme.of(context).colorScheme.surface,
+        glow: Theme.of(context).colorScheme.primary,
+        secondary: Theme.of(context).colorScheme.secondary,
+      ),
+      child: child,
+    );
+  }
+}
+
+class _DeviceSpaceBackdropPainter extends CustomPainter {
+  const _DeviceSpaceBackdropPainter({
+    required this.base,
+    required this.glow,
+    required this.secondary,
+  });
+
+  final Color base;
+  final Color glow;
+  final Color secondary;
+
+  /// Draws a subtle diagonal gradient and fixed sparse stars.
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: <Color>[
+            Color.alphaBlend(glow.withValues(alpha: 0.18), base),
+            Color.alphaBlend(secondary.withValues(alpha: 0.08), base),
+            base,
+          ],
+          stops: const <double>[0, 0.42, 1],
+        ).createShader(rect),
+    );
+    final starPaint = Paint()..color = glow.withValues(alpha: 0.26);
+    final stars = <Offset>[
+      Offset(size.width * 0.07, size.height * 0.12),
+      Offset(size.width * 0.22, size.height * 0.23),
+      Offset(size.width * 0.42, size.height * 0.13),
+      Offset(size.width * 0.64, size.height * 0.3),
+      Offset(size.width * 0.83, size.height * 0.18),
+      Offset(size.width * 0.91, size.height * 0.57),
+      Offset(size.width * 0.35, size.height * 0.72),
+      Offset(size.width * 0.74, size.height * 0.84),
+    ];
+    for (final star in stars) {
+      canvas.drawCircle(star, 1.8, starPaint);
+    }
+  }
+
+  /// Repaints the backdrop when the active theme colors change.
+  @override
+  bool shouldRepaint(covariant _DeviceSpaceBackdropPainter oldDelegate) {
+    return oldDelegate.base != base ||
+        oldDelegate.glow != glow ||
+        oldDelegate.secondary != secondary;
   }
 }
 
@@ -636,11 +1230,338 @@ _PairedRemoteProbeState _pairedRemoteStateFromStatus(
   };
 }
 
+class _DeviceSpaceOverviewCard extends StatelessWidget {
+  const _DeviceSpaceOverviewCard({
+    required this.deviceSpace,
+    required this.topology,
+    required this.busy,
+    required this.onRename,
+    required this.onLeave,
+    required this.onOpenProfile,
+    required this.onDisconnectDevice,
+    required this.connectionMessage,
+    required this.connectionFailed,
+  });
+
+  final generated.CoreSpace? deviceSpace;
+  final generated.RuntimeDeviceSpaceTopology? topology;
+  final bool busy;
+  final VoidCallback onRename;
+  final VoidCallback onLeave;
+  final VoidCallback onOpenProfile;
+  final Future<generated.RuntimeDeviceSpaceTopology> Function(String deviceId)
+  onDisconnectDevice;
+  final String? connectionMessage;
+  final bool connectionFailed;
+
+  /// Builds the visual device-space overview shown at the top of settings.
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final scheme = Theme.of(context).colorScheme;
+    final space = deviceSpace;
+    if (space == null) {
+      return _SectionCard(
+        title: l10n.settingsRuntimeCurrentSpace,
+        children: <Widget>[
+          SizedBox(
+            height: 190,
+            child: Center(child: M3LoadingIndicator(size: 24)),
+          ),
+        ],
+      );
+    }
+    final graph = topology;
+    if (graph == null) {
+      return _SectionCard(
+        title: l10n.settingsRuntimeCurrentSpace,
+        children: <Widget>[
+          SizedBox(
+            height: 190,
+            child: Center(child: M3LoadingIndicator(size: 24)),
+          ),
+        ],
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: OperitGlassSurface(
+        color: scheme.surface.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.24),
+        ),
+        material: true,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 568;
+            return Padding(
+              padding: compact
+                  ? const EdgeInsets.all(10)
+                  : const EdgeInsets.fromLTRB(14, 14, 14, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: <Widget>[
+                      Expanded(
+                        child: _DeviceSpaceIdentityChip(onTap: onOpenProfile),
+                      ),
+                      const SizedBox(width: 8),
+                      PopupMenuButton<_DeviceSpaceMenuAction>(
+                        tooltip: '空间操作',
+                        onSelected: (action) {
+                          switch (action) {
+                            case _DeviceSpaceMenuAction.rename:
+                              onRename();
+                            case _DeviceSpaceMenuAction.leave:
+                              onLeave();
+                          }
+                        },
+                        itemBuilder: (context) =>
+                            <PopupMenuEntry<_DeviceSpaceMenuAction>>[
+                              PopupMenuItem<_DeviceSpaceMenuAction>(
+                                value: _DeviceSpaceMenuAction.rename,
+                                enabled: !busy,
+                                child: ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(Icons.edit_outlined),
+                                  title: Text(l10n.settingsRuntimeRenameSpace),
+                                ),
+                              ),
+                              PopupMenuItem<_DeviceSpaceMenuAction>(
+                                value: _DeviceSpaceMenuAction.leave,
+                                enabled: !busy && space.members.length > 1,
+                                child: ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(Icons.logout_outlined),
+                                  title: Text(l10n.settingsRuntimeLeaveSpace),
+                                ),
+                              ),
+                            ],
+                        child: const Icon(Icons.more_horiz_rounded),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: compact ? 8 : 12),
+                  DeviceSpaceGraph(
+                    topology: graph,
+                    onDisconnectDevice: onDisconnectDevice,
+                    busy: busy,
+                  ),
+                  if (connectionMessage != null) ...<Widget>[
+                    const SizedBox(height: 8),
+                    _InlineStatus(
+                      message: connectionMessage!,
+                      failed: connectionFailed,
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+enum _DeviceSpaceMenuAction { rename, leave }
+
+class _DeviceSpaceIdentityChip extends StatefulWidget {
+  const _DeviceSpaceIdentityChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_DeviceSpaceIdentityChip> createState() =>
+      _DeviceSpaceIdentityChipState();
+}
+
+class _DeviceSpaceIdentityChipState extends State<_DeviceSpaceIdentityChip> {
+  static const GeneratedCoreProxyClients _clients = GeneratedCoreProxyClients(
+    ProxyCoreRuntimeBridge(coreProxy: platformCoreProxy),
+  );
+
+  String? _githubAvatarUrl;
+  String? _avatarLookupKey;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _resolveFallbackAvatar();
+  }
+
+  void _resolveFallbackAvatar() {
+    final customAvatarUri = OperitTheme.of(
+      context,
+    ).themePreferenceSnapshot.customUserAvatarUri?.trim();
+    final identityId = RuntimeBootstrapManager.instance.activeIdentity.id;
+    final lookupKey = '$identityId|${customAvatarUri ?? ''}';
+    if (_avatarLookupKey == lookupKey) {
+      return;
+    }
+    _avatarLookupKey = lookupKey;
+    if (customAvatarUri != null && customAvatarUri.isNotEmpty) {
+      if (_githubAvatarUrl != null && mounted) {
+        setState(() => _githubAvatarUrl = null);
+      }
+      return;
+    }
+    unawaited(_loadGithubAvatar());
+  }
+
+  Future<void> _loadGithubAvatar() async {
+    try {
+      final user = await _clients.preferencesGitHubAuthPreferences
+          .getCurrentUserInfo();
+      final avatarUrl = user?.avatarUrl.trim();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _githubAvatarUrl = avatarUrl == null || avatarUrl.isEmpty
+            ? null
+            : avatarUrl;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _githubAvatarUrl = null);
+      }
+    }
+  }
+
+  /// Builds the identity selector shown above the current-space title.
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final identity = RuntimeBootstrapManager.instance.activeIdentity;
+    final name = runtimeIdentityDisplayName(identity, l10n);
+    final scheme = Theme.of(context).colorScheme;
+    final customAvatarUri = OperitTheme.of(
+      context,
+    ).themePreferenceSnapshot.customUserAvatarUri;
+    final suffix = Localizations.localeOf(context).languageCode == 'zh'
+        ? '的设备空间'
+        : l10n.settingsRuntimeCurrentSpace;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return InkWell(
+          onTap: widget.onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: constraints.hasBoundedWidth
+                  ? constraints.maxWidth
+                  : double.infinity,
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: scheme.outlineVariant.withValues(alpha: 0.4),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(7, 4, 9, 4),
+                child: Row(
+                  children: <Widget>[
+                    _IdentityChipAvatar(
+                      customAvatarUri: customAvatarUri,
+                      githubAvatarUrl: _githubAvatarUrl,
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      flex: 2,
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: scheme.primary,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      flex: 3,
+                      child: Text(
+                        suffix,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: scheme.onSurface,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _IdentityChipAvatar extends StatelessWidget {
+  const _IdentityChipAvatar({
+    required this.customAvatarUri,
+    required this.githubAvatarUrl,
+  });
+
+  final String? customAvatarUri;
+  final String? githubAvatarUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final customPath = customAvatarUri?.trim();
+    if (customPath != null && customPath.isNotEmpty) {
+      return UserProfileAvatar(storagePath: customPath, size: 40);
+    }
+    final githubUrl = githubAvatarUrl?.trim();
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 40,
+      height: 40,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: colorScheme.surfaceContainerHighest,
+        border: Border.all(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.45),
+        ),
+      ),
+      child: githubUrl == null || githubUrl.isEmpty
+          ? Icon(Icons.person_outline, size: 24, color: colorScheme.primary)
+          : Image.network(
+              githubUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) => Icon(
+                Icons.person_outline,
+                size: 24,
+                color: colorScheme.primary,
+              ),
+            ),
+    );
+  }
+}
+
 class _SectionCard extends StatelessWidget {
-  const _SectionCard({required this.title, required this.children});
+  const _SectionCard({
+    required this.title,
+    required this.children,
+    this.headerActions,
+  });
 
   final String title;
   final List<Widget> children;
+  final Widget? headerActions;
 
   @override
   Widget build(BuildContext context) {
@@ -659,9 +1580,18 @@ class _SectionCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Text(
-                title,
-                style: SettingsControlStyles.sectionTitleTextStyle(context),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: SettingsControlStyles.sectionTitleTextStyle(
+                        context,
+                      ),
+                    ),
+                  ),
+                  ?headerActions,
+                ],
               ),
               const SizedBox(height: 8),
               ...children,
@@ -671,998 +1601,6 @@ class _SectionCard extends StatelessWidget {
       ),
     );
   }
-}
-
-class _CurrentDeviceSpaceLine extends StatelessWidget {
-  const _CurrentDeviceSpaceLine({
-    required this.deviceSpace,
-    required this.busy,
-    required this.onViewTopology,
-    required this.onRename,
-    required this.onLeave,
-  });
-
-  final generated.CoreSpace? deviceSpace;
-  final bool busy;
-  final VoidCallback onViewTopology;
-  final VoidCallback onRename;
-  final VoidCallback onLeave;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context)!;
-    final currentDeviceSpace = deviceSpace;
-    if (currentDeviceSpace == null) {
-      return const SizedBox(
-        height: 48,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: M3LoadingIndicator(size: 20),
-        ),
-      );
-    }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Icon(Icons.hub_outlined, color: colorScheme.primary),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                currentDeviceSpace.spaceName,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                l10n.settingsRuntimeSpaceId(currentDeviceSpace.spaceId),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Semantics(
-                button: true,
-                label: l10n.settingsRuntimeViewSpaceTopology,
-                child: InkWell(
-                  onTap: busy ? null : onViewTopology,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Flexible(
-                          child: Text(
-                            l10n.settingsRuntimeSpaceDeviceCount(
-                              currentDeviceSpace.members.length,
-                            ),
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: colorScheme.primary,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                          ),
-                        ),
-                        const SizedBox(width: 2),
-                        Icon(
-                          Icons.chevron_right_rounded,
-                          size: 18,
-                          color: colorScheme.primary,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            IconButton(
-              tooltip: l10n.settingsRuntimeRenameSpace,
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: busy ? null : onRename,
-            ),
-            IconButton(
-              tooltip: l10n.settingsRuntimeLeaveSpace,
-              icon: const Icon(Icons.logout_outlined),
-              onPressed: busy || currentDeviceSpace.members.length <= 1
-                  ? null
-                  : onLeave,
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _DeviceSpaceTopologyDialog extends StatelessWidget {
-  const _DeviceSpaceTopologyDialog({
-    required this.spaceName,
-    required this.topology,
-    required this.onDisconnectDevice,
-  });
-
-  final String spaceName;
-  final generated.RuntimeDeviceSpaceTopology topology;
-  final Future<generated.RuntimeDeviceSpaceTopology> Function(String deviceId)
-  onDisconnectDevice;
-
-  /// Opens the device-space topology as one responsive modal surface.
-  static Future<void> show(
-    BuildContext context, {
-    required String spaceName,
-    required generated.RuntimeDeviceSpaceTopology topology,
-    required Future<generated.RuntimeDeviceSpaceTopology> Function(
-      String deviceId,
-    )
-    onDisconnectDevice,
-  }) {
-    return showDialog<void>(
-      context: context,
-      builder: (context) => _DeviceSpaceTopologyDialog(
-        spaceName: spaceName,
-        topology: topology,
-        onDisconnectDevice: onDisconnectDevice,
-      ),
-    );
-  }
-
-  /// Builds the topology header, graph, and connection summary.
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
-    final colorScheme = Theme.of(context).colorScheme;
-    final maxHeight = math.min(MediaQuery.sizeOf(context).height - 32, 640.0);
-    return Dialog(
-      insetPadding: const EdgeInsets.all(16),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: 820, maxHeight: maxHeight),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 14, 8, 10),
-              child: Row(
-                children: <Widget>[
-                  Icon(Icons.hub_outlined, color: colorScheme.primary),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(
-                          l10n.settingsRuntimeSpaceTopologyTitle(spaceName),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          l10n.settingsRuntimeSpaceTopologySummary(
-                            topology.devices.length,
-                            topology.connections.length,
-                          ),
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: colorScheme.onSurfaceVariant),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: MaterialLocalizations.of(
-                      context,
-                    ).closeButtonTooltip,
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ],
-              ),
-            ),
-            Divider(height: 1, color: colorScheme.outlineVariant),
-            Flexible(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 18, 16, 20),
-                child: _DeviceSpaceTopologyGraph(
-                  topology: topology,
-                  onDisconnectDevice: onDisconnectDevice,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DeviceSpaceTopologyGraph extends StatefulWidget {
-  const _DeviceSpaceTopologyGraph({
-    required this.topology,
-    required this.onDisconnectDevice,
-  });
-
-  final generated.RuntimeDeviceSpaceTopology topology;
-  final Future<generated.RuntimeDeviceSpaceTopology> Function(String deviceId)
-  onDisconnectDevice;
-
-  /// Creates the state that handles edge selection without rebuilding the dialog.
-  @override
-  State<_DeviceSpaceTopologyGraph> createState() =>
-      _DeviceSpaceTopologyGraphState();
-}
-
-class _DeviceSpaceTopologyGraphState extends State<_DeviceSpaceTopologyGraph> {
-  late generated.RuntimeDeviceSpaceTopology _topology;
-
-  @override
-  void initState() {
-    super.initState();
-    _topology = widget.topology;
-  }
-
-  /// Builds a pannable and zoomable canvas for the complete device graph.
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final viewportWidth = constraints.maxWidth;
-        final viewportHeight = constraints.maxHeight;
-        const nodeSize = Size(148, 112);
-        final canvasSize = _topologyCanvasSize(
-          viewportWidth,
-          _topology.devices.length,
-          nodeSize,
-        );
-        final centers = _deviceCenters(
-          canvasSize,
-          _topology.devices.length,
-          nodeSize,
-        );
-        final centerByDeviceId = <String, Offset>{
-          for (var index = 0; index < _topology.devices.length; index++)
-            _topology.devices[index].deviceId: centers[index],
-        };
-        final colorScheme = Theme.of(context).colorScheme;
-        return SizedBox(
-          width: viewportWidth,
-          height: viewportHeight,
-          child: InteractiveViewer(
-            constrained: false,
-            boundaryMargin: const EdgeInsets.all(220),
-            minScale: 0.35,
-            maxScale: 3.5,
-            panEnabled: true,
-            scaleEnabled: true,
-            trackpadScrollCausesScale: true,
-            child: SizedBox(
-              width: canvasSize.width,
-              height: canvasSize.height,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: <Widget>[
-                  Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTapUp: (details) {
-                        final connection = _connectionAtPoint(
-                          details.localPosition,
-                          centerByDeviceId,
-                          _topology.connections,
-                          nodeSize,
-                        );
-                        if (connection != null) {
-                          unawaited(_showConnectionDetails(connection));
-                        }
-                      },
-                      child: CustomPaint(
-                        painter: _DeviceSpaceTopologyPainter(
-                          centers: centerByDeviceId,
-                          connections: _topology.connections,
-                          nodeSize: nodeSize,
-                          onlineColor: colorScheme.outline,
-                          offlineColor: colorScheme.error,
-                          mismatchColor: colorScheme.tertiary,
-                          unknownColor: colorScheme.outlineVariant,
-                        ),
-                      ),
-                    ),
-                  ),
-                  for (var index = 0; index < _topology.devices.length; index++)
-                    Positioned(
-                      left: centers[index].dx - nodeSize.width / 2,
-                      top: centers[index].dy - nodeSize.height / 2,
-                      width: nodeSize.width,
-                      height: nodeSize.height,
-                      child: _DeviceSpaceTopologyNode(
-                        device: _topology.devices[index],
-                        current:
-                            _topology.devices[index].deviceId ==
-                            _topology.currentDeviceId,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// Shows the backend-provided reason for a selected connection.
-  Future<void> _showConnectionDetails(
-    generated.RuntimeDeviceSpaceConnection connection,
-  ) async {
-    if (!mounted) {
-      return;
-    }
-    final devicesById = <String, generated.RuntimeDeviceSpaceDevice>{
-      for (final device in _topology.devices) device.deviceId: device,
-    };
-    final first = devicesById[connection.firstDeviceId]!;
-    final second = devicesById[connection.secondDeviceId]!;
-    final currentDeviceId = _topology.currentDeviceId;
-    final target = connection.firstDeviceId == currentDeviceId
-        ? second
-        : connection.secondDeviceId == currentDeviceId
-        ? first
-        : null;
-    final canDisconnect = target != null;
-    await showDialog<void>(
-      context: context,
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return AlertDialog(
-          title: Text('${first.deviceName} → ${second.deviceName}'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Icon(
-                    _connectionStatusIcon(connection.status),
-                    color: _connectionStatusColor(
-                      connection.status,
-                      _topologyPainterColors(colorScheme),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(_connectionStatusLabel(connection.status)),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(connection.reason),
-              const SizedBox(height: 12),
-              if (first.coreVersion case final firstVersion?)
-                Text(
-                  '${first.deviceName}: $firstVersion',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              if (second.coreVersion case final secondVersion?)
-                Text(
-                  '${second.deviceName}: $secondVersion',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-            ],
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text(MaterialLocalizations.of(context).closeButtonLabel),
-            ),
-            if (canDisconnect)
-              FilledButton.icon(
-                onPressed: () => unawaited(
-                  _confirmDisconnect(target, AppLocalizations.of(context)!),
-                ),
-                icon: const Icon(Icons.link_off),
-                label: Text(
-                  AppLocalizations.of(
-                    context,
-                  )!.settingsRuntimeDisconnectConnection,
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  /// Confirms and executes an owner-initiated direct connection disconnect.
-  Future<void> _confirmDisconnect(
-    generated.RuntimeDeviceSpaceDevice target,
-    AppLocalizations l10n,
-  ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(l10n.settingsRuntimeDisconnectConnectionTitle),
-        content: Text(
-          l10n.settingsRuntimeDisconnectConnectionMessage(target.deviceName),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text(l10n.settingsRuntimeDisconnectConnection),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) {
-      return;
-    }
-    try {
-      final refreshedTopology = await widget.onDisconnectDevice(
-        target.deviceId,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() => _topology = refreshedTopology);
-      Navigator.of(context).pop();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(l10n.settingsRuntimeDisconnectConnectionFailed),
-          content: Text(error.toString()),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text(MaterialLocalizations.of(context).closeButtonLabel),
-            ),
-          ],
-        ),
-      );
-    }
-  }
-}
-
-/// Calculates a canvas that grows with the number of device nodes.
-Size _topologyCanvasSize(double viewportWidth, int deviceCount, Size nodeSize) {
-  if (deviceCount == 0) {
-    throw StateError('device-space topology contains no devices');
-  }
-  final columns = math.max(1, math.sqrt(deviceCount).ceil()).toInt();
-  final rows = ((deviceCount + columns - 1) / columns).ceil();
-  final width = math.max(viewportWidth, columns * 190.0 + 80.0);
-  final height = math.max(320.0, rows * 156.0 + nodeSize.height);
-  return Size(width, height);
-}
-
-/// Calculates stable grid centers for every device in the topology snapshot.
-List<Offset> _deviceCenters(Size graphSize, int deviceCount, Size nodeSize) {
-  if (deviceCount == 0) {
-    throw StateError('device-space topology contains no devices');
-  }
-  final columns = math.max(1, math.sqrt(deviceCount).ceil()).toInt();
-  const horizontalGap = 42.0;
-  const verticalGap = 44.0;
-  final cellWidth = nodeSize.width + horizontalGap;
-  final cellHeight = nodeSize.height + verticalGap;
-  return List<Offset>.generate(deviceCount, (index) {
-    final row = index ~/ columns;
-    final column = index % columns;
-    final rowItemCount = math.min(columns, deviceCount - row * columns);
-    final rowWidth = rowItemCount * cellWidth - horizontalGap;
-    final startX = (graphSize.width - rowWidth) / 2 + nodeSize.width / 2;
-    final startY = 28.0 + nodeSize.height / 2;
-    return Offset(startX + column * cellWidth, startY + row * cellHeight);
-  }, growable: false);
-}
-
-/// Finds the nearest connection under a canvas tap.
-generated.RuntimeDeviceSpaceConnection? _connectionAtPoint(
-  Offset point,
-  Map<String, Offset> centers,
-  List<generated.RuntimeDeviceSpaceConnection> connections,
-  Size nodeSize,
-) {
-  const hitDistance = 16.0;
-  generated.RuntimeDeviceSpaceConnection? nearest;
-  var nearestDistance = double.infinity;
-  for (final connection in connections) {
-    final segment = _connectionSegment(
-      connection,
-      centers,
-      connections,
-      nodeSize,
-    );
-    final distance = _distanceToSegment(point, segment.start, segment.end);
-    if (distance <= hitDistance && distance < nearestDistance) {
-      nearest = connection;
-      nearestDistance = distance;
-    }
-  }
-  return nearest;
-}
-
-/// Returns the shortest distance from one point to a line segment.
-double _distanceToSegment(Offset point, Offset first, Offset second) {
-  final delta = second - first;
-  final lengthSquared = delta.distanceSquared;
-  if (lengthSquared == 0) {
-    throw StateError('device-space topology contains a zero-length connection');
-  }
-  final projection =
-      ((point - first).dx * delta.dx + (point - first).dy * delta.dy) /
-      lengthSquared;
-  final clamped = projection.clamp(0.0, 1.0);
-  final nearest = first + delta * clamped;
-  return (point - nearest).distance;
-}
-
-/// Holds one drawable topology connection segment.
-class _TopologyConnectionSegment {
-  /// Creates one segment clipped to topology node bounds.
-  const _TopologyConnectionSegment({required this.start, required this.end});
-
-  final Offset start;
-  final Offset end;
-}
-
-/// Calculates a drawable directed segment between two device node bounds.
-_TopologyConnectionSegment _connectionSegment(
-  generated.RuntimeDeviceSpaceConnection connection,
-  Map<String, Offset> centers,
-  List<generated.RuntimeDeviceSpaceConnection> connections,
-  Size nodeSize,
-) {
-  final sourceCenter = centers[connection.firstDeviceId]!;
-  final targetCenter = centers[connection.secondDeviceId]!;
-  final direction = targetCenter - sourceCenter;
-  final distance = direction.distance;
-  if (distance == 0) {
-    throw StateError('device-space topology contains a zero-length connection');
-  }
-  final unit = direction / distance;
-  final sideOffset =
-      Offset(-unit.dy, unit.dx) *
-      _parallelConnectionOffset(connection, connections);
-  final shiftedSourceCenter = sourceCenter + sideOffset;
-  final shiftedTargetCenter = targetCenter + sideOffset;
-  final sourceRect = _topologyNodeRect(sourceCenter, nodeSize);
-  final targetRect = _topologyNodeRect(targetCenter, nodeSize);
-  const nodeGap = 6.0;
-  final start =
-      _pointOnRectBoundary(
-        sourceRect,
-        shiftedSourceCenter,
-        shiftedTargetCenter,
-      ) +
-      unit * nodeGap;
-  final end =
-      _pointOnRectBoundary(
-        targetRect,
-        shiftedTargetCenter,
-        shiftedSourceCenter,
-      ) -
-      unit * nodeGap;
-  return _TopologyConnectionSegment(start: start, end: end);
-}
-
-/// Returns the rectangle occupied by one topology node.
-Rect _topologyNodeRect(Offset center, Size nodeSize) {
-  return Rect.fromCenter(
-    center: center,
-    width: nodeSize.width,
-    height: nodeSize.height,
-  );
-}
-
-/// Calculates the point where a ray exits a node rectangle.
-Offset _pointOnRectBoundary(Rect rect, Offset inside, Offset outside) {
-  final delta = outside - inside;
-  final candidates = <double>[];
-  if (delta.dx > 0) {
-    candidates.add((rect.right - inside.dx) / delta.dx);
-  }
-  if (delta.dx < 0) {
-    candidates.add((rect.left - inside.dx) / delta.dx);
-  }
-  if (delta.dy > 0) {
-    candidates.add((rect.bottom - inside.dy) / delta.dy);
-  }
-  if (delta.dy < 0) {
-    candidates.add((rect.top - inside.dy) / delta.dy);
-  }
-  final positiveCandidates = candidates
-      .where((candidate) => candidate > 0)
-      .toList(growable: false);
-  if (positiveCandidates.isEmpty) {
-    throw StateError('device-space topology edge cannot reach node boundary');
-  }
-  final scale = positiveCandidates.reduce(math.min);
-  return inside + delta * scale;
-}
-
-/// Returns a side offset for opposite directed connections between two devices.
-double _parallelConnectionOffset(
-  generated.RuntimeDeviceSpaceConnection connection,
-  List<generated.RuntimeDeviceSpaceConnection> connections,
-) {
-  final hasOpposite = connections.any(
-    (other) =>
-        other.firstDeviceId == connection.secondDeviceId &&
-        other.secondDeviceId == connection.firstDeviceId,
-  );
-  if (!hasOpposite) {
-    return 0;
-  }
-  final currentKey =
-      '${connection.firstDeviceId}\u0000${connection.secondDeviceId}';
-  final oppositeKey =
-      '${connection.secondDeviceId}\u0000${connection.firstDeviceId}';
-  return currentKey.compareTo(oppositeKey) < 0 ? -8.0 : 8.0;
-}
-
-class _DeviceSpaceTopologyNode extends StatelessWidget {
-  const _DeviceSpaceTopologyNode({required this.device, required this.current});
-
-  final generated.RuntimeDeviceSpaceDevice device;
-  final bool current;
-
-  /// Builds one labeled device node with its current reachability state.
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
-    final colorScheme = Theme.of(context).colorScheme;
-    final statusColor = device.online ? colorScheme.primary : colorScheme.error;
-    final backgroundColor = current
-        ? colorScheme.primaryContainer
-        : device.online
-        ? colorScheme.surfaceContainerHighest
-        : colorScheme.errorContainer.withValues(alpha: 0.72);
-    final foregroundColor = current
-        ? colorScheme.onPrimaryContainer
-        : colorScheme.onSurface;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-      decoration: BoxDecoration(
-        color: backgroundColor,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: current ? colorScheme.primary : statusColor,
-          width: current ? 2 : 1.4,
-        ),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: <Widget>[
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              Icon(
-                Icons.devices_other_outlined,
-                size: 16,
-                color: foregroundColor,
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                device.online
-                    ? Icons.cloud_done_outlined
-                    : Icons.cloud_off_outlined,
-                size: 15,
-                color: statusColor,
-              ),
-              if (current) ...<Widget>[
-                const SizedBox(width: 4),
-                Flexible(
-                  child: Text(
-                    l10n.settingsRuntimeCurrentDevice,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: foregroundColor,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _deviceUserName(l10n, device.userName),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-              color: foregroundColor,
-            ),
-          ),
-          const SizedBox(height: 1),
-          Text(
-            device.deviceName,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: foregroundColor.withValues(alpha: 0.82),
-            ),
-          ),
-          if (device.coreVersion case final version?) ...<Widget>[
-            const SizedBox(height: 1),
-            Text(
-              version,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: foregroundColor.withValues(alpha: 0.64),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _DeviceSpaceTopologyPainter extends CustomPainter {
-  const _DeviceSpaceTopologyPainter({
-    required this.centers,
-    required this.connections,
-    required this.nodeSize,
-    required this.onlineColor,
-    required this.offlineColor,
-    required this.mismatchColor,
-    required this.unknownColor,
-  });
-
-  final Map<String, Offset> centers;
-  final List<generated.RuntimeDeviceSpaceConnection> connections;
-  final Size nodeSize;
-  final Color onlineColor;
-  final Color offlineColor;
-  final Color mismatchColor;
-  final Color unknownColor;
-
-  /// Draws every directed direct-device edge and marks unhealthy links with an X.
-  @override
-  void paint(Canvas canvas, Size size) {
-    for (final connection in connections) {
-      final segment = _connectionSegment(
-        connection,
-        centers,
-        connections,
-        nodeSize,
-      );
-      final color = _connectionStatusColor(
-        connection.status,
-        _TopologyPainterColors(
-          online: onlineColor,
-          offline: offlineColor,
-          mismatch: mismatchColor,
-          unknown: unknownColor,
-        ),
-      );
-      final paint = Paint()
-        ..color = color
-        ..strokeWidth =
-            connection.status ==
-                generated.RuntimeDeviceSpaceConnectionStatus.online
-            ? 2
-            : 2.2
-        ..style = PaintingStyle.stroke;
-      if (connection.status ==
-          generated.RuntimeDeviceSpaceConnectionStatus.online) {
-        _drawArrowLine(canvas, segment.start, segment.end, paint);
-      } else {
-        _drawDashedLine(canvas, segment.start, segment.end, paint);
-        _drawArrowHead(canvas, segment.start, segment.end, paint.color);
-      }
-      if (connection.status ==
-              generated.RuntimeDeviceSpaceConnectionStatus.offline ||
-          connection.status ==
-              generated.RuntimeDeviceSpaceConnectionStatus.versionMismatch) {
-        _drawConnectionCross(
-          canvas,
-          Offset.lerp(segment.start, segment.end, 0.5)!,
-          color,
-        );
-      }
-    }
-  }
-
-  /// Draws a solid directed segment with an arrow head at the target side.
-  static void _drawArrowLine(
-    Canvas canvas,
-    Offset first,
-    Offset second,
-    Paint paint,
-  ) {
-    canvas.drawLine(first, second, paint);
-    _drawArrowHead(canvas, first, second, paint.color);
-  }
-
-  /// Draws the arrow head for one directed topology connection.
-  static void _drawArrowHead(
-    Canvas canvas,
-    Offset first,
-    Offset second,
-    Color color,
-  ) {
-    final direction = second - first;
-    final length = direction.distance;
-    if (length == 0) {
-      throw StateError(
-        'device-space topology contains a zero-length connection',
-      );
-    }
-    final unit = direction / length;
-    final normal = Offset(-unit.dy, unit.dx);
-    const arrowLength = 12.0;
-    const arrowWidth = 6.0;
-    final path = Path()
-      ..moveTo(second.dx, second.dy)
-      ..lineTo(
-        second.dx - unit.dx * arrowLength + normal.dx * arrowWidth,
-        second.dy - unit.dy * arrowLength + normal.dy * arrowWidth,
-      )
-      ..lineTo(
-        second.dx - unit.dx * arrowLength - normal.dx * arrowWidth,
-        second.dy - unit.dy * arrowLength - normal.dy * arrowWidth,
-      )
-      ..close();
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.fill,
-    );
-  }
-
-  /// Draws a dashed segment without relying on platform-specific painting APIs.
-  static void _drawDashedLine(
-    Canvas canvas,
-    Offset first,
-    Offset second,
-    Paint paint,
-  ) {
-    final direction = second - first;
-    final length = direction.distance;
-    if (length == 0) {
-      throw StateError(
-        'device-space topology contains a zero-length connection',
-      );
-    }
-    final unit = direction / length;
-    const dashLength = 8.0;
-    const gapLength = 5.0;
-    var distance = 0.0;
-    while (distance < length) {
-      final dashEnd = math.min(distance + dashLength, length);
-      canvas.drawLine(first + unit * distance, first + unit * dashEnd, paint);
-      distance += dashLength + gapLength;
-    }
-  }
-
-  /// Draws the cross marker used for offline and incompatible links.
-  static void _drawConnectionCross(Canvas canvas, Offset center, Color color) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
-    const radius = 8.0;
-    canvas.drawLine(
-      center + const Offset(-radius, -radius),
-      center + const Offset(radius, radius),
-      paint,
-    );
-    canvas.drawLine(
-      center + const Offset(radius, -radius),
-      center + const Offset(-radius, radius),
-      paint,
-    );
-  }
-
-  /// Repaints when the graph snapshot, colors, or connection states change.
-  @override
-  bool shouldRepaint(covariant _DeviceSpaceTopologyPainter oldDelegate) {
-    return oldDelegate.centers != centers ||
-        oldDelegate.connections != connections ||
-        oldDelegate.nodeSize != nodeSize ||
-        oldDelegate.onlineColor != onlineColor ||
-        oldDelegate.offlineColor != offlineColor ||
-        oldDelegate.mismatchColor != mismatchColor ||
-        oldDelegate.unknownColor != unknownColor;
-  }
-}
-
-/// Holds the painter colors needed by connection status helpers.
-class _TopologyPainterColors {
-  const _TopologyPainterColors({
-    required this.online,
-    required this.offline,
-    required this.mismatch,
-    required this.unknown,
-  });
-
-  final Color online;
-  final Color offline;
-  final Color mismatch;
-  final Color unknown;
-}
-
-/// Returns the visual color associated with one connection status.
-Color _connectionStatusColor(
-  generated.RuntimeDeviceSpaceConnectionStatus status,
-  _TopologyPainterColors colors,
-) {
-  return switch (status) {
-    generated.RuntimeDeviceSpaceConnectionStatus.online => colors.online,
-    generated.RuntimeDeviceSpaceConnectionStatus.offline => colors.offline,
-    generated.RuntimeDeviceSpaceConnectionStatus.versionMismatch =>
-      colors.mismatch,
-    generated.RuntimeDeviceSpaceConnectionStatus.unknown => colors.unknown,
-  };
-}
-
-/// Converts a Material color scheme into graph painter colors.
-_TopologyPainterColors _topologyPainterColors(ColorScheme colorScheme) {
-  return _TopologyPainterColors(
-    online: colorScheme.outline,
-    offline: colorScheme.error,
-    mismatch: colorScheme.tertiary,
-    unknown: colorScheme.outlineVariant,
-  );
-}
-
-/// Returns the icon used to describe one connection status.
-IconData _connectionStatusIcon(
-  generated.RuntimeDeviceSpaceConnectionStatus status,
-) {
-  return switch (status) {
-    generated.RuntimeDeviceSpaceConnectionStatus.online => Icons.link,
-    generated.RuntimeDeviceSpaceConnectionStatus.offline => Icons.link_off,
-    generated.RuntimeDeviceSpaceConnectionStatus.versionMismatch =>
-      Icons.sync_problem_outlined,
-    generated.RuntimeDeviceSpaceConnectionStatus.unknown => Icons.help_outline,
-  };
-}
-
-/// Returns the short human-readable label for one connection status.
-String _connectionStatusLabel(
-  generated.RuntimeDeviceSpaceConnectionStatus status,
-) {
-  return switch (status) {
-    generated.RuntimeDeviceSpaceConnectionStatus.online => 'Online',
-    generated.RuntimeDeviceSpaceConnectionStatus.offline => 'Offline',
-    generated.RuntimeDeviceSpaceConnectionStatus.versionMismatch =>
-      'Core version mismatch',
-    generated.RuntimeDeviceSpaceConnectionStatus.unknown => 'Unknown',
-  };
-}
-
-/// Returns the configured user name or the explicit unconfigured label.
-String _deviceUserName(AppLocalizations l10n, String userName) {
-  final normalized = userName.trim();
-  return normalized.isEmpty ? l10n.settingsUserProfileUnnamed : normalized;
 }
 
 /// Collects the replacement name while owning the text controller lifecycle.
@@ -1740,282 +1678,161 @@ class _RenameCurrentDeviceSpaceDialogState
   }
 }
 
-class _PairedDeviceList extends StatelessWidget {
-  const _PairedDeviceList({
-    required this.devices,
-    required this.busy,
-    required this.states,
-    required this.currentMemberIds,
-    required this.onJoin,
-    required this.onDelete,
-    required this.onTransportChanged,
-    required this.onRemovedFromSpace,
+/// Presents one device identically whether or not it has a local pairing.
+///
+/// The row body always carries the readable information; only the trailing
+/// overflow menu depends on the local identity's device capabilities.
+class _DeviceSpaceRow extends StatelessWidget {
+  const _DeviceSpaceRow({
+    required this.leading,
+    required this.title,
+    required this.identity,
+    required this.status,
+    required this.tag,
+    required this.path,
+    required this.actions,
+    required this.onTap,
   });
 
-  final Map<String, generated.RuntimePairedDevice> devices;
-  final bool busy;
-  final Map<String, _PairedRemoteProbeState> states;
-  final Set<String> currentMemberIds;
-  final ValueChanged<generated.RuntimePairedDevice> onJoin;
-  final ValueChanged<String> onDelete;
-  final void Function(
-    generated.RuntimePairedDevice,
-    generated.LinkTransportPreference,
-  )
-  onTransportChanged;
-  final VoidCallback onRemovedFromSpace;
+  final Widget leading;
+  final String title;
+  final String? identity;
+  final String status;
+  final String? tag;
+  final String? path;
+  final List<Widget> actions;
+  final VoidCallback onTap;
 
+  /// Builds the row and its tap target for the read-only details.
   @override
   Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
-    final entries = devices.entries.toList(growable: false);
-    if (entries.isEmpty) {
-      return Text(
-        l10n.settingsRuntimeNoPairedRemote,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
-      );
-    }
-    return Column(
-      children: <Widget>[
-        for (var index = 0; index < entries.length; index++) ...<Widget>[
-          _PairedDeviceTile(
-            device: entries[index].value,
-            busy: busy,
-            state: states[entries[index].key],
-            inCurrentSpace: currentMemberIds.contains(entries[index].key),
-            onJoin: entries[index].value.outboundSessionName == null
-                ? null
-                : () => onJoin(entries[index].value),
-            onDelete: () => onDelete(entries[index].key),
-            onTransportChanged: (transport) =>
-                onTransportChanged(entries[index].value, transport),
-            onRemovedFromSpace: onRemovedFromSpace,
-          ),
-          if (index < entries.length - 1) const SizedBox(height: 10),
-        ],
-      ],
-    );
-  }
-}
-
-class _PairedDeviceTile extends StatelessWidget {
-  const _PairedDeviceTile({
-    required this.device,
-    required this.busy,
-    required this.state,
-    required this.inCurrentSpace,
-    required this.onJoin,
-    required this.onDelete,
-    required this.onTransportChanged,
-    required this.onRemovedFromSpace,
-  });
-
-  final generated.RuntimePairedDevice device;
-  final bool busy;
-  final _PairedRemoteProbeState? state;
-  final bool inCurrentSpace;
-  final VoidCallback? onJoin;
-  final VoidCallback onDelete;
-  final ValueChanged<generated.LinkTransportPreference> onTransportChanged;
-  final VoidCallback onRemovedFromSpace;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final probeState = state ?? _PairedRemoteProbeState.checking;
-    final outboundBaseUrl = device.outboundBaseUrl;
-    final statusColor = switch (probeState) {
-      _PairedRemoteProbeState.checking => colorScheme.onSurfaceVariant,
-      _PairedRemoteProbeState.online => colorScheme.primary,
-      _PairedRemoteProbeState.offline => colorScheme.error,
-      _PairedRemoteProbeState.invalid => colorScheme.error,
-      _PairedRemoteProbeState.error => colorScheme.error,
-      _PairedRemoteProbeState.removedFromSpace => colorScheme.error,
-    };
-    final canJoin =
-        !inCurrentSpace &&
-        onJoin != null &&
-        probeState != _PairedRemoteProbeState.invalid &&
-        probeState != _PairedRemoteProbeState.removedFromSpace;
-    return Container(
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.22),
+    return Material(
+      color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.22),
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
+        side: BorderSide(
           color: colorScheme.outlineVariant.withValues(alpha: 0.45),
         ),
       ),
-      child: ExpansionTile(
-        dense: true,
-        visualDensity: VisualDensity.compact,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-        childrenPadding: const EdgeInsets.fromLTRB(53, 0, 12, 8),
-        backgroundColor: Colors.transparent,
-        collapsedBackgroundColor: Colors.transparent,
-        shape: const Border(),
-        collapsedShape: const Border(),
-        leading: Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: statusColor.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Center(child: _RemoteProbeIcon(state: probeState)),
-        ),
-        title: Row(
-          children: <Widget>[
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Text(
-                    '${device.deviceInfo.platform}-${device.deviceInfo.model}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Row(
-                    children: <Widget>[
-                      Icon(
-                        Icons.link_outlined,
-                        size: 13,
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          outboundBaseUrl ??
-                              l10n.settingsRuntimeConnectionInitiatedByOtherDevice,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: textTheme.bodySmall?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                          color: statusColor,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Flexible(child: _RemoteProbeText(state: probeState)),
-                      if (inCurrentSpace) ...<Widget>[
-                        const SizedBox(width: 8),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+          child: Row(
+            children: <Widget>[
+              leading,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Row(
+                      children: <Widget>[
                         Flexible(
                           child: Text(
-                            l10n.settingsRuntimeDeviceInCurrentSpace,
+                            title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: textTheme.labelSmall?.copyWith(
-                              color: colorScheme.primary,
+                            style: textTheme.labelLarge?.copyWith(
                               fontWeight: FontWeight.w700,
                             ),
                           ),
                         ),
-                      ],
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            if (canJoin)
-              IconButton(
-                tooltip: l10n.settingsRuntimeJoinSpace,
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.group_add_outlined, size: 20),
-                onPressed: busy || probeState != _PairedRemoteProbeState.online
-                    ? null
-                    : onJoin,
-              ),
-            IconButton(
-              tooltip: l10n.delete,
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.link_off_outlined, size: 20),
-              onPressed: busy ? null : onDelete,
-            ),
-          ],
-        ),
-        children: <Widget>[
-          if (probeState == _PairedRemoteProbeState.removedFromSpace)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: FilledButton.tonalIcon(
-                onPressed: busy ? null : onRemovedFromSpace,
-                icon: const Icon(Icons.person_remove_outlined, size: 18),
-                label: Text(l10n.settingsRuntimeRemovedFromSpaceConfirm),
-              ),
-            ),
-          if (device.outboundTransport != null)
-            Row(
-              children: <Widget>[
-                Icon(
-                  Icons.swap_horiz_outlined,
-                  size: 15,
-                  color: colorScheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 5),
-                Text(
-                  'Link transport',
-                  style: textTheme.labelSmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: 104,
-                  child: SegmentedButton<generated.LinkTransportPreference>(
-                    segments:
-                        const <
-                          ButtonSegment<generated.LinkTransportPreference>
-                        >[
-                          ButtonSegment(
-                            value: generated.LinkTransportPreference.http,
-                            label: Text('HTTP'),
-                          ),
-                          ButtonSegment(
-                            value: generated.LinkTransportPreference.webSocket,
-                            label: Text('WS'),
-                          ),
+                        if (identity != null) ...<Widget>[
+                          const SizedBox(width: 6),
+                          _IdentityBadge(label: identity!),
                         ],
-                    selected: <generated.LinkTransportPreference>{
-                      device.outboundTransport!,
-                    },
-                    showSelectedIcon: false,
-                    style: ButtonStyle(
-                      visualDensity: VisualDensity.compact,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      textStyle: WidgetStatePropertyAll<TextStyle?>(
-                        textTheme.labelSmall,
-                      ),
-                      padding: const WidgetStatePropertyAll<EdgeInsets>(
-                        EdgeInsets.zero,
-                      ),
-                      minimumSize: const WidgetStatePropertyAll<Size>(
-                        Size(0, 28),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$status${tag == null ? '' : ' · $tag'}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.labelSmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
                       ),
                     ),
-                    onSelectionChanged: busy
-                        ? null
-                        : (selection) => onTransportChanged(selection.first),
-                  ),
+                    if (path != null) ...<Widget>[
+                      const SizedBox(height: 2),
+                      Text(
+                        path!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: textTheme.labelSmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-              ],
+              ),
+              const SizedBox(width: 6),
+              _DeviceRowMenu(actions: actions),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Keeps the trailing action slot stable whether or not a menu is available.
+class _DeviceRowMenu extends StatelessWidget {
+  const _DeviceRowMenu({required this.actions});
+
+  final List<Widget> actions;
+
+  /// Builds the overflow menu, or the empty slot that holds its place.
+  @override
+  Widget build(BuildContext context) {
+    if (actions.isEmpty) {
+      return const SizedBox(width: 40, height: 40);
+    }
+    return MenuAnchor(
+      builder: (context, controller, _) => IconButton(
+        tooltip: AppLocalizations.of(context)!.deviceSpaceManageDevice,
+        onPressed: controller.open,
+        visualDensity: VisualDensity.compact,
+        icon: const Icon(Icons.more_vert_outlined),
+      ),
+      menuChildren: actions,
+    );
+  }
+}
+
+/// Shows one device's Space identity beside its name.
+class _IdentityBadge extends StatelessWidget {
+  const _IdentityBadge({required this.label});
+
+  final String label;
+
+  /// Builds the compact identity badge.
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 120),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.secondaryContainer.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: scheme.onSecondaryContainer,
+              fontWeight: FontWeight.w700,
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -2040,78 +1857,39 @@ class _InlineStatus extends StatelessWidget {
   }
 }
 
-class _RemoteProbeIcon extends StatelessWidget {
-  const _RemoteProbeIcon({required this.state});
-
-  final _PairedRemoteProbeState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return switch (state) {
-      _PairedRemoteProbeState.checking => const SizedBox(
-        width: 24,
-        height: 24,
-        child: Center(child: M3LoadingIndicator(size: 18)),
-      ),
-      _PairedRemoteProbeState.online => Icon(
-        Icons.cloud_done_outlined,
-        color: colorScheme.primary,
-      ),
-      _PairedRemoteProbeState.offline => Icon(
-        Icons.cloud_off_outlined,
-        color: colorScheme.error,
-      ),
-      _PairedRemoteProbeState.invalid => Icon(
-        Icons.link_off_outlined,
-        color: colorScheme.error,
-      ),
-      _PairedRemoteProbeState.error => Icon(
-        Icons.error_outline,
-        color: colorScheme.error,
-      ),
-      _PairedRemoteProbeState.removedFromSpace => Icon(
-        Icons.person_remove_outlined,
-        color: colorScheme.error,
-      ),
-    };
-  }
+/// Returns the status glyph of one paired-device probe state.
+IconData _remoteProbeIconData(_PairedRemoteProbeState state) {
+  return switch (state) {
+    _PairedRemoteProbeState.checking => Icons.cloud_queue_outlined,
+    _PairedRemoteProbeState.online => Icons.cloud_done_outlined,
+    _PairedRemoteProbeState.offline => Icons.cloud_off_outlined,
+    _PairedRemoteProbeState.invalid => Icons.link_off_outlined,
+    _PairedRemoteProbeState.error => Icons.error_outline,
+    _PairedRemoteProbeState.removedFromSpace => Icons.person_remove_outlined,
+  };
 }
 
-class _RemoteProbeText extends StatelessWidget {
-  const _RemoteProbeText({required this.state});
+/// Returns the status color of one paired-device probe state.
+Color _remoteProbeColor(ColorScheme scheme, _PairedRemoteProbeState state) {
+  return switch (state) {
+    _PairedRemoteProbeState.checking => scheme.onSurfaceVariant,
+    _PairedRemoteProbeState.online => scheme.primary,
+    _PairedRemoteProbeState.offline => scheme.error,
+    _PairedRemoteProbeState.invalid => scheme.error,
+    _PairedRemoteProbeState.error => scheme.error,
+    _PairedRemoteProbeState.removedFromSpace => scheme.error,
+  };
+}
 
-  final _PairedRemoteProbeState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context)!;
-    final label = switch (state) {
-      _PairedRemoteProbeState.checking => l10n.settingsRuntimePairedChecking,
-      _PairedRemoteProbeState.online => l10n.settingsRuntimePairedOnline,
-      _PairedRemoteProbeState.offline => l10n.settingsRuntimePairedOffline,
-      _PairedRemoteProbeState.invalid => l10n.settingsRuntimePairedInvalid,
-      _PairedRemoteProbeState.error => l10n.settingsRuntimePairedError,
-      _PairedRemoteProbeState.removedFromSpace =>
-        l10n.settingsRuntimePairedRemovedFromSpace,
-    };
-    final color = switch (state) {
-      _PairedRemoteProbeState.checking => colorScheme.onSurfaceVariant,
-      _PairedRemoteProbeState.online => colorScheme.primary,
-      _PairedRemoteProbeState.offline => colorScheme.error,
-      _PairedRemoteProbeState.invalid => colorScheme.error,
-      _PairedRemoteProbeState.error => colorScheme.error,
-      _PairedRemoteProbeState.removedFromSpace => colorScheme.error,
-    };
-    return Text(
-      label,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-        color: color,
-        fontWeight: FontWeight.w700,
-      ),
-    );
-  }
+/// Names one paired-device probe state.
+String _remoteProbeLabel(_PairedRemoteProbeState state, AppLocalizations l10n) {
+  return switch (state) {
+    _PairedRemoteProbeState.checking => l10n.settingsRuntimePairedChecking,
+    _PairedRemoteProbeState.online => l10n.settingsRuntimePairedOnline,
+    _PairedRemoteProbeState.offline => l10n.settingsRuntimePairedOffline,
+    _PairedRemoteProbeState.invalid => l10n.settingsRuntimePairedInvalid,
+    _PairedRemoteProbeState.error => l10n.settingsRuntimePairedError,
+    _PairedRemoteProbeState.removedFromSpace =>
+      l10n.settingsRuntimePairedRemovedFromSpace,
+  };
 }

@@ -26,6 +26,7 @@ const DEFAULT_RELEVANCE_THRESHOLD: f64 = 0.0;
 
 #[derive(Clone, Debug)]
 pub enum MemoryToolOperation {
+    GetMemoryOwnerKey,
     QueryMemory,
     GetMemoryByTitle,
     CreateMemory,
@@ -77,7 +78,8 @@ impl ToolExecutor for MemoryToolExecutor {
 
     fn accessSpec(&self, _tool: &AITool) -> Result<ToolAccessSpec, String> {
         let effect = match self.operation {
-            MemoryToolOperation::QueryMemory
+            MemoryToolOperation::GetMemoryOwnerKey
+            | MemoryToolOperation::QueryMemory
             | MemoryToolOperation::GetMemoryByTitle
             | MemoryToolOperation::QueryMemoryLinks => ToolEffect::READ,
             MemoryToolOperation::CreateMemory
@@ -97,21 +99,59 @@ impl ToolExecutor for MemoryToolExecutor {
 
     fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult> {
         let result = match self.operation {
+            MemoryToolOperation::GetMemoryOwnerKey => {
+                executeGetMemoryOwnerKey(tool, self.runtimeSupport.as_ref())
+            }
             MemoryToolOperation::QueryMemory => {
                 executeQueryMemory(tool, self.runtimeSupport.as_ref())
             }
-            MemoryToolOperation::GetMemoryByTitle => executeGetMemoryByTitle(tool),
-            MemoryToolOperation::CreateMemory => executeCreateMemory(tool),
-            MemoryToolOperation::UpdateMemory => executeUpdateMemory(tool),
-            MemoryToolOperation::DeleteMemory => executeDeleteMemory(tool),
-            MemoryToolOperation::MoveMemory => executeMoveMemory(tool),
-            MemoryToolOperation::UpdateUserPreferences => executeUpdateUserPreferences(tool),
-            MemoryToolOperation::LinkMemories => executeLinkMemories(tool),
-            MemoryToolOperation::QueryMemoryLinks => executeQueryMemoryLinks(tool),
-            MemoryToolOperation::UpdateMemoryLink => executeUpdateMemoryLink(tool),
-            MemoryToolOperation::DeleteMemoryLink => executeDeleteMemoryLink(tool),
+            MemoryToolOperation::GetMemoryByTitle => {
+                executeGetMemoryByTitle(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::CreateMemory => {
+                executeCreateMemory(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::UpdateMemory => {
+                executeUpdateMemory(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::DeleteMemory => {
+                executeDeleteMemory(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::MoveMemory => {
+                executeMoveMemory(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::UpdateUserPreferences => {
+                executeUpdateUserPreferences(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::LinkMemories => {
+                executeLinkMemories(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::QueryMemoryLinks => {
+                executeQueryMemoryLinks(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::UpdateMemoryLink => {
+                executeUpdateMemoryLink(tool, self.runtimeSupport.as_ref())
+            }
+            MemoryToolOperation::DeleteMemoryLink => {
+                executeDeleteMemoryLink(tool, self.runtimeSupport.as_ref())
+            }
         };
         vec![result]
+    }
+}
+
+/// Returns the registered memory owner bound to the specified calling character card.
+fn executeGetMemoryOwnerKey(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
+    let callerCardId = parameterValue(tool, "caller_card_id");
+    if callerCardId.trim().is_empty() {
+        return errorResult(tool, "caller_card_id parameter is required");
+    }
+    match boundOwnerKeyForCaller(tool, runtimeSupport).and_then(|ownerKey| {
+        runtimeSupport.assertMemoryOwnerExists(&ownerKey)?;
+        Ok(ownerKey)
+    }) {
+        Ok(ownerKey) => success(tool, ownerKey),
+        Err(error) => errorResult(tool, &error),
     }
 }
 
@@ -162,20 +202,17 @@ fn executeQueryMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) ->
         .filter(|value| !value.is_empty());
     let snapshotScope = ownerKeys.join("|");
     let (snapshotId, snapshotCreated) = resolveSnapshot(&snapshotScope, snapshotIdParam);
-    if let Err(error) = runtimeSupport.loadMemorySearchSettings(&snapshotScope) {
-        return errorResult(
-            tool,
-            &format!("Failed to load memory search settings: {error}"),
-        );
-    }
     let mut results = Vec::new();
     for ownerKey in &ownerKeys {
-        match MemoryRepository::new(ownerKey.clone()).searchMemories(
+        match MemoryRepository::new(ownerKey.clone()).searchMemoriesWithConfig(
             &query,
             folderPath.as_deref(),
             threshold,
             startTime,
             endTime,
+            match operit_store::repository::MemorySettingsRepository::MemorySettingsRepository::new(ownerKey).loadSearchConfig() {
+                Ok(config)=>config, Err(error)=>return errorResult(tool,&error),
+            },
         ) {
             Ok(ownerResults) => {
                 results.extend(ownerResults.into_iter().map(|memory| OwnedMemoryResult {
@@ -190,28 +227,61 @@ fn executeQueryMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) ->
     }
 
     let (excluded, returned) = selectSnapshotResults(&snapshotScope, &snapshotId, results, limit);
+    let mut data=memoryQueryResultData(&returned,Some(snapshotId),snapshotCreated,excluded);
+    for (entry,info) in returned.iter().zip(&mut data.memories) {
+        if entry.memory.isDocumentNode {
+            let repo=MemoryRepository::new(entry.ownerKey.clone());
+            let chunks=match repo.searchChunksInDocument(entry.memory.id,query.clone(),limit.min(20) as i32) {
+                Ok(chunks)=>chunks,Err(error)=>return errorResult(tool,&error),
+            };
+            let total=match repo.getTotalChunkCount(entry.memory.id) {Ok(n)=>n,Err(error)=>return errorResult(tool,&error)};
+            info.content=if query.trim()=="*" || limit>20 {format!("Document: {} ({total} chunks)",entry.memory.title)} else {formatDocumentChunks(&entry.memory.title,total,&chunks)};
+            if !chunks.is_empty() {
+                info.chunkInfo=JsOptional::Value(format!("Chunks {}/{total}",chunks.iter().take(5).map(|c|(c.chunkIndex+1).to_string()).collect::<Vec<_>>().join(", ")));
+                info.chunkIndices=JsOptional::Value(chunks.iter().map(|c|c.chunkIndex).collect());
+            }
+        }
+    }
     successData(
         tool,
-        ToolResultData::MemoryQueryResultData(memoryQueryResultData(
-            &returned,
-            Some(snapshotId),
-            snapshotCreated,
-            excluded,
-        )),
+        ToolResultData::MemoryQueryResultData(data),
     )
 }
 
-fn executeGetMemoryByTitle(tool: &AITool) -> ToolResult {
+fn executeGetMemoryByTitle(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let title = parameterValue(tool, "title");
     if title.trim().is_empty() {
         return errorResult(tool, "title parameter is required");
     }
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
     let repository = MemoryRepository::new(ownerKey.clone());
     match repository.findMemoryByTitle(&title) {
+        Ok(Some(memory)) if memory.isDocumentNode => {
+            let query=optionalParameterValue(tool,"query").unwrap_or_default();
+            let index=optionalParameterValue(tool,"chunk_index").unwrap_or_default();
+            let range=optionalParameterValue(tool,"chunk_range").unwrap_or_default();
+            let limit=match parseLimit(optionalParameterValue(tool,"limit").as_deref(),20) {Ok(v)=>v.min(i32::MAX as usize) as i32,Err(error)=>return errorResult(tool,&error)};
+            let chunks=match repository.getChunksForMemory(memory.id) {Ok(c)=>c,Err(error)=>return errorResult(tool,&error)};
+            let total=chunks.len() as i32;
+            if query.trim().is_empty() && index.trim().is_empty() && range.trim().is_empty() {
+                return success(tool,format!("Document: {} ({total} chunks). Specify query, chunk_range (1-based start-end) or chunk_index (1-based).",memory.title));
+            }
+            let selected=if !query.trim().is_empty() {
+                match repository.searchChunksInDocument(memory.id,query,limit) {Ok(c)=>c,Err(error)=>return errorResult(tool,&error)}
+            } else {
+                let (start,end)=if !range.trim().is_empty() {
+                    let Some((a,b))=range.split_once('-') else {return errorResult(tool,"Invalid chunk_range. Expected start-end");};
+                    match (a.trim().parse::<i32>(),b.trim().parse::<i32>()) {(Ok(a),Ok(b))=>(a,b),_=>return errorResult(tool,"Invalid chunk range")}
+                } else {match index.trim().parse::<i32>() {Ok(i)=>(i,i),Err(_)=>return errorResult(tool,"Invalid chunk index")}};
+                if start<1 || end>total || start>end {return errorResult(tool,&format!("Chunk range out of bounds. Valid range: 1-{total}"));}
+                chunks.into_iter().filter(|c|c.chunkIndex>=start-1 && c.chunkIndex<=end-1).collect()
+            };
+            if selected.is_empty() {return errorResult(tool,"No matching chunks found");}
+            success(tool,formatDocumentChunks(&memory.title,total,&selected))
+        },
         Ok(Some(memory)) => successData(
             tool,
             ToolResultData::MemoryQueryResultData(memoryQueryResultData(
@@ -226,13 +296,13 @@ fn executeGetMemoryByTitle(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeCreateMemory(tool: &AITool) -> ToolResult {
+fn executeCreateMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let title = parameterValue(tool, "title");
     let content = parameterValue(tool, "content");
     if title.trim().is_empty() || content.trim().is_empty() {
         return errorResult(tool, "Both title and content parameters are required");
     }
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -261,7 +331,7 @@ fn executeCreateMemory(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeUpdateMemory(tool: &AITool) -> ToolResult {
+fn executeUpdateMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let oldTitle = parameterValue(tool, "old_title");
     if oldTitle.trim().is_empty() {
         return errorResult(
@@ -269,7 +339,7 @@ fn executeUpdateMemory(tool: &AITool) -> ToolResult {
             "old_title parameter is required to identify the memory",
         );
     }
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -313,12 +383,12 @@ fn executeUpdateMemory(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeDeleteMemory(tool: &AITool) -> ToolResult {
+fn executeDeleteMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let title = parameterValue(tool, "title");
     if title.trim().is_empty() {
         return errorResult(tool, "title parameter is required to identify the memory");
     }
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -335,7 +405,7 @@ fn executeDeleteMemory(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeMoveMemory(tool: &AITool) -> ToolResult {
+fn executeMoveMemory(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let targetFolderPath = match optionalParameterValue(tool, "target_folder_path") {
         Some(value) => value,
         None => return errorResult(tool, "target_folder_path parameter is required"),
@@ -355,7 +425,7 @@ fn executeMoveMemory(tool: &AITool) -> ToolResult {
         );
     }
 
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -410,8 +480,8 @@ fn executeMoveMemory(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeUpdateUserPreferences(tool: &AITool) -> ToolResult {
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+fn executeUpdateUserPreferences(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -427,7 +497,7 @@ fn executeUpdateUserPreferences(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeLinkMemories(tool: &AITool) -> ToolResult {
+fn executeLinkMemories(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
     let sourceTitle = parameterValue(tool, "source_title");
     let targetTitle = parameterValue(tool, "target_title");
     if sourceTitle.trim().is_empty() || targetTitle.trim().is_empty() {
@@ -436,7 +506,7 @@ fn executeLinkMemories(tool: &AITool) -> ToolResult {
             "Both source_title and target_title parameters are required",
         );
     }
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -489,8 +559,8 @@ fn executeLinkMemories(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeQueryMemoryLinks(tool: &AITool) -> ToolResult {
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+fn executeQueryMemoryLinks(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -557,8 +627,8 @@ fn executeQueryMemoryLinks(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeUpdateMemoryLink(tool: &AITool) -> ToolResult {
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+fn executeUpdateMemoryLink(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -595,8 +665,8 @@ fn executeUpdateMemoryLink(tool: &AITool) -> ToolResult {
     }
 }
 
-fn executeDeleteMemoryLink(tool: &AITool) -> ToolResult {
-    let ownerKey = match resolveTargetOwnerKey(tool) {
+fn executeDeleteMemoryLink(tool: &AITool, runtimeSupport: &dyn ToolRuntimeSupport) -> ToolResult {
+    let ownerKey = match resolveTargetOwnerKey(tool, runtimeSupport) {
         Ok(ownerKey) => ownerKey,
         Err(error) => return errorResult(tool, &error),
     };
@@ -676,11 +746,37 @@ fn explicitTargetOwnerKey(tool: &AITool) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn resolveTargetOwnerKey(tool: &AITool) -> Result<String, String> {
-    let ownerKey = explicitTargetOwnerKey(tool)
-        .ok_or_else(|| "target_owner_key parameter is required".to_string())?;
-    parseMemoryOwnerKey(&ownerKey)?;
-    Ok(ownerKey)
+/// Resolves the memory owner for a write or exact-lookup tool.
+///
+/// An explicit `target_owner_key` must already exist. When omitted, the current
+/// character card's bound store is used.
+fn resolveTargetOwnerKey(
+    tool: &AITool,
+    runtimeSupport: &dyn ToolRuntimeSupport,
+) -> Result<String, String> {
+    if let Some(ownerKey) = explicitTargetOwnerKey(tool) {
+        parseMemoryOwnerKey(&ownerKey)?;
+        runtimeSupport.assertMemoryOwnerExists(&ownerKey)?;
+        return Ok(ownerKey);
+    }
+    boundOwnerKeyForCaller(tool, runtimeSupport)
+}
+
+/// Resolves the memory owner bound to the calling character card.
+fn boundOwnerKeyForCaller(
+    tool: &AITool,
+    runtimeSupport: &dyn ToolRuntimeSupport,
+) -> Result<String, String> {
+    let callerCardId = resolveCallerCardId(tool)
+        .ok_or_else(|| "caller_card_id or target_owner_key parameter is required".to_string())?;
+    let characterCard = runtimeSupport.characterMemoryBinding(&callerCardId)?;
+    if characterCard.memoryBindingMode == CharacterCardMemoryBindingMode::SHARED {
+        let sharedMemoryId = characterCard
+            .sharedMemoryId
+            .ok_or_else(|| "shared memory binding requires sharedMemoryId".to_string())?;
+        return Ok(sharedMemoryOwnerKey(&sharedMemoryId)?);
+    }
+    characterMemoryOwnerKey(&characterCard.id)
 }
 
 fn resolveReadableOwnerKeys(
@@ -689,18 +785,10 @@ fn resolveReadableOwnerKeys(
 ) -> Result<Vec<String>, String> {
     if let Some(ownerKey) = explicitTargetOwnerKey(tool) {
         parseMemoryOwnerKey(&ownerKey)?;
+        runtimeSupport.assertMemoryOwnerExists(&ownerKey)?;
         return Ok(vec![ownerKey]);
     }
-    let callerCardId = resolveCallerCardId(tool)
-        .ok_or_else(|| "caller_card_id or target_owner_key parameter is required".to_string())?;
-    let characterCard = runtimeSupport.characterMemoryBinding(&callerCardId)?;
-    if characterCard.memoryBindingMode == CharacterCardMemoryBindingMode::SHARED {
-        let sharedMemoryId = characterCard
-            .sharedMemoryId
-            .ok_or_else(|| "shared memory binding requires sharedMemoryId".to_string())?;
-        return Ok(vec![sharedMemoryOwnerKey(&sharedMemoryId)?]);
-    }
-    Ok(vec![characterMemoryOwnerKey(&characterCard.id)?])
+    Ok(vec![boundOwnerKeyForCaller(tool, runtimeSupport)?])
 }
 
 fn parseTimeBoundary(value: Option<&str>, isEnd: bool) -> Result<Option<i64>, String> {
@@ -995,4 +1083,8 @@ fn optionalParameterValue(tool: &AITool, name: &str) -> Option<String> {
         .iter()
         .find(|parameter| parameter.name == name)
         .map(|parameter| parameter.value.clone())
+}
+
+fn formatDocumentChunks(title:&str,total:i32,chunks:&[operit_model::DocumentChunk::DocumentChunk])->String {
+    format!("Document: {title}\n{}",chunks.iter().take(5).map(|c|format!("Chunk {}/{total}:\n{}",c.chunkIndex+1,c.content)).collect::<Vec<_>>().join("\n---\n"))
 }

@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::AppLogger::AppLogger;
+use crate::AppLogger::{AppLogger, VERBOSE_LEVEL_6};
 
 pub struct StreamLogger;
 
@@ -13,11 +13,6 @@ impl StreamLogger {
         ENABLED.store(enabled, Ordering::Relaxed);
     }
 
-    /// Enables or disables verbose stream diagnostics.
-    pub fn set_verbose_enabled(enabled: bool) {
-        VERBOSE_ENABLED.store(enabled, Ordering::Relaxed);
-    }
-
     /// Writes a debug-level stream diagnostic.
     pub fn d(component: &str, message: &str) {
         if ENABLED.load(Ordering::Relaxed) {
@@ -25,17 +20,25 @@ impl StreamLogger {
         }
     }
 
-    /// Writes an info-level stream diagnostic.
+    /// Writes a verbose stream diagnostic through the legacy info entry point.
     pub fn i(component: &str, message: &str) {
         if ENABLED.load(Ordering::Relaxed) {
-            AppLogger::i("StreamFramework", &format!("[{component}] {message}"));
+            AppLogger::v_with_level(
+                "StreamFramework",
+                &format!("[{component}] {message}"),
+                VERBOSE_LEVEL_6,
+            );
         }
     }
 
     /// Writes a verbose stream diagnostic.
     pub fn v(component: &str, message: &str) {
-        if ENABLED.load(Ordering::Relaxed) && VERBOSE_ENABLED.load(Ordering::Relaxed) {
-            AppLogger::v("StreamFramework", &format!("[{component}] {message}"));
+        if ENABLED.load(Ordering::Relaxed) {
+            AppLogger::v_with_level(
+                "StreamFramework",
+                &format!("[{component}] {message}"),
+                VERBOSE_LEVEL_6,
+            );
         }
     }
 
@@ -55,7 +58,6 @@ impl StreamLogger {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static VERBOSE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Future returned by an asynchronous stream collection.
 pub type CollectFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -304,6 +306,13 @@ mod tests {
     struct TestHostRuntimeTaskScheduler;
 
     impl HostRuntimeTaskSchedulerHost for TestHostRuntimeTaskScheduler {
+        /// Reads the test Host's process-local monotonic timer clock.
+        fn monotonicTimeMillis(&self) -> HostResult<u64> {
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            Ok(START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64)
+        }
+
+
         /// Starts a synchronous test task on an isolated thread.
         fn scheduleHostRuntimeTask(
             &self,
@@ -316,6 +325,22 @@ mod tests {
 
         /// Starts an asynchronous test task on an isolated current-thread runtime.
         fn scheduleHostRuntimeAsyncTask(
+            &self,
+            _task_name: &str,
+            task: HostRuntimeAsyncTask,
+        ) -> HostResult<()> {
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create test stream task runtime failed");
+                runtime.block_on(task());
+            });
+            Ok(())
+        }
+
+        /// Executes cooperative work on the host-owned asynchronous executor.
+        fn scheduleHostRuntimeCooperativeAsyncTask(
             &self,
             _task_name: &str,
             task: HostRuntimeAsyncTask,

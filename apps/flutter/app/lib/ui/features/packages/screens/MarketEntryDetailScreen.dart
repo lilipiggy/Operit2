@@ -6,6 +6,7 @@ import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../market/UnifiedMarketDetailScreen.dart';
 import '../market/ArtifactMarketSupport.dart';
+import '../market/MarketInstallStateStore.dart';
 import 'ArtifactProjectNodeTreeDialog.dart';
 import 'ArtifactPublishScreen.dart';
 import 'RepoMarketPublishScreen.dart';
@@ -32,7 +33,8 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
   bool _communityLoading = true;
   bool _postingComment = false;
   bool _reacting = false;
-  bool _installing = false;
+  late final MarketInstallStateStore _installState;
+  bool get _installing => _installState.isInstalling(widget.entry.id);
   bool _openingPublish = false;
   String? _communityError;
   List<core_proxy.MarketComment> _comments = <core_proxy.MarketComment>[];
@@ -45,13 +47,21 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
   @override
   void initState() {
     super.initState();
+    _installState = MarketInstallStateStore.of(widget.clients);
+    _installState.addListener(_onInstallStateChanged);
+    _installState.refresh();
     _reactions = widget.entry.reactions;
     _loadCommunity();
     _loadCurrentGithubLogin();
   }
 
+  void _onInstallStateChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _installState.removeListener(_onInstallStateChanged);
     _commentController.dispose();
     super.dispose();
   }
@@ -346,11 +356,11 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
     );
   }
 
+  /// Installing succeeds inline; only installation failures use a SnackBar.
   Future<void> _install() async {
     if (_installing) return;
     final entry = widget.entry;
-
-    // For script/package with artifact, let the user confirm the version carried by this entry.
+    String? versionId;
     if ((entry.type == 'script' || entry.type == 'package') &&
         entry.artifact != null) {
       final version = await showArtifactVersionListDialog(
@@ -358,88 +368,19 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
         entry: entry,
       );
       if (version == null || !mounted) return;
-      setState(() => _installing = true);
-      try {
-        ensureMarketAppVersionSupported(
-          minAppVersion: version.minAppVer,
-          maxAppVersion: version.maxAppVer,
-        );
-        final result = await runCoreMarketInstall(
-          clients: widget.clients,
-          type: entry.type,
-          entryId: entry.id,
-          versionId: version.versionId,
-        );
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(result)));
-        }
-      } catch (error, stackTrace) {
-        debugPrint('Failed to install artifact: $error\n$stackTrace');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(error.toString()),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-      } finally {
-        if (mounted) setState(() => _installing = false);
-      }
-      return;
+      versionId = version.versionId;
     }
-
-    setState(() => _installing = true);
     try {
-      ensureMarketEntryVersionSupported(entry: entry);
-      if (entry.type == 'skill') {
-        final repoUrl = entry.source?.url.trim() ?? '';
-        if (repoUrl.isEmpty) throw StateError('技能缺少仓库地址');
-        final result = await widget.clients.application
-            .skillRepository()
-            .importSkillFromGitHubRepo(repoUrl: repoUrl);
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(result)));
-        }
-      } else if (entry.type == 'mcp') {
-        final repoUrl = entry.source?.url.trim() ?? '';
-        if (repoUrl.isEmpty) throw StateError('MCP 缺少仓库地址');
-        final result = await widget.clients.application
-            .mcpRepository()
-            .installMcpServerWithObjectForFlutter(
-              pluginId: _safePackageId(entry.title),
-              repoUrl: repoUrl,
-              name: entry.title,
-              description: entry.description,
-              mcpConfig:
-                  entry.repoVersion?.installConfig ??
-                  entry.latestVersion?.installConfig ??
-                  '',
-            );
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(result)));
-        }
-      } else {
-        throw StateError('请在脚本/包详情页安装资产');
-      }
+      await _installState.install(entry, versionId: versionId);
     } catch (error, stackTrace) {
       debugPrint('Failed to install market entry: $error\n$stackTrace');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error.toString()),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _installing = false);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -614,6 +555,7 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final entry = widget.entry;
+    final localState = _installState.stateFor(entry);
     return UnifiedMarketDetailScreen(
       title: entry.title,
       header: UnifiedMarketDetailHeader(
@@ -643,9 +585,11 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
             ),
         ],
         badges: <String>[
+          if (localState.badgeLabel != null) localState.badgeLabel!,
           entry.type,
           entry.categoryId ?? '',
           entry.latestVersion?.version ?? '',
+          entry.latestVersion?.apiVersion ?? '',
           entry.stateCode,
         ].where((value) => value.trim().isNotEmpty).toList(growable: false),
         metrics: <UnifiedMarketDetailMetric>[
@@ -705,11 +649,12 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
         onRequestDeleteComment: _confirmDeleteComment,
       ),
       primaryAction: UnifiedMarketDetailAction(
-        label: _installing ? '安装中' : '安装',
+        label: _installing ? '安装中' : localState.actionLabel(entry),
         onPressed: _install,
-        enabled: !_installing,
+        enabled:
+            !_installing && localState != MarketLocalInstallState.installed,
         isLoading: _installing,
-        icon: Icons.download_outlined,
+        icon: localState.actionIcon,
       ),
       secondaryAction: _canPublishVersion(entry)
           ? UnifiedMarketDetailAction(
@@ -751,6 +696,7 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
         normalizedCandidate == normalizedCurrent;
   }
 
+  /// Builds the visible marketplace metadata rows for an entry.
   List<ArtifactInfoRow> _metadataRows(core_proxy.MarketEntrySummary entry) {
     return <ArtifactInfoRow>[
       ArtifactInfoRow(label: '类型', value: entry.type),
@@ -763,12 +709,8 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
       ArtifactInfoRow(label: '版本', value: entry.latestVersion?.version ?? ''),
       ArtifactInfoRow(label: '格式', value: entry.latestVersion?.formatVer ?? ''),
       ArtifactInfoRow(
-        label: '最低版本',
-        value: entry.latestVersion?.minAppVer ?? '',
-      ),
-      ArtifactInfoRow(
-        label: '最高版本',
-        value: entry.latestVersion?.maxAppVer ?? '',
+        label: 'ToolPkg API',
+        value: entry.latestVersion?.apiVersion ?? '',
       ),
       ArtifactInfoRow(
         label: '发布',
@@ -782,15 +724,6 @@ class _MarketEntryDetailScreenState extends State<MarketEntryDetailScreen> {
 String? _cleanAvatarUrl(String? url) {
   if (url == null || url.trim().isEmpty) return null;
   return url;
-}
-
-String _safePackageId(String raw) {
-  final normalized = raw
-      .trim()
-      .replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')
-      .replaceAll(RegExp(r'_+'), '_')
-      .replaceAll(RegExp(r'^_|_$'), '');
-  return normalized.isEmpty ? 'market_item' : normalized;
 }
 
 int _entryDownloads(core_proxy.MarketEntrySummary entry) {

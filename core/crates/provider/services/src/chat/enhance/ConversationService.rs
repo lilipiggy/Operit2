@@ -34,6 +34,7 @@ pub struct PrepareConversationHistoryRequest {
     pub processed_input: String,
     pub chat_id: Option<String>,
     pub workspace_path: Option<String>,
+    pub workspace_folders: Vec<String>,
     pub prompt_function_type: String,
     pub custom_system_prompt_template: Option<String>,
     pub role_card_id: Option<String>,
@@ -71,19 +72,22 @@ pub struct HistoryHookContext {
 }
 
 /// Dispatches prompt-history hooks around conversation preparation.
-pub trait PromptHistoryHookDispatcher {
+pub trait PromptHistoryHookDispatcher: Send + Sync {
     /// Applies registered hooks to the supplied history context.
-    fn dispatch_prompt_history_hooks(&self, context: HistoryHookContext) -> HistoryHookContext;
+    fn dispatch_prompt_history_hooks(
+        &self,
+        context: HistoryHookContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HistoryHookContext> + Send + '_>>;
 }
 
 /// Composes the system prompt used at the start of prepared chat history.
-pub trait SystemPromptComposer {
+pub trait SystemPromptComposer: Send + Sync {
     /// Builds a system prompt from the current request and language mode.
-    fn get_system_prompt_with_custom_prompts(
-        &self,
-        request: &PrepareConversationHistoryRequest,
+    fn get_system_prompt_with_custom_prompts<'a>(
+        &'a self,
+        request: &'a PrepareConversationHistoryRequest,
         use_english: bool,
-    ) -> String;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>>;
 }
 
 /// Converts stored chat turns into provider-facing conversation history.
@@ -99,23 +103,25 @@ impl ConversationService {
     }
 
     /// Prepares chat history by injecting system prompts, normalizing tool turns, and running hooks.
-    pub fn prepare_conversation_history(
+    pub async fn prepare_conversation_history(
         &self,
         request: PrepareConversationHistoryRequest,
         history_hooks: &dyn PromptHistoryHookDispatcher,
         system_prompt_composer: &dyn SystemPromptComposer,
         use_english: bool,
     ) -> Vec<PromptTurn> {
-        let before_context = history_hooks.dispatch_prompt_history_hooks(HistoryHookContext {
-            stage: "before_prepare_history".to_string(),
-            chat_id: request.chat_id.clone(),
-            prompt_function_type: request.prompt_function_type.clone(),
-            processed_input: request.processed_input.clone(),
-            chat_history: request.chat_history.clone(),
-            prepared_history: Vec::new(),
-            use_english: None,
-            metadata: build_prepare_history_metadata(&request),
-        });
+        let before_context = history_hooks
+            .dispatch_prompt_history_hooks(HistoryHookContext {
+                stage: "before_prepare_history".to_string(),
+                chat_id: request.chat_id.clone(),
+                prompt_function_type: request.prompt_function_type.clone(),
+                processed_input: request.processed_input.clone(),
+                chat_history: request.chat_history.clone(),
+                prepared_history: Vec::new(),
+                use_english: None,
+                metadata: build_prepare_history_metadata(&request),
+            })
+            .await;
         let effective_chat_history = before_context.chat_history.clone();
         let mut prepared_history = Vec::new();
 
@@ -123,8 +129,9 @@ impl ConversationService {
             .iter()
             .any(|turn| turn.kind == PromptTurnKind::SYSTEM)
         {
-            let system_prompt =
-                system_prompt_composer.get_system_prompt_with_custom_prompts(&request, use_english);
+            let system_prompt = system_prompt_composer
+                .get_system_prompt_with_custom_prompts(&request, use_english)
+                .await;
             let final_system_prompt = build_final_system_prompt(
                 &request.avatar_mood_rules_text,
                 &system_prompt,
@@ -156,12 +163,14 @@ impl ConversationService {
                 _ => prepared_history.push(turn.clone()),
             }
         }
-        let after_context = history_hooks.dispatch_prompt_history_hooks(HistoryHookContext {
-            stage: "after_prepare_history".to_string(),
-            prepared_history,
-            use_english: Some(use_english),
-            ..before_context
-        });
+        let after_context = history_hooks
+            .dispatch_prompt_history_hooks(HistoryHookContext {
+                stage: "after_prepare_history".to_string(),
+                prepared_history,
+                use_english: Some(use_english),
+                ..before_context
+            })
+            .await;
         after_context.prepared_history
     }
 
@@ -404,7 +413,8 @@ impl ConversationService {
                 summary_result: None,
                 model_parameters: serializedModelParameters.clone(),
                 metadata: baseSummaryMetadata.clone(),
-            });
+            })
+            .await;
         summaryHistory = beforePrepareContext.chat_history;
         systemPrompt = beforePrepareContext.system_prompt.expect(
             "SummaryHookContext.system_prompt must be present after before_prepare_summary_prompt",
@@ -442,7 +452,8 @@ impl ConversationService {
                     );
                     metadata
                 },
-            });
+            })
+            .await;
         summaryHistory = beforeSendContext.chat_history;
         systemPrompt = beforeSendContext
             .system_prompt
@@ -467,6 +478,9 @@ impl ConversationService {
                     chat_history: preparedHistory.clone(),
                     model_parameters: modelParameters,
                     enable_thinking: false,
+                    thinking_quality_level: 1,
+                    thinking_configurations: "[]".to_string(),
+                    thinking_option_id: String::new(),
                     stream: true,
                     available_tools: Vec::new(),
                     preserve_think_in_history: false,
@@ -512,7 +526,8 @@ impl ConversationService {
                     metadata.insert("outputTokens".to_string(), json!(summaryOutputTokens));
                     metadata
                 },
-            });
+            })
+            .await;
         summaryContent = afterGenerateContext.summary_result.expect(
             "SummaryHookContext.summary_result must be present after after_generate_summary",
         );
@@ -580,6 +595,9 @@ impl ConversationService {
                     chat_history: prepared_history,
                     model_parameters,
                     enable_thinking: false,
+                    thinking_quality_level: 1,
+                    thinking_configurations: "[]".to_string(),
+                    thinking_option_id: String::new(),
                     stream: false,
                     available_tools: Vec::new(),
                     preserve_think_in_history: false,
@@ -711,6 +729,7 @@ fn extract_xml_tag_body_case_insensitive<'a>(content: &'a str, tag_name: &str) -
     Some(&content[body_start..close_start])
 }
 
+/// Builds hook metadata for one prompt-history preparation request.
 fn build_prepare_history_metadata(
     request: &PrepareConversationHistoryRequest,
 ) -> BTreeMap<String, String> {
@@ -719,6 +738,11 @@ fn build_prepare_history_metadata(
         &mut metadata,
         "workspacePath",
         request.workspace_path.as_ref(),
+    );
+    metadata.insert(
+        "workspaceFolders".to_string(),
+        serde_json::to_string(&request.workspace_folders)
+            .expect("workspace folder paths must serialize"),
     );
     insert_option(
         &mut metadata,

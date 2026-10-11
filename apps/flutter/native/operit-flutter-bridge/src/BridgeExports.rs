@@ -1,15 +1,29 @@
-use super::*;
+//! ABI dispatch only: preserves the existing C, JNI, and JavaScript wire contracts.
+
+use crate::BridgeCodec::*;
+use crate::OperitFlutterBridge;
+use operit_link::{CoreEvent, CoreEventKind, CoreLinkError};
+use std::any::Any;
+use std::ffi::{c_char, CStr, CString};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::Function;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::RuntimeBootstrapStore::{
+use crate::PlatformRuntimeAbi::RuntimeBootstrapStore::{
     readNativeRuntimeBootstrapConfig, writeNativeRuntimeBootstrapConfig,
 };
 
+/// Creates a reference-counted runtime using the platform storage roots.
 #[no_mangle]
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub extern "C" fn operit_flutter_bridge_create() -> *mut OperitFlutterBridge {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(OperitFlutterBridge::new)) {
-        Ok(Ok(bridge)) => Box::into_raw(Box::new(bridge)),
+        Ok(Ok(bridge)) => Arc::into_raw(Arc::new(bridge)) as *mut OperitFlutterBridge,
         Ok(Err(error)) => {
             set_last_create_error(error);
             std::ptr::null_mut()
@@ -40,8 +54,9 @@ impl OperitByteBuffer {
     }
 }
 
+/// Creates a C-hosted runtime; Android creation is owned by its JNI host entry point.
 #[no_mangle]
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub unsafe extern "C" fn operit_flutter_bridge_create_with_storage_roots(
     runtime_root: *const c_char,
     workspace_root: *const c_char,
@@ -73,7 +88,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_create_with_storage_roots(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         OperitFlutterBridge::new_with_storage_roots(runtime_root, workspace_root)
     })) {
-        Ok(Ok(bridge)) => Box::into_raw(Box::new(bridge)),
+        Ok(Ok(bridge)) => Arc::into_raw(Arc::new(bridge)) as *mut OperitFlutterBridge,
         Ok(Err(error)) => {
             set_last_create_error(error);
             std::ptr::null_mut()
@@ -140,7 +155,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_create_with_storage_roots_and_sys
         workspace_root,
         system_language_code,
     ) {
-        Ok(bridge) => Box::into_raw(Box::new(bridge)),
+        Ok(bridge) => Arc::into_raw(Arc::new(bridge)) as *mut OperitFlutterBridge,
         Err(error) => {
             set_last_create_error(error);
             std::ptr::null_mut()
@@ -236,10 +251,11 @@ pub unsafe extern "C" fn operit_flutter_bridge_runtime_bootstrap_write(
     ))
 }
 
+/// Releases one host reference without invalidating retained FFI connections.
 #[no_mangle]
 pub unsafe extern "C" fn operit_flutter_bridge_destroy(handle: *mut OperitFlutterBridge) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle));
+        drop(Arc::from_raw(handle));
     }
 }
 
@@ -314,7 +330,7 @@ mod native_call_codec_tests {
     fn decodes_compact_request_tuple() {
         let bytes = operit_link::encodeLink((
             "request-1",
-            6u32,
+            "6",
             "getCards",
             operit_link::CoreValue::Bool(true),
         ))
@@ -323,7 +339,7 @@ mod native_call_codec_tests {
         let request = decode_native_call_request(&bytes).expect("compact request must decode");
 
         assert_eq!(request.requestId.0, "request-1");
-        assert_eq!(request.targetObjectId, 6);
+        assert_eq!(request.target, "6");
         assert_eq!(request.methodName, "getCards");
         assert_eq!(request.args, operit_link::CoreValue::Bool(true));
     }
@@ -331,12 +347,17 @@ mod native_call_codec_tests {
     /// Verifies every local stream request decodes from a compact tuple.
     #[test]
     fn decodes_compact_push_and_watch_tuples() {
-        let push_open = operit_link::encodeLink(("push-1", 7u32, "interact"))
-            .expect("compact push open must encode");
+        let push_open = operit_link::encodeLink((
+            "push-1",
+            "7",
+            "interact",
+            operit_link::CoreValue::Null,
+        ))
+        .expect("compact push open must encode");
         let push_request =
             decode_native_push_open_request(&push_open).expect("compact push open must decode");
         assert_eq!(push_request.requestId.0, "push-1");
-        assert_eq!(push_request.targetObjectId, 7);
+        assert_eq!(push_request.target, "7");
         assert_eq!(push_request.methodName, "interact");
 
         let push_item = operit_link::encodeLink((
@@ -354,7 +375,7 @@ mod native_call_codec_tests {
         );
 
         let snapshot =
-            operit_link::encodeLink(("watch-1", 8u32, "cards", operit_link::CoreValue::Null))
+            operit_link::encodeLink(("watch-1", "8", "cards", operit_link::CoreValue::Null))
                 .expect("compact watch snapshot must encode");
         let snapshot_request = decode_native_watch_snapshot_request(&snapshot)
             .expect("compact watch snapshot must decode");
@@ -364,7 +385,7 @@ mod native_call_codec_tests {
         let stream = operit_link::encodeLink((
             "subscription-1",
             "watch-1",
-            8u32,
+            "8",
             "cards",
             operit_link::CoreValue::Null,
         ))
@@ -431,7 +452,7 @@ mod native_call_codec_tests {
     fn encodes_compact_watch_tuples() {
         let event = CoreEvent {
             requestId: Some(operit_link::CoreRequestId::new("watch-1")),
-            targetObjectId: 8,
+            target: "core/test8".into(),
             propertyName: "cards".to_string(),
             kind: CoreEventKind::Snapshot,
             value: operit_link::CoreValue::String("card-1".to_string()),
@@ -439,18 +460,18 @@ mod native_call_codec_tests {
         let snapshot = native_result_vec(Ok(native_watch_event_payload(event.clone())));
         let (status, payload): (
             u8,
-            (Option<String>, u32, String, String, operit_link::CoreValue),
+            (Option<String>, String, String, String, operit_link::CoreValue),
         ) = operit_link::decodeLink(&snapshot).expect("compact watch snapshot must decode");
         assert_eq!(status, 0);
         assert_eq!(payload.0.as_deref(), Some("watch-1"));
-        assert_eq!(payload.1, 8);
+        assert_eq!(payload.1, "core/test8");
         assert_eq!(payload.2, "cards");
         assert_eq!(payload.3, "Snapshot");
 
         let frame = native_watch_event_vec("subscription-1", event);
         let (subscription_id, frame_payload): (
             String,
-            (Option<String>, u32, String, String, operit_link::CoreValue),
+            (Option<String>, String, String, String, operit_link::CoreValue),
         ) = operit_link::decodeLink(&frame).expect("compact watch frame must decode");
         assert_eq!(subscription_id, "subscription-1");
         assert_eq!(frame_payload.0.as_deref(), Some("watch-1"));
@@ -485,7 +506,7 @@ async fn bridge_push_open_async(handle: &OperitFlutterBridge, request_bytes: &[u
         Ok(request) => request,
         Err(error) => return native_result_vec(Err::<String, _>(error)),
     };
-    native_result_vec(handle.pushOpen(request).await)
+    native_result_vec(handle.pushOpen(request))
 }
 
 /// Decodes and dispatches one compact native CoreProxy push item.
@@ -590,7 +611,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_watch_snapshot(
         ));
     }
     let request_bytes = std::slice::from_raw_parts(request_ptr, request_len);
-    bytes_to_buffer(bridge_watch_snapshot(&mut *handle, request_bytes))
+    bytes_to_buffer(bridge_watch_snapshot(&*handle, request_bytes))
 }
 
 #[no_mangle]
@@ -613,7 +634,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_watch_stream(
         ));
     }
     let request_bytes = std::slice::from_raw_parts(request_ptr, request_len);
-    bytes_to_buffer(bridge_watch_stream(&mut *handle, request_bytes))
+    bytes_to_buffer(bridge_watch_stream(&*handle, request_bytes))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -661,7 +682,7 @@ pub unsafe extern "C" fn operit_flutter_bridge_close_watch_channel(
     handle: *mut OperitFlutterBridge,
 ) {
     if !handle.is_null() {
-        (*handle).watchChannel.close();
+        (*handle).platform.watchChannel.close();
     }
 }
 
@@ -693,107 +714,6 @@ pub unsafe extern "C" fn operit_flutter_bridge_close_watch_stream(
     };
     (*handle).closeWatchStream(subscription_id);
     bytes_to_buffer(native_result_vec(Ok::<(), CoreLinkError>(())))
-}
-
-#[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe extern "C" fn operit_flutter_bridge_start_web_access_server(
-    handle: *mut OperitFlutterBridge,
-    bind_address: *const c_char,
-    token: *const c_char,
-    shutdown_token: *const c_char,
-    web_root: *const c_char,
-    device_info_json: *const c_char,
-    enable_web_access: *const c_char,
-    enable_discovery: *const c_char,
-) -> *mut c_char {
-    if handle.is_null() {
-        return string_to_ptr(
-            serde_json::to_string(&CoreLinkError::internal(
-                "runtime bridge is not initialized",
-            ))
-            .expect("CoreLinkError must serialize"),
-        );
-    }
-    let args = [
-        ("bind address", bind_address),
-        ("token", token),
-        ("shutdown token", shutdown_token),
-        ("web root", web_root),
-        ("device info", device_info_json),
-        ("enable web access", enable_web_access),
-        ("enable discovery", enable_discovery),
-    ];
-    let mut values = Vec::new();
-    for (name, ptr) in args {
-        if ptr.is_null() {
-            return string_to_ptr(
-                serde_json::to_string(&CoreLinkError::new(
-                    "INVALID_ARGS",
-                    format!("{name} pointer is null"),
-                ))
-                .expect("CoreLinkError must serialize"),
-            );
-        }
-        let value = match CStr::from_ptr(ptr).to_str() {
-            Ok(value) => value.to_string(),
-            Err(error) => {
-                return string_to_ptr(
-                    serde_json::to_string(&CoreLinkError::new(
-                        "INVALID_ARGS",
-                        format!("{name} is not valid UTF-8: {error}"),
-                    ))
-                    .expect("CoreLinkError must serialize"),
-                );
-            }
-        };
-        values.push(value);
-    }
-    match (*handle).startWebAccessServer(
-        values[0].clone(),
-        values[1].clone(),
-        values[2].clone(),
-        PathBuf::from(&values[3]),
-        match serde_json::from_str::<RemoteDeviceInfo>(&values[4]) {
-            Ok(value) => value,
-            Err(error) => {
-                return string_to_ptr(
-                    serde_json::to_string(&CoreLinkError::new(
-                        "INVALID_ARGS",
-                        format!("device info is invalid: {error}"),
-                    ))
-                    .expect("CoreLinkError must serialize"),
-                );
-            }
-        },
-        values[5] == "true",
-        values[6] == "true",
-    ) {
-        Ok(deviceId) => {
-            string_to_ptr(&serde_json::json!({"ok": true, "deviceId": deviceId}).to_string())
-        }
-        Err(error) => string_to_ptr(
-            &serde_json::to_string(&CoreLinkError::internal(error))
-                .expect("CoreLinkError must serialize"),
-        ),
-    }
-}
-
-#[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe extern "C" fn operit_flutter_bridge_stop_web_access_server(
-    handle: *mut OperitFlutterBridge,
-) -> *mut c_char {
-    if handle.is_null() {
-        return string_to_ptr(
-            serde_json::to_string(&CoreLinkError::internal(
-                "runtime bridge is not initialized",
-            ))
-            .expect("CoreLinkError must serialize"),
-        );
-    }
-    (*handle).stopWebAccessServer();
-    string_to_ptr("{\"ok\":true}")
 }
 
 /// Decodes and reads one compact native CoreProxy watch snapshot.
@@ -891,6 +811,12 @@ impl OperitFlutterBridgeWasm {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Delivers owner events through the same application ingress as native hosts.
+    #[allow(non_snake_case)]
+    pub async fn emitRuntimeEvent(&self, eventJson: &str) -> String {
+        self.inner.emitRuntimeEvent(eventJson).await
+    }
+
     pub async fn call(&self, request: &[u8]) -> Vec<u8> {
         bridge_native_call_async(&self.inner, request).await
     }
@@ -952,21 +878,22 @@ pub unsafe extern "C" fn operit_flutter_bridge_free_bytes(value: OperitByteBuffe
     }
 }
 
-fn json_to_ptr(value: &impl serde::Serialize) -> *mut c_char {
-    string_to_ptr(json_string(value))
-}
-
-fn json_string(value: &impl serde::Serialize) -> String {
-    serde_json::to_string(value).unwrap_or_else(|error| {
-        format!(
-            "{{\"requestId\":\"flutter-bridge-serialize\",\"result\":{{\"Err\":{{\"code\":\"INTERNAL_ERROR\",\"message\":\"{error}\"}}}}}}"
-        )
-    })
-}
-
 fn string_to_ptr(value: impl Into<String>) -> *mut c_char {
     let sanitized = value.into().replace('\0', "");
     CString::new(sanitized)
         .expect("sanitized bridge string must not contain nul")
         .into_raw()
+}
+
+/// Returns the most recent explicit creation failure reported by the ABI boundary.
+pub(crate) fn last_create_error() -> &'static Mutex<String> {
+    static LAST_CREATE_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+    LAST_CREATE_ERROR.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Records a creation failure without attempting another startup configuration.
+pub(crate) fn set_last_create_error(value: String) {
+    *last_create_error()
+        .lock()
+        .expect("Create error lock must not be poisoned") = value;
 }

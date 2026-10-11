@@ -1,12 +1,14 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../../../../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
+import '../../../../../../common/CharacterAvatar.dart';
+import '../../../../../../common/icons/MaterialIconNameResolver.dart';
 import '../../../../viewmodel/ChatViewModel.dart';
 
 class AgentInputMenuPopup extends StatefulWidget {
@@ -14,12 +16,16 @@ class AgentInputMenuPopup extends StatefulWidget {
     super.key,
     required this.viewModel,
     required this.currentChatId,
+    required this.currentCharacterCardName,
+    required this.currentCharacterCardAvatarUri,
     required this.onDismiss,
     this.leadingChildren = const <Widget>[],
   });
 
   final ChatViewModel viewModel;
   final String? currentChatId;
+  final String? currentCharacterCardName;
+  final String? currentCharacterCardAvatarUri;
   final VoidCallback onDismiss;
   final List<Widget> leadingChildren;
 
@@ -30,30 +36,128 @@ class AgentInputMenuPopup extends StatefulWidget {
 class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
   Future<_AgentInputMenuData>? _settingsFuture;
   Timer? _pluginChangeTimer;
-  int? _observedPluginChangeVersion;
+  String? _settingsSignature;
   bool _checkingPluginChangeVersion = false;
   bool _memoryExpanded = false;
+  bool _memoryBusy = false;
+  Timer? _memoryTimer;
+  core_proxy.MemoryAutoSaveStatus? _queue;
+  bool _pollingMemory = false;
   bool _toolsExpanded = false;
   bool _behaviorExpanded = false;
   bool _pluginsExpanded = false;
-
-  GeneratedCoreProxyClients get _clients => widget.viewModel.clients;
 
   @override
   void initState() {
     super.initState();
     _settingsFuture = _loadSettings();
     _startPluginChangeObserver();
+    unawaited(_pollMemory());
+    _memoryTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => _pollMemory(),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentInputMenuPopup oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentChatId != widget.currentChatId ||
+        oldWidget.viewModel != widget.viewModel) {
+      _settingsSignature = null;
+      _queue = null;
+      _settingsFuture = _loadSettings();
+      unawaited(_pollMemory());
+    }
   }
 
   @override
   void dispose() {
     _pluginChangeTimer?.cancel();
+    _memoryTimer?.cancel();
     super.dispose();
   }
 
+  Future<void> _pollMemory() async {
+    if (_pollingMemory || widget.currentChatId == null) return;
+    _pollingMemory = true;
+    try {
+      final chatId = widget.currentChatId!;
+      final viewModel = widget.viewModel;
+      final status = await viewModel.chatCore.chatMemoryAutoSaveStatus(
+        chatId: chatId,
+      );
+      if (!mounted ||
+          widget.currentChatId != chatId ||
+          widget.viewModel != viewModel) {
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _queue = status;
+        });
+      }
+    } catch (error) {
+      debugPrint('Memory queue status: $error');
+    } finally {
+      _pollingMemory = false;
+    }
+  }
+
+  Future<void> _manualMemory() async {
+    if (_memoryBusy || widget.currentChatId == null) return;
+    setState(() => _memoryBusy = true);
+    try {
+      await widget.viewModel.updateMemory(widget.currentChatId!);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('记忆提取完成')));
+      }
+      await _pollMemory();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('记忆提取失败：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _memoryBusy = false);
+    }
+  }
+
+  void _showMemoryInfo(String title, String description) {
+    final dialog = showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(description),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+    // This menu is a root OverlayEntry, not a route. Remove it before the
+    // dialog is painted or it will remain above the navigator's modal barrier.
+    widget.onDismiss();
+    unawaited(dialog);
+  }
+
+  String get _memoryQueueDescription {
+    final queue = _queue;
+    if (queue == null) return '暂无队列状态。自动提取会定期检查当前记忆库。';
+    return '待处理 ${queue.pendingCandidates} 条 · ${queue.pendingChats} 个聊天\n'
+        '处理中 ${queue.processingCandidates} · 失败 ${queue.failedCandidates}\n'
+        '下次检查：约 ${queue.minutesUntilNextRun} 分钟后\n\n'
+        '自动检查需要至少 5 个候选；不足时继续等待。手动更新不受此门槛限制。'
+        '${queue.lastError.isEmpty ? '' : '\n\n${queue.lastError}'}';
+  }
+
   void _startPluginChangeObserver() {
-    _pluginChangeTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+    _pluginChangeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _checkPluginChangeVersion();
     });
   }
@@ -63,45 +167,61 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
       return;
     }
     _checkingPluginChangeVersion = true;
-    final int version;
     try {
-      version = await _clients.application
-          .inputMenuToggleBridge()
-          .changeVersion();
+      final chatId = widget.currentChatId;
+      final viewModel = widget.viewModel;
+      final settings = await viewModel.chatCore.chatInputMenuSettings(
+        chatId: chatId,
+      );
+      if (!mounted ||
+          widget.currentChatId != chatId ||
+          widget.viewModel != viewModel) {
+        return;
+      }
+      final signature = jsonEncode(settings.toJson());
+      if (_settingsSignature != signature) {
+        _settingsSignature = signature;
+        setState(() {
+          _settingsFuture = Future.value(_menuData(settings));
+        });
+      }
+    } catch (error) {
+      debugPrint('Chat input menu refresh: $error');
     } finally {
       _checkingPluginChangeVersion = false;
-    }
-    if (!mounted) {
-      return;
-    }
-    final observed = _observedPluginChangeVersion;
-    _observedPluginChangeVersion = version;
-    if (observed != null && observed != version) {
-      _reloadSettings();
     }
   }
 
   Future<_AgentInputMenuData> _loadSettings() async {
-    final inputMenuToggleBridge = _clients.application.inputMenuToggleBridge();
-    _observedPluginChangeVersion = await inputMenuToggleBridge.changeVersion();
-    final pluginToggles = await inputMenuToggleBridge
-        .createToggleDefinitionsForFlutter(
-          chatId: widget.currentChatId,
-          featureStates: const <String, bool>{},
-          runtime: 'main',
-        );
+    final settings = await widget.viewModel.chatCore.chatInputMenuSettings(
+      chatId: widget.currentChatId,
+    );
+    return _menuData(settings);
+  }
+
+  _AgentInputMenuData _menuData(core_proxy.ChatInputMenuSettings settings) {
     return _AgentInputMenuData(
-      enableMemoryAutoUpdate: await _clients.preferencesApiPreferences
-          .enableMemoryAutoUpdateFlow().first,
-      permissionMode: await _clients.permissionsToolPermissionSystem
-          .getAiPermissionMode(),
-      disableStreamOutput: await _clients.preferencesApiPreferences
-          .disableStreamOutputFlow().first,
-      disableUserPreferenceDescription: await _clients.preferencesApiPreferences
-          .disableUserPreferenceDescriptionFlow().first,
-      pluginToggles: pluginToggles,
+      enableMemoryAutoUpdate: settings.enableMemoryAutoUpdate,
+      permissionMode: settings.permissionMode,
+      disableStreamOutput: settings.disableStreamOutput,
+      disableUserPreferenceDescription:
+          settings.disableUserPreferenceDescription,
+      pluginToggles: settings.pluginToggles,
     );
   }
+
+  Future<void> _saveSettings({
+    bool? enableMemoryAutoUpdate,
+    core_proxy.AiPermissionMode? permissionMode,
+    bool? disableStreamOutput,
+    bool? disableUserPreferenceDescription,
+  }) => widget.viewModel.chatCore.saveChatInputMenuSettings(
+    chatId: widget.currentChatId,
+    enableMemoryAutoUpdate: enableMemoryAutoUpdate,
+    permissionMode: permissionMode,
+    disableStreamOutput: disableStreamOutput,
+    disableUserPreferenceDescription: disableUserPreferenceDescription,
+  );
 
   void _reloadSettings() {
     setState(() {
@@ -113,39 +233,31 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
     _AgentInputMenuData data,
     bool enabled,
   ) async {
-    await _clients.preferencesApiPreferences
-        .saveDisableUserPreferenceDescription(isDisabled: !enabled);
+    await _saveSettings(disableUserPreferenceDescription: !enabled);
     _reloadSettings();
   }
 
   Future<void> _toggleMemoryAutoUpdate(_AgentInputMenuData data) async {
-    await _clients.preferencesApiPreferences.saveEnableMemoryAutoUpdate(
-      isEnabled: !data.enableMemoryAutoUpdate,
-    );
+    await _saveSettings(enableMemoryAutoUpdate: !data.enableMemoryAutoUpdate);
     _reloadSettings();
   }
 
   Future<void> _setPermissionMode(_ToolPermissionMode mode) async {
-    await _clients.permissionsToolPermissionSystem.saveAiPermissionMode(
-      mode: mode.permissionMode,
-    );
+    await _saveSettings(permissionMode: mode.permissionMode);
     _reloadSettings();
   }
 
   Future<void> _toggleDisableStreamOutput(_AgentInputMenuData data) async {
-    await _clients.preferencesApiPreferences.saveDisableStreamOutput(
-      isDisabled: !data.disableStreamOutput,
-    );
+    await _saveSettings(disableStreamOutput: !data.disableStreamOutput);
     _reloadSettings();
   }
 
   Future<void> _togglePlugin(
     core_proxy.InputMenuToggleDefinitionSnapshot toggle,
   ) async {
-    await _clients.application.inputMenuToggleBridge().triggerToggleForFlutter(
+    await widget.viewModel.chatCore.triggerChatInputMenuToggle(
       toggleId: toggle.id,
       chatId: widget.currentChatId,
-      runtime: 'main',
     );
     _reloadSettings();
   }
@@ -167,9 +279,18 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
             future: _settingsFuture,
             builder: (context, snapshot) {
               if (snapshot.hasError) {
-                Error.throwWithStackTrace(
-                  snapshot.error!,
-                  snapshot.stackTrace!,
+                return Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('菜单加载失败：${snapshot.error}'),
+                      TextButton(
+                        onPressed: _reloadSettings,
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
                 );
               }
               final data = snapshot.data;
@@ -185,6 +306,15 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
+                    _ChatSessionSummarySection(
+                      viewModel: widget.viewModel,
+                      currentChatId: widget.currentChatId,
+                      currentCharacterCardName: widget.currentCharacterCardName,
+                      currentCharacterCardAvatarUri:
+                          widget.currentCharacterCardAvatarUri,
+                      onDismiss: widget.onDismiss,
+                    ),
+                    const Divider(height: 1),
                     ...widget.leadingChildren,
                     _MenuSection(
                       icon: Icons.data_object_outlined,
@@ -196,6 +326,8 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                           _memoryExpanded = !_memoryExpanded;
                         });
                       },
+                      onInfoTap: () =>
+                          _showMemoryInfo('记忆状态', _memoryQueueDescription),
                       children: <Widget>[
                         _SwitchRow(
                           icon: Icons.assignment_ind_outlined,
@@ -218,6 +350,12 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                           checked: data.enableMemoryAutoUpdate,
                           onTap: () => _toggleMemoryAutoUpdate(data),
                         ),
+                        _ActionRow(
+                          icon: Icons.save_outlined,
+                          title: _memoryBusy ? '正在更新记忆…' : '手动更新记忆',
+                          enabled: !_memoryBusy && widget.currentChatId != null,
+                          onTap: _manualMemory,
+                        ),
                       ],
                     ),
                     _MenuSection(
@@ -232,7 +370,10 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
                       },
                       children: <Widget>[
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 3,
+                          ),
                           child: _PermissionModeSelector(
                             selectedMode: data.toolPermissionMode,
                             onSelected: _setPermissionMode,
@@ -290,6 +431,635 @@ class _AgentInputMenuPopupState extends State<AgentInputMenuPopup> {
             },
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ChatSessionSummarySection extends StatefulWidget {
+  const _ChatSessionSummarySection({
+    required this.viewModel,
+    required this.currentChatId,
+    required this.currentCharacterCardName,
+    required this.currentCharacterCardAvatarUri,
+    required this.onDismiss,
+  });
+
+  final ChatViewModel viewModel;
+  final String? currentChatId;
+  final String? currentCharacterCardName;
+  final String? currentCharacterCardAvatarUri;
+  final VoidCallback onDismiss;
+
+  /// Creates the state for the current chat summary section.
+  @override
+  State<_ChatSessionSummarySection> createState() =>
+      _ChatSessionSummarySectionState();
+}
+
+class _ChatSessionSummarySectionState
+    extends State<_ChatSessionSummarySection> {
+  Timer? _summaryTimer;
+  bool _pollingSummary = false;
+  Future<double>? _maxContextLengthFuture;
+  int _currentWindowSize = 0;
+  int _inputTokenCount = 0;
+  int _outputTokenCount = 0;
+  bool _statsExpanded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _maxContextLengthFuture = _loadSummary();
+    _summaryTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      if (_pollingSummary) return;
+      _pollingSummary = true;
+      try {
+        final chatId = widget.currentChatId;
+        final viewModel = widget.viewModel;
+        final value = await _loadSummary();
+        if (mounted &&
+            widget.currentChatId == chatId &&
+            widget.viewModel == viewModel) {
+          setState(() {
+            _maxContextLengthFuture = Future.value(value);
+          });
+        }
+      } catch (error) {
+        debugPrint('Chat menu summary refresh: $error');
+      } finally {
+        _pollingSummary = false;
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChatSessionSummarySection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentChatId != widget.currentChatId ||
+        oldWidget.viewModel != widget.viewModel) {
+      _currentWindowSize = 0;
+      _inputTokenCount = 0;
+      _outputTokenCount = 0;
+      _maxContextLengthFuture = _loadSummary();
+    }
+  }
+
+  void _showCharacterCardSelector() {
+    final dialogFuture = showDialog<void>(
+      context: context,
+      builder: (context) => _CharacterCardSelectorDialog(
+        viewModel: widget.viewModel,
+        currentChatId: widget.currentChatId,
+      ),
+    );
+    widget.onDismiss();
+    unawaited(dialogFuture);
+  }
+
+  Future<double> _loadSummary() async {
+    final chatId = widget.currentChatId;
+    final viewModel = widget.viewModel;
+    final summary = await viewModel.chatCore.chatInputMenuSummary(
+      chatId: chatId,
+    );
+    if (mounted &&
+        widget.currentChatId == chatId &&
+        widget.viewModel == viewModel) {
+      setState(() {
+        _currentWindowSize = summary.currentWindowSize;
+        _inputTokenCount = summary.inputTokenCount;
+        _outputTokenCount = summary.outputTokenCount;
+      });
+    }
+    return summary.maxContextLength;
+  }
+
+  @override
+  void dispose() {
+    _summaryTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Builds the current character and token summary rows.
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return FutureBuilder<double>(
+      future: _maxContextLengthFuture,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          Error.throwWithStackTrace(snapshot.error!, snapshot.stackTrace!);
+        }
+        final maxContextLength = snapshot.data;
+        final maxContextTokens = maxContextLength == null
+            ? null
+            : (maxContextLength * 1024).round();
+        final contextUsagePercentage = maxContextTokens == null
+            ? null
+            : _contextUsagePercentage(maxContextTokens);
+        final totalTokenCount = _inputTokenCount + _outputTokenCount;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            InkWell(
+              onTap: _showCharacterCardSelector,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 48),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    children: <Widget>[
+                      SizedBox(
+                        width: 32,
+                        height: 32,
+                        child: ClipOval(
+                          child: CharacterAvatarImage(
+                            avatarUri: widget.currentCharacterCardAvatarUri,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            Text(
+                              '当前角色卡',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            Text(
+                              widget.currentCharacterCardName ?? '未绑定',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: textTheme.bodySmall?.copyWith(
+                                color: colorScheme.onSurface,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        Icons.chevron_right,
+                        size: 20,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            InkWell(
+              onTap: () {
+                setState(() {
+                  _statsExpanded = !_statsExpanded;
+                });
+              },
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 40),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Row(
+                    children: <Widget>[
+                      Icon(
+                        Icons.data_usage_outlined,
+                        size: 17,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 12),
+                      Text('统计', style: textTheme.bodySmall),
+                      const Spacer(),
+                      Text(
+                        contextUsagePercentage == null
+                            ? '加载中...'
+                            : '${contextUsagePercentage.toStringAsFixed(0)}%',
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colorScheme.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Icon(
+                        _statsExpanded
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
+                        size: 20,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (_statsExpanded)
+              ColoredBox(
+                color: colorScheme.surface.withValues(alpha: 0.42),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(40, 6, 12, 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      _ChatStatValueRow(
+                        label: '上下文窗口',
+                        value: _contextWindowLabel(
+                          currentWindowSize: _currentWindowSize,
+                          maxContextTokens: maxContextTokens,
+                        ),
+                      ),
+                      _ChatStatValueRow(
+                        label: '输入 Token',
+                        value: _formatTokenCount(_inputTokenCount),
+                      ),
+                      _ChatStatValueRow(
+                        label: '输出 Token',
+                        value: _formatTokenCount(_outputTokenCount),
+                      ),
+                      _ChatStatValueRow(
+                        label: '总 Token',
+                        value: _formatTokenCount(totalTokenCount),
+                        highlighted: true,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Calculates the current context usage percentage for the summary row.
+  double _contextUsagePercentage(int maxContextTokens) {
+    if (maxContextTokens <= 0) {
+      return 0;
+    }
+    return (_currentWindowSize / maxContextTokens * 100).clamp(0, 999);
+  }
+
+  /// Formats the context window values used in the expanded statistics.
+  String _contextWindowLabel({
+    required int currentWindowSize,
+    required int? maxContextTokens,
+  }) {
+    final maxTokens = maxContextTokens;
+    if (maxTokens == null) {
+      return '加载中...';
+    }
+    return '${_formatTokenCount(currentWindowSize)} / ${_formatTokenCount(maxTokens)}';
+  }
+
+  /// Formats token counts with compact thousands separators.
+  String _formatTokenCount(int value) {
+    return value.toString().replaceAllMapped(
+      RegExp(r'(?<=\d)(?=(\d{3})+$)'),
+      (match) => ',',
+    );
+  }
+}
+
+class _CharacterCardSelectorDialog extends StatefulWidget {
+  const _CharacterCardSelectorDialog({
+    required this.viewModel,
+    required this.currentChatId,
+  });
+
+  final ChatViewModel viewModel;
+  final String? currentChatId;
+
+  /// Creates the state for the character card selector dialog.
+  @override
+  State<_CharacterCardSelectorDialog> createState() =>
+      _CharacterCardSelectorDialogState();
+}
+
+class _CharacterCardSelectorDialogState
+    extends State<_CharacterCardSelectorDialog> {
+  StreamSubscription<core_proxy.ActivePrompt>? _activePromptSubscription;
+  Future<List<core_proxy.CharacterCard>>? _cardsFuture;
+  core_proxy.ActivePrompt? _activePrompt;
+  String? _switchingCharacterCardId;
+
+  /// Starts loading cards and observing the active prompt.
+  @override
+  void initState() {
+    super.initState();
+    _cardsFuture = _loadCharacterCards();
+    _activePromptSubscription = widget.viewModel.chatCore
+        .chatActivePromptFlow(chatId: widget.currentChatId)
+        .listen((prompt) {
+          if (mounted) {
+            setState(() {
+              _activePrompt = prompt;
+            });
+          }
+        });
+    unawaited(_loadActivePrompt());
+  }
+
+  /// Loads the character cards shown in the selector dialog.
+  Future<List<core_proxy.CharacterCard>> _loadCharacterCards() {
+    return widget.viewModel.chatCore.chatCharacterCards(
+      chatId: widget.currentChatId,
+    );
+  }
+
+  /// Reads the active prompt for the initial selection marker.
+  Future<void> _loadActivePrompt() async {
+    final prompt = await widget.viewModel.chatCore
+        .chatActivePromptFlow(chatId: widget.currentChatId)
+        .first;
+    if (mounted) {
+      setState(() {
+        _activePrompt = prompt;
+      });
+    }
+  }
+
+  /// Switches the runtime to the selected character card and closes the dialog.
+  Future<void> _selectCharacterCard(core_proxy.CharacterCard card) async {
+    if (_switchingCharacterCardId != null) {
+      return;
+    }
+    setState(() {
+      _switchingCharacterCardId = card.id;
+    });
+    try {
+      await widget.viewModel.chatCore.switchChatCharacterCardTarget(
+        chatId: widget.currentChatId,
+        characterCardId: card.id,
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _switchingCharacterCardId = null;
+        });
+      }
+    }
+  }
+
+  /// Returns the active card id when the runtime targets a character card.
+  String? get _activeCharacterCardId {
+    final prompt = _activePrompt;
+    return prompt?.tag == 'CharacterCard' ? prompt?.id : null;
+  }
+
+  /// Stops the active prompt subscription when the dialog closes.
+  @override
+  void dispose() {
+    unawaited(_activePromptSubscription?.cancel());
+    super.dispose();
+  }
+
+  /// Builds the character card selector dialog.
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: 360,
+          minHeight: 420,
+          maxHeight: 420,
+        ),
+        child: FutureBuilder<List<core_proxy.CharacterCard>>(
+          future: _cardsFuture,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              Error.throwWithStackTrace(snapshot.error!, snapshot.stackTrace!);
+            }
+            final cards = snapshot.data;
+            if (cards == null) {
+              return const SizedBox.expand(
+                child: Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            }
+            return Column(
+              children: <Widget>[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          '切换角色卡',
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${cards.length} 个',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      IconButton(
+                        tooltip: '关闭',
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close, size: 18),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                if (cards.isEmpty)
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.topLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 18, 16, 20),
+                        child: Text(
+                          '暂无角色卡',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: Scrollbar(
+                      child: ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                        itemCount: cards.length,
+                        separatorBuilder: (context, index) => Divider(
+                          height: 1,
+                          color: colorScheme.outlineVariant.withValues(
+                            alpha: 0.45,
+                          ),
+                        ),
+                        itemBuilder: (context, index) {
+                          final card = cards[index];
+                          return _CharacterCardOption(
+                            card: card,
+                            active: card.id == _activeCharacterCardId,
+                            switching: card.id == _switchingCharacterCardId,
+                            enabled: _switchingCharacterCardId == null,
+                            onTap: () => _selectCharacterCard(card),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _CharacterCardOption extends StatelessWidget {
+  const _CharacterCardOption({
+    required this.card,
+    required this.active,
+    required this.switching,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final core_proxy.CharacterCard card;
+  final bool active;
+  final bool switching;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  /// Builds one selectable character card row.
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final titleColor = enabled
+        ? colorScheme.onSurface
+        : colorScheme.onSurfaceVariant.withValues(alpha: 0.65);
+    final descriptionColor = enabled
+        ? colorScheme.onSurfaceVariant
+        : colorScheme.onSurfaceVariant.withValues(alpha: 0.5);
+    return InkWell(
+      onTap: enabled ? onTap : null,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+        child: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: ClipOval(
+                child: CharacterAvatarImage(
+                  avatarUri: card.avatarUri,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    card.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: active ? colorScheme.primary : titleColor,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                    ),
+                  ),
+                  if (card.description.isNotEmpty)
+                    Text(
+                      card.description,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.labelSmall?.copyWith(
+                        color: descriptionColor,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: switching
+                  ? const Padding(
+                      padding: EdgeInsets.all(2),
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      active ? Icons.check : Icons.circle_outlined,
+                      size: active ? 18 : 16,
+                      color: active
+                          ? colorScheme.primary
+                          : colorScheme.onSurfaceVariant.withValues(
+                              alpha: 0.45,
+                            ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatStatValueRow extends StatelessWidget {
+  const _ChatStatValueRow({
+    required this.label,
+    required this.value,
+    this.highlighted = false,
+  });
+
+  final String label;
+  final String value;
+  final bool highlighted;
+
+  /// Builds one value row in the expanded chat statistics section.
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: <Widget>[
+          Expanded(child: Text(label, style: textTheme.labelSmall)),
+          Text(
+            value,
+            style: textTheme.labelSmall?.copyWith(
+              color: highlighted
+                  ? colorScheme.primary
+                  : colorScheme.onSurfaceVariant,
+              fontWeight: highlighted ? FontWeight.w700 : FontWeight.normal,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -354,6 +1124,7 @@ class _MenuSection extends StatelessWidget {
     required this.value,
     required this.expanded,
     required this.onTap,
+    this.onInfoTap,
     required this.children,
   });
 
@@ -362,8 +1133,10 @@ class _MenuSection extends StatelessWidget {
   final String value;
   final bool expanded;
   final VoidCallback onTap;
+  final VoidCallback? onInfoTap;
   final List<Widget> children;
 
+  /// Builds a compact group without nesting another card inside the menu.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -374,12 +1147,16 @@ class _MenuSection extends StatelessWidget {
         InkWell(
           onTap: onTap,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 40),
+            constraints: const BoxConstraints(minHeight: 36),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
                 children: <Widget>[
-                  Icon(icon, size: 17, color: colorScheme.onSurfaceVariant),
+                  Icon(
+                    icon,
+                    size: 16,
+                    color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                  ),
                   const SizedBox(width: 12),
                   Text(title, style: textTheme.bodySmall),
                   const SizedBox(width: 8),
@@ -395,6 +1172,8 @@ class _MenuSection extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (onInfoTap != null)
+                    _MenuInfoButton(title: '记忆状态', onTap: onInfoTap!),
                   const SizedBox(width: 6),
                   Icon(
                     expanded
@@ -409,12 +1188,9 @@ class _MenuSection extends StatelessWidget {
           ),
         ),
         if (expanded)
-          ColoredBox(
-            color: colorScheme.surface.withValues(alpha: 0.42),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Column(mainAxisSize: MainAxisSize.min, children: children),
-            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 8, 4),
+            child: Column(mainAxisSize: MainAxisSize.min, children: children),
           ),
       ],
     );
@@ -440,6 +1216,7 @@ class _SwitchRow extends StatelessWidget {
   final bool enabled;
   final VoidCallback onTap;
 
+  /// Builds a compact switch row with a layout-sized switch control.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -450,21 +1227,25 @@ class _SwitchRow extends StatelessWidget {
         ? colorScheme.primary
         : colorScheme.onSurfaceVariant;
     final iconName = materialIconName?.trim();
+    final resolvedIcon = iconName == null || iconName.isEmpty
+        ? icon
+        : MaterialIconNameResolver.resolveOrNull(iconName);
+    if (resolvedIcon == null) {
+      throw ArgumentError.value(
+        materialIconName,
+        'materialIconName',
+        'Unknown Material icon name',
+      );
+    }
     return InkWell(
       onTap: enabled ? onTap : null,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 36),
+        constraints: const BoxConstraints(minHeight: 32),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: <Widget>[
-              iconName == null || iconName.isEmpty
-                  ? Icon(icon, size: 16, color: iconColor)
-                  : _MaterialIconLigature(
-                      iconName: iconName,
-                      size: 16,
-                      color: iconColor,
-                    ),
+              Icon(resolvedIcon, size: 16, color: iconColor),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
@@ -484,14 +1265,19 @@ class _SwitchRow extends StatelessWidget {
                   color: enabled
                       ? colorScheme.primary
                       : colorScheme.onSurfaceVariant.withValues(alpha: 0.65),
+                  fontWeight: FontWeight.w600,
                 ),
               ),
               const SizedBox(width: 8),
-              Transform.scale(
-                scale: 0.66,
-                child: Switch(
-                  value: checked,
-                  onChanged: enabled ? (_) => onTap() : null,
+              SizedBox(
+                width: 40,
+                height: 28,
+                child: FittedBox(
+                  child: Switch(
+                    value: checked,
+                    onChanged: enabled ? (_) => onTap() : null,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
                 ),
               ),
             ],
@@ -502,79 +1288,77 @@ class _SwitchRow extends StatelessWidget {
   }
 }
 
-class _MaterialIconLigature extends StatelessWidget {
-  const _MaterialIconLigature({
-    required this.iconName,
-    required this.size,
-    required this.color,
+class _MenuInfoButton extends StatelessWidget {
+  const _MenuInfoButton({required this.title, required this.onTap});
+
+  final String title;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    tooltip: '$title说明',
+    onPressed: onTap,
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints.tightFor(width: 24, height: 28),
+    style: IconButton.styleFrom(
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+    icon: Icon(
+      Icons.info_outline,
+      size: 16,
+      color: Theme.of(
+        context,
+      ).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+    ),
+  );
+}
+
+class _ActionRow extends StatelessWidget {
+  const _ActionRow({
+    required this.icon,
+    required this.title,
+    required this.enabled,
+    required this.onTap,
   });
 
-  final String iconName;
-  final double size;
-  final Color color;
+  final IconData icon;
+  final String title;
+  final bool enabled;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox.square(
-      dimension: size,
-      child: Center(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: Text(
-            _materialIconLigatureName(iconName),
-            overflow: TextOverflow.clip,
-            softWrap: false,
-            style: TextStyle(
-              fontFamily: 'MaterialIcons',
-              height: 1,
-              color: color,
-            ),
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: enabled ? onTap : null,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 32),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: enabled
+                        ? theme.colorScheme.onSurface
+                        : theme.colorScheme.onSurfaceVariant.withValues(
+                            alpha: 0.45,
+                          ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
-}
-
-String _materialIconLigatureName(String iconName) {
-  final buffer = StringBuffer();
-  var wroteSeparator = false;
-  var previousWasLowerOrDigit = false;
-
-  for (final codeUnit in iconName.trim().codeUnits) {
-    final isUpper = codeUnit >= 65 && codeUnit <= 90;
-    final isLower = codeUnit >= 97 && codeUnit <= 122;
-    final isDigit = codeUnit >= 48 && codeUnit <= 57;
-
-    if (isUpper || isLower || isDigit) {
-      if (isUpper && previousWasLowerOrDigit && !wroteSeparator) {
-        buffer.write('_');
-      }
-      buffer.writeCharCode(isUpper ? codeUnit + 32 : codeUnit);
-      wroteSeparator = false;
-      previousWasLowerOrDigit = isLower || isDigit;
-      continue;
-    }
-
-    if (!wroteSeparator && buffer.isNotEmpty) {
-      buffer.write('_');
-      wroteSeparator = true;
-      previousWasLowerOrDigit = false;
-    }
-  }
-
-  var result = buffer.toString();
-  while (result.endsWith('_')) {
-    result = result.substring(0, result.length - 1);
-  }
-  return _materialIconNameHasStyle(result) ? result : '${result}_baseline';
-}
-
-bool _materialIconNameHasStyle(String iconName) {
-  return iconName.endsWith('_baseline') ||
-      iconName.endsWith('_outlined') ||
-      iconName.endsWith('_rounded') ||
-      iconName.endsWith('_sharp');
 }
 
 class _PermissionModeSelector extends StatelessWidget {
@@ -586,6 +1370,7 @@ class _PermissionModeSelector extends StatelessWidget {
   final _ToolPermissionMode selectedMode;
   final ValueChanged<_ToolPermissionMode> onSelected;
 
+  /// Builds the compact three-way permission mode selector.
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -595,10 +1380,10 @@ class _PermissionModeSelector extends StatelessWidget {
         for (final mode in _ToolPermissionMode.values) ...[
           Expanded(
             child: InkWell(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(6),
               onTap: () => onSelected(mode),
               child: Container(
-                height: 34,
+                height: 30,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: mode == selectedMode
@@ -609,7 +1394,7 @@ class _PermissionModeSelector extends StatelessWidget {
                         ? colorScheme.primary
                         : colorScheme.outline.withValues(alpha: 0.35),
                   ),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
                   mode.label,

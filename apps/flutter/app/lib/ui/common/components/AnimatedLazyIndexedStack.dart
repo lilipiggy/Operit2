@@ -2,13 +2,15 @@
 
 import 'package:flutter/material.dart';
 
+import 'RetainedPage.dart';
+
 class AnimatedLazyIndexedStack extends StatefulWidget {
   const AnimatedLazyIndexedStack({
     super.key,
     required this.index,
     required this.itemCount,
     required this.itemBuilder,
-    this.duration = const Duration(milliseconds: 260),
+    this.duration = const Duration(milliseconds: 200),
   });
 
   final int index;
@@ -23,13 +25,20 @@ class AnimatedLazyIndexedStack extends StatefulWidget {
 
 class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
     with SingleTickerProviderStateMixin {
+  static const double _entryOffset = 12;
+  static const double _exitOffset = 6;
+  static const Curve _fadeCurve = Interval(0, 0.55, curve: Curves.easeOutCubic);
+
   late final AnimationController _controller;
-  late final Animation<double> _curve;
+  late final CurvedAnimation _curve;
   final Set<int> _builtIndexes = <int>{};
   final Map<int, SnapshotController> _snapshotControllers =
       <int, SnapshotController>{};
   int? _previousIndex;
-  int _transitionDirection = 1;
+  Tween<double> _incomingOffset = Tween<double>(begin: 0, end: 0);
+  Tween<double> _outgoingOffset = Tween<double>(begin: 0, end: 0);
+  Tween<double> _incomingOpacity = Tween<double>(begin: 1, end: 1);
+  Tween<double> _outgoingOpacity = Tween<double>(begin: 1, end: 0);
 
   @override
   void initState() {
@@ -41,6 +50,7 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
     _rememberIndex(widget.index);
   }
 
+  /// Updates tab membership and releases snapshots from interrupted exits.
   @override
   void didUpdateWidget(covariant AnimatedLazyIndexedStack oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -52,6 +62,26 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
         .forEach(_disposeSnapshotController);
     _rememberIndex(widget.index);
     if (oldWidget.index != widget.index) {
+      final direction = widget.index > oldWidget.index ? 1 : -1;
+      final motion = _curve.value;
+      final fade = _fadeCurve.transform(_controller.value);
+      final outgoingOffset = _incomingOffset.transform(motion);
+      final outgoingOpacity = _incomingOpacity.transform(fade);
+      final reversing = widget.index == _previousIndex;
+      final incomingOffset = reversing
+          ? _outgoingOffset.transform(motion)
+          : _entryOffset * direction;
+      final incomingOpacity = reversing
+          ? _outgoingOpacity.transform(fade)
+          : 1.0;
+      _incomingOffset = Tween<double>(begin: incomingOffset, end: 0);
+      _outgoingOffset = Tween<double>(
+        begin: outgoingOffset,
+        end: -_exitOffset * direction,
+      );
+      _incomingOpacity = Tween<double>(begin: incomingOpacity, end: 1);
+      _outgoingOpacity = Tween<double>(begin: outgoingOpacity, end: 0);
+      _snapshotControllers[_previousIndex]?.allowSnapshotting = false;
       _rememberIndex(oldWidget.index);
       _previousIndex = oldWidget.index;
       final previousSnapshotController = _snapshotControllerFor(
@@ -60,7 +90,6 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
       previousSnapshotController.allowSnapshotting = true;
       previousSnapshotController.clear();
       _snapshotControllerFor(widget.index).allowSnapshotting = false;
-      _transitionDirection = widget.index > oldWidget.index ? 1 : -1;
       _controller.forward(from: 0);
     }
   }
@@ -74,9 +103,11 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
     }
   }
 
+  /// Releases animation listeners and tab snapshot controllers.
   @override
   void dispose() {
     _controller.removeStatusListener(_onAnimationStatusChanged);
+    _curve.dispose();
     _controller.dispose();
     for (final controller in _snapshotControllers.values) {
       controller.dispose();
@@ -123,53 +154,50 @@ class _AnimatedLazyIndexedStackState extends State<AnimatedLazyIndexedStack>
     );
   }
 
+  /// Preserves each tab's keyed ancestry while its visibility and role change.
   Widget _buildIndexedChild(BuildContext context, int index) {
     final isCurrent = index == widget.index;
     final isPrevious = index == _previousIndex;
     final visible = isCurrent || isPrevious;
     final snapshotController = _snapshotControllerFor(index);
-    final child = KeyedSubtree(
-      key: ValueKey<int>(index),
+    final child = RepaintBoundary(
       child: SnapshotWidget(
         controller: snapshotController,
         mode: SnapshotMode.forced,
         autoresize: true,
-        child: widget.itemBuilder(context, index),
+        child: Builder(
+          builder: (context) => widget.itemBuilder(context, index),
+        ),
       ),
     );
 
-    if (!visible) {
-      return Offstage(
-        offstage: true,
-        child: TickerMode(enabled: false, child: child),
-      );
-    }
-
     return Positioned.fill(
-      child: IgnorePointer(
-        ignoring: !isCurrent,
-        child: AnimatedBuilder(
-          animation: _curve,
-          child: child,
-          builder: (context, child) {
-            final value = _previousIndex == null ? 1.0 : _curve.value;
-            final opacity = isPrevious ? 1.0 - value : 1.0;
-            final distance = isCurrent ? 0.035 : 0.022;
-            final offsetDirection = isCurrent
-                ? _transitionDirection
-                : -_transitionDirection;
-            final offset = isCurrent
-                ? (1.0 - value) * distance * offsetDirection
-                : value * distance * offsetDirection;
-            final animatedChild = FractionalTranslation(
-              translation: Offset(offset, 0),
-              child: child,
-            );
-            if (!isPrevious) {
-              return animatedChild;
-            }
-            return Opacity(opacity: opacity, child: animatedChild);
-          },
+      key: ValueKey<int>(index),
+      child: RetainedPage(
+        active: visible,
+        child: IgnorePointer(
+          ignoring: !isCurrent,
+          child: AnimatedBuilder(
+            animation: visible ? _curve : kAlwaysCompleteAnimation,
+            child: child,
+            builder: (context, child) {
+              final value = _previousIndex == null ? 1.0 : _curve.value;
+              final fade = _fadeCurve.transform(_controller.value);
+              final opacity = isCurrent
+                  ? _incomingOpacity.transform(fade)
+                  : _outgoingOpacity.transform(fade);
+              final offset = isCurrent
+                  ? _incomingOffset.transform(value)
+                  : _outgoingOffset.transform(value);
+              return Opacity(
+                opacity: opacity,
+                child: Transform.translate(
+                  offset: Offset(offset, 0),
+                  child: child,
+                ),
+              );
+            },
+          ),
         ),
       ),
     );

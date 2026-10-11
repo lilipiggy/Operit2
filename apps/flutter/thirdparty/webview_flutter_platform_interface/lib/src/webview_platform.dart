@@ -7,6 +7,7 @@ import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'platform_navigation_delegate.dart';
 import 'platform_webview_controller.dart';
 import 'platform_webview_cookie_manager.dart';
+import 'platform_webview_data_manager.dart';
 import 'platform_webview_widget.dart';
 import 'types/types.dart';
 
@@ -16,6 +17,16 @@ export 'types/types.dart';
 
 /// Interface for a platform implementation of a WebView.
 abstract class WebViewPlatform extends PlatformInterface {
+  /// Indicates whether this adapter can retain a browser without a visible widget.
+  bool get supportsOffscreenWebViews => false;
+
+  /// Creates the data manager supplied by the selected browser adapter.
+  PlatformWebViewDataManager createPlatformWebViewDataManager(
+    PlatformWebViewDataManagerCreationParams params,
+  ) {
+    throw UnsupportedError('This browser adapter does not implement a data manager');
+  }
+
   /// Creates a new [WebViewPlatform].
   WebViewPlatform() : super(token: _token);
 

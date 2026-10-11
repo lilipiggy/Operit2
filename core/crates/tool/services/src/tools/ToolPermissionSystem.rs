@@ -62,8 +62,9 @@ pub enum PermissionRequestResult {
 
 type AsyncPermissionRequestFuture =
     Pin<Box<dyn Future<Output = PermissionRequestResult> + Send + 'static>>;
-type AsyncPermissionRequester =
-    Arc<dyn Fn(AITool, String) -> AsyncPermissionRequestFuture + Send + Sync + 'static>;
+type AsyncPermissionRequester = Arc<
+    dyn Fn(AITool, String, Option<String>) -> AsyncPermissionRequestFuture + Send + Sync + 'static,
+>;
 type OperationDescriptionGenerator = Arc<dyn Fn(&AITool) -> String + Send + Sync + 'static>;
 
 /// Persists tool permission policy and mediates interactive permission checks.
@@ -114,15 +115,15 @@ impl ToolPermissionSystem {
     #[allow(non_snake_case)]
     pub fn setAsyncPermissionRequester<F, TFuture>(&self, requester: F)
     where
-        F: Fn(AITool, String) -> TFuture + Send + Sync + 'static,
+        F: Fn(AITool, String, Option<String>) -> TFuture + Send + Sync + 'static,
         TFuture: Future<Output = PermissionRequestResult> + Send + 'static,
     {
         *self
             .asyncPermissionRequester
             .lock()
             .expect("tool async permission requester mutex poisoned") =
-            Some(Arc::new(move |tool, description| {
-                Box::pin(requester(tool, description))
+            Some(Arc::new(move |tool, description, chatId| {
+                Box::pin(requester(tool, description, chatId))
             }));
     }
 
@@ -177,22 +178,14 @@ impl ToolPermissionSystem {
             .unwrap_or_else(|| format!("Tool operation: {}", tool.name))
     }
 
-    /// Asynchronously requests approval for a package tool invocation.
-    #[allow(non_snake_case)]
-    pub async fn checkPackageToolApprovalAsync(
-        &self,
-        tool: &AITool,
-    ) -> Result<bool, PreferencesDataStoreError> {
-        self.requestPermissionAsync(tool).await
-    }
-
     /// Asynchronously requests approval for a tool invocation that can escape the sandbox boundary.
     #[allow(non_snake_case)]
     pub async fn checkSandboxEscapeApprovalAsync(
         &self,
         tool: &AITool,
+        chatId: Option<String>,
     ) -> Result<bool, PreferencesDataStoreError> {
-        self.requestPermissionAsync(tool).await
+        self.requestPermissionAsync(tool, chatId).await
     }
 
     /// Refreshes permission request state exposed to front-end observers.
@@ -206,6 +199,7 @@ impl ToolPermissionSystem {
     async fn requestPermissionAsync(
         &self,
         tool: &AITool,
+        chatId: Option<String>,
     ) -> Result<bool, PreferencesDataStoreError> {
         if self
             .sessionApprovedTools
@@ -223,7 +217,7 @@ impl ToolPermissionSystem {
             .expect("tool async permission requester mutex poisoned")
             .clone();
         let result = match requester {
-            Some(callback) => callback(tool.clone(), description).await,
+            Some(callback) => callback(tool.clone(), description, chatId).await,
             None => PermissionRequestResult::DENY,
         };
 

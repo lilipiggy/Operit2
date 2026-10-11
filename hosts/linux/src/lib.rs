@@ -25,6 +25,10 @@ pub use operit_host_native_common::NativeHostJavaScriptRuntimeHost as LinuxHostJ
 pub use operit_host_native_common::NativeHostRuntimeEventSchedulerHost as LinuxHostRuntimeEventSchedulerHost;
 #[cfg(target_os = "linux")]
 pub use operit_host_native_common::NativeHostRuntimeTaskSchedulerHost as LinuxHostRuntimeTaskSchedulerHost;
+#[cfg(target_os = "linux")]
+pub use plugin_sdk_ipc::LinuxPluginSdkIpcHost;
+#[cfg(target_os = "linux")]
+mod plugin_sdk_ipc;
 pub use tools::audio::LinuxAudioPlaybackHost;
 pub use tools::bluetooth::LinuxBluetoothHost;
 pub use tools::browser::{LinuxBrowserAutomationHost, LinuxWebVisitHost};
@@ -65,6 +69,9 @@ pub fn createRuntimeHostManager(
     )
     .withHostSecretStore(hostSecretStore)
     .withWebSocketHost(Arc::new(LinuxHttpHost::new()))
+    .withHttpServerHost(Arc::new(operit_host_native_common::NativeHttpServerHost))
+    .withTcpHost(Arc::new(operit_host_native_common::NativeTcpHost))
+    .withSerialPortHost(Arc::new(operit_host_native_common::NativeSerialPortHost))
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withAudioPlaybackHost(Arc::new(LinuxAudioPlaybackHost::new()))
@@ -74,5 +81,7 @@ pub fn createRuntimeHostManager(
     .withHostRuntimeEventHost(Arc::new(LinuxHostRuntimeEventHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(LinuxHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(LinuxHostJavaScriptRuntimeHost::new()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(LinuxHostRuntimeTaskSchedulerHost::new()))
+    .withPluginSdkIpcHost(Arc::new(LinuxPluginSdkIpcHost::new()))
 }

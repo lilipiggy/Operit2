@@ -210,6 +210,7 @@ class _WorkspacePathIconButton extends StatelessWidget {
       onPressed: onPressed,
       icon: Icon(icon, size: 20),
       visualDensity: VisualDensity.compact,
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
       padding: EdgeInsets.zero,
       constraints: BoxConstraints.tightFor(width: size, height: size),
     );

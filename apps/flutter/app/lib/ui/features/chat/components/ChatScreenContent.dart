@@ -5,12 +5,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
+import 'ChatToolPermissionPanel.dart';
 import '../../../../data/preferences/UserPreferencesManager.dart';
+import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
+import '../../../common/interactions/DrawerGestureExclusion.dart';
 import '../../../theme/OperitTheme.dart';
 import '../viewmodel/ChatViewModel.dart';
 import '../tts/TtsPlaybackController.dart';
 import 'ChatArea.dart';
+import 'NewChatIntro.dart';
+import 'ChatLayoutMetrics.dart';
 import 'ChatMultiSelectBar.dart';
 import 'ChatScrollNavigator.dart';
 import 'ChatToastHost.dart';
@@ -19,6 +24,8 @@ import 'share/ChatShareImageGenerator.dart';
 import 'share/ChatShareImagePreviewDialog.dart';
 import 'style/input/agent/AgentChatInputSection.dart';
 import 'style/input/classic/ClassicChatInputSection.dart';
+import 'style/input/common/InputProcessingStatusLane.dart';
+import 'style/input/common/ChatRouteStatusHint.dart';
 import 'style/input/common/PendingQueueMessageItem.dart';
 
 class ChatScreenContent extends StatelessWidget {
@@ -31,14 +38,17 @@ class ChatScreenContent extends StatelessWidget {
     required this.inputFocusNode,
     required this.scrollController,
     required this.inputProcessingState,
+    this.mentionSuggestionPanel,
     required this.viewModel,
     required this.currentChatId,
+    required this.currentCharacterCardName,
     required this.currentCharacterCardAvatarUri,
     required this.autoScrollToBottomListenable,
     required this.hasOlderDisplayHistory,
     required this.hasNewerDisplayHistory,
     required this.isLoadingDisplayWindow,
     required this.loadLocatorEntries,
+    required this.onRevealMessageForLocator,
     required this.onAutoScrollToBottomChanged,
     required this.onLoadOlderDisplayWindow,
     required this.onLoadNewerDisplayWindow,
@@ -47,6 +57,7 @@ class ChatScreenContent extends StatelessWidget {
     required this.onDeleteMessage,
     required this.onDeleteMessagesFrom,
     required this.onDeleteMessageVariant,
+    required this.onSelectMessageVariant,
     required this.onRollbackToMessage,
     required this.onSelectMessageToEdit,
     required this.onRegenerateMessage,
@@ -65,6 +76,8 @@ class ChatScreenContent extends StatelessWidget {
     required this.onCancelMessage,
     required this.pendingQueueMessages,
     required this.isPendingQueueExpanded,
+    required this.toolPermissionRequests,
+    required this.onToolPermissionDecision,
     required this.onPendingQueueExpandedChange,
     required this.onDeletePendingQueueMessage,
     required this.onEditPendingQueueMessage,
@@ -75,6 +88,7 @@ class ChatScreenContent extends StatelessWidget {
     required this.onAttachMemory,
     required this.onAttachFile,
     required this.onAttachFiles,
+    required this.onPasteImages,
     required this.onAttachScreenContent,
     required this.onAttachNotifications,
     required this.onAttachLocation,
@@ -98,14 +112,17 @@ class ChatScreenContent extends StatelessWidget {
   final FocusNode inputFocusNode;
   final ScrollController scrollController;
   final core_proxy.InputProcessingState inputProcessingState;
+  final Widget? mentionSuggestionPanel;
   final ChatViewModel viewModel;
   final String? currentChatId;
+  final String? currentCharacterCardName;
   final String? currentCharacterCardAvatarUri;
   final ValueListenable<bool> autoScrollToBottomListenable;
   final bool hasOlderDisplayHistory;
   final bool hasNewerDisplayHistory;
   final bool isLoadingDisplayWindow;
   final LoadMessageLocatorEntries loadLocatorEntries;
+  final RevealMessageForLocator onRevealMessageForLocator;
   final ValueChanged<bool> onAutoScrollToBottomChanged;
   final Future<void> Function() onLoadOlderDisplayWindow;
   final Future<void> Function() onLoadNewerDisplayWindow;
@@ -114,6 +131,7 @@ class ChatScreenContent extends StatelessWidget {
   final MessageTimestampAction onDeleteMessage;
   final MessageTimestampBoolAction onDeleteMessagesFrom;
   final MessageVariantAction onDeleteMessageVariant;
+  final MessageVariantAction onSelectMessageVariant;
   final MessageTimestampSelectionAction onRollbackToMessage;
   final MessageSelectionAction onSelectMessageToEdit;
   final MessageTimestampAction onRegenerateMessage;
@@ -132,19 +150,28 @@ class ChatScreenContent extends StatelessWidget {
   final VoidCallback onCancelMessage;
   final List<PendingQueueMessageItem> pendingQueueMessages;
   final bool isPendingQueueExpanded;
+  final List<core_proxy.RuntimeHostInteractionToolPermissionRequest>
+  toolPermissionRequests;
+  final Future<void> Function(
+    String chatId,
+    String requestId,
+    ChatToolPermissionResult result,
+  )
+  onToolPermissionDecision;
   final ValueChanged<bool> onPendingQueueExpandedChange;
   final ValueChanged<int> onDeletePendingQueueMessage;
   final ValueChanged<int> onEditPendingQueueMessage;
   final ValueChanged<int> onSendPendingQueueMessage;
   final List<AttachmentInfo> attachments;
   final VoidCallback onAttachImage;
-  final VoidCallback onTakePhoto;
+  final VoidCallback? onTakePhoto;
   final VoidCallback onAttachMemory;
   final VoidCallback onAttachFile;
   final ValueChanged<List<String>> onAttachFiles;
-  final VoidCallback onAttachScreenContent;
-  final VoidCallback onAttachNotifications;
-  final VoidCallback onAttachLocation;
+  final ValueChanged<List<PastedImageAttachmentPayload>> onPasteImages;
+  final VoidCallback? onAttachScreenContent;
+  final VoidCallback? onAttachNotifications;
+  final VoidCallback? onAttachLocation;
   final ValueChanged<String> onAttachPackage;
   final ValueChanged<String> onRemoveAttachment;
   final ValueChanged<AttachmentInfo> onInsertAttachment;
@@ -159,58 +186,173 @@ class ChatScreenContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final inputStyle = OperitTheme.of(
+    final theme = Theme.of(context);
+    final themePreferenceSnapshot = OperitTheme.of(
       context,
-    ).themePreferenceSnapshot.inputStyle;
+    ).themePreferenceSnapshot;
+    final inputStyle = themePreferenceSnapshot.inputStyle;
+    final statusLaneInset = _inputProcessingStatusLaneInset(
+      themePreferenceSnapshot,
+    );
+    final processingStatus = inputProcessingStatusText(
+      AppLocalizations.of(context)!,
+      inputProcessingState,
+    );
+    final showProcessingStatus =
+        statusLaneInset > 0 &&
+        inputProcessingState.isProcessing &&
+        processingStatus.isNotEmpty;
     return Stack(
       alignment: Alignment.topCenter,
       children: <Widget>[
-        Column(
-          children: <Widget>[
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  IgnorePointer(
-                    ignoring: isPreparingChatSwitch,
-                    child: Opacity(
-                      opacity: isPreparingChatSwitch ? 0 : 1,
-                      child: _buildChatArea(context),
+        Positioned.fill(
+          child: Column(
+            children: <Widget>[
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    IgnorePointer(
+                      ignoring: isPreparingChatSwitch,
+                      child: Opacity(
+                        opacity: isPreparingChatSwitch ? 0 : 1,
+                        child: _buildChatArea(
+                          context,
+                          bottomContentInset: statusLaneInset,
+                        ),
+                      ),
+                    ),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: NewChatIntroOverlay(
+                          currentChatId: currentChatId,
+                          isChatEmpty:
+                              !loading &&
+                              messages.isEmpty &&
+                              errorMessage == null,
+                          isSwitching: loading || isPreparingChatSwitch,
+                        ),
+                      ),
+                    ),
+                    if (!isPreparingChatSwitch && statusLaneInset > 0)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: _buildInputProcessingStatusLane(
+                          themePreferenceSnapshot,
+                          visible: showProcessingStatus,
+                          status: processingStatus,
+                          textStyle: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(
+                              alpha: 0.8,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (isPreparingChatSwitch) const M3LoadingPane(size: 42),
+                  ],
+                ),
+              ),
+              if (!isPreparingChatSwitch && toolPermissionRequests.isNotEmpty)
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: themePreferenceSnapshot.bubbleWideLayoutEnabled
+                          ? chatWideContentMaxWidth
+                          : chatContentMaxWidth,
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: themePreferenceSnapshot.chatInputFloating
+                            ? 8
+                            : 0,
+                      ),
+                      child: ChatToolPermissionPanel(
+                        request: toolPermissionRequests.first,
+                        onRespond: onToolPermissionDecision,
+                      ),
                     ),
                   ),
-                  if (isPreparingChatSwitch) const M3LoadingPane(size: 42),
-                ],
+                ),
+              // Keep the input subtree mounted during chat switches: tearing
+              // it down deactivates tooltip states whose global pointer
+              // routes then crash on ancestor lookups ("deactivated
+              // widget's ancestor"), matching the chat area treatment.
+              IgnorePointer(
+                ignoring: isPreparingChatSwitch,
+                child: Opacity(
+                  opacity: isPreparingChatSwitch ? 0 : 1,
+                  child: isMultiSelectMode
+                      ? ChatMultiSelectBar(
+                          selectedCount: selectedMessageTimestamps.length,
+                          allSelected:
+                              _selectableMessageTimestamps.isNotEmpty &&
+                              _selectableMessageTimestamps.length ==
+                                  selectedMessageTimestamps.length,
+                          onClose: onExitMultiSelectMode,
+                          onToggleSelectAll:
+                              _selectableMessageTimestamps.isNotEmpty &&
+                                  _selectableMessageTimestamps.length ==
+                                      selectedMessageTimestamps.length
+                              ? onClearMessageSelection
+                              : onSelectAllMessages,
+                          onQueueMemory:
+                              currentChatId == null ||
+                                  selectedMessageTimestamps.isEmpty
+                              ? null
+                              : () async {
+                                  final selected = _selectedVisibleMessages
+                                      .where((m) => m.sender == 'user')
+                                      .map((m) => m.timestamp)
+                                      .toList();
+                                  if (selected.isEmpty) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('请选择用户消息')),
+                                    );
+                                    return;
+                                  }
+                                  try {
+                                    await viewModel
+                                        .enqueueSelectedMessagesForMemory(
+                                          currentChatId!,
+                                          selected,
+                                        );
+                                    if (context.mounted)
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('已加入所属记忆库队列'),
+                                        ),
+                                      );
+                                  } catch (error) {
+                                    if (context.mounted)
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(content: Text('入队失败：$error')),
+                                      );
+                                  }
+                                },
+                          onCopy: selectedMessageTimestamps.isEmpty
+                              ? null
+                              : () => _copySelectedMessages(context),
+                          onShareImage: selectedMessageTimestamps.isEmpty
+                              ? null
+                              : () => _generateShareImage(context),
+                          onDelete: selectedMessageTimestamps.isEmpty
+                              ? null
+                              : () => _confirmDeleteSelected(context),
+                        )
+                      : DrawerGestureExclusion(
+                          child: _buildChatInputSection(inputStyle),
+                        ),
+                ),
               ),
-            ),
-            if (!isPreparingChatSwitch) ...<Widget>[
-              if (isMultiSelectMode)
-                ChatMultiSelectBar(
-                  selectedCount: selectedMessageTimestamps.length,
-                  allSelected:
-                      _selectableMessageTimestamps.isNotEmpty &&
-                      _selectableMessageTimestamps.length ==
-                          selectedMessageTimestamps.length,
-                  onClose: onExitMultiSelectMode,
-                  onToggleSelectAll:
-                      _selectableMessageTimestamps.isNotEmpty &&
-                          _selectableMessageTimestamps.length ==
-                              selectedMessageTimestamps.length
-                      ? onClearMessageSelection
-                      : onSelectAllMessages,
-                  onCopy: selectedMessageTimestamps.isEmpty
-                      ? null
-                      : () => _copySelectedMessages(context),
-                  onShareImage: selectedMessageTimestamps.isEmpty
-                      ? null
-                      : () => _generateShareImage(context),
-                  onDelete: selectedMessageTimestamps.isEmpty
-                      ? null
-                      : () => _confirmDeleteSelected(context),
-                )
-              else
-                _buildChatInputSection(inputStyle),
             ],
-          ],
+          ),
         ),
         SafeArea(
           child: Padding(
@@ -233,14 +375,27 @@ class ChatScreenContent extends StatelessWidget {
 
   /// Builds the chat input section selected by the saved input style.
   Widget _buildChatInputSection(String inputStyle) {
+    return ChatRouteStatusHint(
+      chatId: currentChatId,
+      viewModel: viewModel,
+      builder: (suffix) => _buildChatInputWithRouteHint(inputStyle, suffix),
+    );
+  }
+
+  /// Passes the same Core-provided route label to both composer styles.
+  Widget _buildChatInputWithRouteHint(String inputStyle, String suffix) {
     return switch (inputStyle) {
       UserPreferencesManager.INPUT_STYLE_AGENT => AgentChatInputSection(
+        hintSuffix: suffix,
         controller: messageController,
         focusNode: inputFocusNode,
         isLoading: loading,
         inputState: inputProcessingState,
+        mentionSuggestionPanel: mentionSuggestionPanel,
         viewModel: viewModel,
         currentChatId: currentChatId,
+        currentCharacterCardName: currentCharacterCardName,
+        currentCharacterCardAvatarUri: currentCharacterCardAvatarUri,
         onSendMessage: onSendMessage,
         onQueueMessage: onQueueMessage,
         onCancelMessage: onCancelMessage,
@@ -256,6 +411,7 @@ class ChatScreenContent extends StatelessWidget {
         onAttachMemory: onAttachMemory,
         onAttachFile: onAttachFile,
         onAttachFiles: onAttachFiles,
+        onPasteImages: onPasteImages,
         onAttachScreenContent: onAttachScreenContent,
         onAttachNotifications: onAttachNotifications,
         onAttachLocation: onAttachLocation,
@@ -267,12 +423,16 @@ class ChatScreenContent extends StatelessWidget {
         onSpeechInput: onSpeechInput,
       ),
       UserPreferencesManager.INPUT_STYLE_CLASSIC => ClassicChatInputSection(
+        hintSuffix: suffix,
         controller: messageController,
         focusNode: inputFocusNode,
         isLoading: loading,
         inputState: inputProcessingState,
+        mentionSuggestionPanel: mentionSuggestionPanel,
         viewModel: viewModel,
         currentChatId: currentChatId,
+        currentCharacterCardName: currentCharacterCardName,
+        currentCharacterCardAvatarUri: currentCharacterCardAvatarUri,
         onSendMessage: onSendMessage,
         onQueueMessage: onQueueMessage,
         onCancelMessage: onCancelMessage,
@@ -288,6 +448,7 @@ class ChatScreenContent extends StatelessWidget {
         onAttachMemory: onAttachMemory,
         onAttachFile: onAttachFile,
         onAttachFiles: onAttachFiles,
+        onPasteImages: onPasteImages,
         onAttachScreenContent: onAttachScreenContent,
         onAttachNotifications: onAttachNotifications,
         onAttachLocation: onAttachLocation,
@@ -303,7 +464,10 @@ class ChatScreenContent extends StatelessWidget {
   }
 
   /// Builds the scrollable chat area with message-level actions.
-  Widget _buildChatArea(BuildContext context) {
+  Widget _buildChatArea(
+    BuildContext context, {
+    required double bottomContentInset,
+  }) {
     return ChatArea(
       messages: messages,
       isLoading: loading,
@@ -311,11 +475,14 @@ class ChatScreenContent extends StatelessWidget {
       scrollController: scrollController,
       currentChatId: currentChatId,
       currentCharacterCardAvatarUri: currentCharacterCardAvatarUri,
+      clients: viewModel.clients,
+      packageManager: viewModel.clients.application.packageManager(),
       autoScrollToBottomListenable: autoScrollToBottomListenable,
       hasOlderDisplayHistory: hasOlderDisplayHistory,
       hasNewerDisplayHistory: hasNewerDisplayHistory,
       isLoadingDisplayWindow: isLoadingDisplayWindow,
       loadLocatorEntries: loadLocatorEntries,
+      onRevealMessageForLocator: onRevealMessageForLocator,
       onAutoScrollToBottomChanged: onAutoScrollToBottomChanged,
       onLoadOlderDisplayWindow: onLoadOlderDisplayWindow,
       onLoadNewerDisplayWindow: onLoadNewerDisplayWindow,
@@ -324,6 +491,7 @@ class ChatScreenContent extends StatelessWidget {
       onDeleteMessage: onDeleteMessage,
       onDeleteMessagesFrom: onDeleteMessagesFrom,
       onDeleteMessageVariant: onDeleteMessageVariant,
+      onSelectMessageVariant: onSelectMessageVariant,
       onRollbackToMessage: onRollbackToMessage,
       onSelectMessageToEdit: onSelectMessageToEdit,
       onRegenerateMessage: onRegenerateMessage,
@@ -337,6 +505,41 @@ class ChatScreenContent extends StatelessWidget {
       onRefreshRequested: onRefreshRequested,
       isMultiSelectMode: isMultiSelectMode,
       selectedMessageTimestamps: selectedMessageTimestamps,
+      bottomContentInset: bottomContentInset,
+    );
+  }
+
+  /// Resolves the transcript space reserved for the status overlay.
+  double _inputProcessingStatusLaneInset(ThemePreferenceSnapshot snapshot) {
+    if (isPreparingChatSwitch ||
+        isMultiSelectMode ||
+        !snapshot.showInputProcessingStatus) {
+      return 0;
+    }
+    return inputProcessingStatusLaneHeight;
+  }
+
+  /// Builds the status lane floating over the bottom of the transcript.
+  Widget _buildInputProcessingStatusLane(
+    ThemePreferenceSnapshot snapshot, {
+    required bool visible,
+    required String status,
+    required TextStyle? textStyle,
+  }) {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: snapshot.bubbleWideLayoutEnabled
+              ? chatWideContentMaxWidth
+              : chatContentMaxWidth,
+        ),
+        child: InputProcessingStatusLane(
+          visible: visible,
+          status: status,
+          textStyle: textStyle,
+        ),
+      ),
     );
   }
 
@@ -411,7 +614,9 @@ class ChatScreenContent extends StatelessWidget {
   /// Resolves selected visible messages in display order.
   List<ChatUiMessage> get _selectedVisibleMessages {
     return messages
-        .where((message) => selectedMessageTimestamps.contains(message.timestamp))
+        .where(
+          (message) => selectedMessageTimestamps.contains(message.timestamp),
+        )
         .toList(growable: false);
   }
 
@@ -484,6 +689,7 @@ class ChatScreenContent extends StatelessWidget {
       final image = await ChatShareImageGenerator.generate(
         context: context,
         messages: _selectedVisibleMessages,
+        splitMarkdownContent: viewModel.splitMarkdownContent,
       );
       if (!context.mounted) {
         return;

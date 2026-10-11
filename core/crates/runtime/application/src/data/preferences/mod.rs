@@ -8,6 +8,8 @@ pub mod AgreementPreferences;
 pub mod AndroidPermissionPreferences;
 #[path = "ApiPreferences.rs"]
 pub mod ApiPreferences;
+#[path = "CodexAuthPreferences.rs"]
+pub mod CodexAuthPreferences;
 #[path = "CharacterCardBilingualData.rs"]
 pub mod CharacterCardBilingualData;
 #[path = "CharacterCardManager.rs"]
@@ -50,8 +52,6 @@ pub mod SharedMemoryStoreManager;
 pub mod SkillVisibilityPreferences;
 #[path = "SttConfigManager.rs"]
 pub mod SttConfigManager;
-#[path = "ToolCollapseMode.rs"]
-pub mod ToolCollapseMode;
 #[path = "TtsConfigManager.rs"]
 pub mod TtsConfigManager;
 #[path = "UserPreferencesManager.rs"]
@@ -86,7 +86,6 @@ pub use RemoteAnnouncementPreferences::*;
 pub use SharedMemoryStoreManager::*;
 pub use SkillVisibilityPreferences::*;
 pub use SttConfigManager::*;
-pub use ToolCollapseMode::*;
 pub use TtsConfigManager::*;
 pub use UserPreferencesManager::*;
 pub use WaifuPreferences::*;

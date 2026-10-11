@@ -1,7 +1,9 @@
 // ignore_for_file: file_names
 
 import 'dart:convert';
-import 'dart:html' as html;
+import 'dart:js_interop';
+
+import 'package:web/web.dart' as web;
 
 import 'ClientLogLevel.dart';
 
@@ -26,18 +28,19 @@ Future<String> logFilePath() async {
 }
 
 Future<String> readText() async {
-  return html.window.localStorage[_logStorageKey] ?? '';
+  return web.window.localStorage.getItem(_logStorageKey) ?? '';
 }
 
 String? lastWriteError() => null;
 
 Future<void> clear() async {
-  html.window.localStorage.remove(_logStorageKey);
+  web.window.localStorage.removeItem(_logStorageKey);
 }
 
 void write(
   ClientLogLevel level,
   String message, {
+  bool writeToConsole = true,
   Object? error,
   StackTrace? stackTrace,
 }) {
@@ -53,20 +56,22 @@ void write(
       ..write(stackTrace);
   }
   final text = buffer.toString();
-  switch (level) {
-    case ClientLogLevel.error:
-    case ClientLogLevel.assert_:
-      html.window.console.error(text);
-    case ClientLogLevel.warn:
-      html.window.console.warn(text);
-    case ClientLogLevel.verbose:
-    case ClientLogLevel.debug:
-    case ClientLogLevel.info:
-      html.window.console.log(text);
+  if (writeToConsole) {
+    switch (level) {
+      case ClientLogLevel.error:
+      case ClientLogLevel.assert_:
+        web.console.error(text.toJS);
+      case ClientLogLevel.warn:
+        web.console.warn(text.toJS);
+      case ClientLogLevel.verbose:
+      case ClientLogLevel.debug:
+      case ClientLogLevel.info:
+        web.console.log(text.toJS);
+    }
   }
-  final current = html.window.localStorage[_logStorageKey] ?? '';
+  final current = web.window.localStorage.getItem(_logStorageKey) ?? '';
   final next = current.isEmpty ? text : '$current\n$text';
-  html.window.localStorage[_logStorageKey] = _trimUtf8(next, 256 * 1024);
+  web.window.localStorage.setItem(_logStorageKey, _trimUtf8(next, 256 * 1024));
 }
 
 String _trimUtf8(String value, int maxBytes) {

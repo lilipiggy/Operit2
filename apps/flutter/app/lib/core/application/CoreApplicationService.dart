@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'PluginHotReload.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -8,7 +9,6 @@ import 'package:flutter/widgets.dart';
 
 import '../bridge/ProxyCoreRuntimeBridge.dart';
 import '../host/RuntimeHostInteractionSubscriber.dart';
-import '../link_access/LinkAccessHost.dart';
 import '../logging/ClientLogger.dart';
 import '../notifications/AppNotificationService.dart';
 import '../proxy/generated/CoreProxyClients.g.dart';
@@ -31,9 +31,8 @@ class CoreApplicationService with WidgetsBindingObserver {
       StreamController<Object>.broadcast();
 
   bool _initialized = false;
-  bool _hostSubscriberInstalled = false;
+  AppLifecycleState? _lastEmittedLifecycleState;
   bool _localBackgroundServiceStartAttempted = false;
-  bool _linkHostStartAttempted = false;
   Future<void>? _runtimeServicesStart;
   Object? _pendingStartupError;
 
@@ -58,6 +57,7 @@ class CoreApplicationService with WidgetsBindingObserver {
     final stopwatch = Stopwatch()..start();
     ClientLogger.i('initialize start', tag: _logTag);
     _initialized = true;
+    PluginHotReload.register(_coreClients);
     WidgetsBinding.instance.addObserver(this);
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
     unawaited(_startRuntimeServices());
@@ -70,14 +70,20 @@ class CoreApplicationService with WidgetsBindingObserver {
   /// Forwards Flutter lifecycle changes through the normalized runtime event ingress.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _runtimeManager.runtimeConfigured) {
+      unawaited(_syncHostSubscriber());
+    }
     unawaited(_emitLifecycleEvent(state));
   }
 
   /// Emits one lifecycle event after the selected runtime becomes callable.
   Future<void> _emitLifecycleEvent(AppLifecycleState state) async {
-    if (!_runtimeManager.runtimeConfigured) {
+    if (!_runtimeManager.runtimeConfigured ||
+        _lastEmittedLifecycleState == state) {
       return;
     }
+    _lastEmittedLifecycleState = state;
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final topic = switch (state) {
       AppLifecycleState.resumed => RuntimeEventTopic.appLifecycleResumed,
@@ -162,7 +168,7 @@ class CoreApplicationService with WidgetsBindingObserver {
     });
   }
 
-  /// Starts host subscriptions and LinkHost outside the widget lifecycle.
+  /// Starts host subscriptions and configured node listeners outside the widget lifecycle.
   Future<void> _startRuntimeServicesOnce() async {
     final stopwatch = Stopwatch()..start();
     if (!_runtimeManager.runtimeConfigured) {
@@ -173,6 +179,7 @@ class CoreApplicationService with WidgetsBindingObserver {
       return;
     }
     try {
+      ClientLogger.attachPersistentStorage();
       ClientLogger.i(
         'runtime services start localConfirmed=${_runtimeManager.config.confirmed}',
         tag: _logTag,
@@ -188,13 +195,27 @@ class CoreApplicationService with WidgetsBindingObserver {
         return;
       }
       final deviceInfo = await RuntimeDeviceInfoProvider.current();
-      await _coreClients.linkAccess.linkAccessStore.initializeIdentity(
-        deviceInfo: deviceInfo,
+      await _coreClients.server.runtimeRemoteLinkService.initializeDeviceInfo(
+        supplied: deviceInfo,
       );
-      await _coreClients.server.runtimeRemoteLinkService.updateCurrentDeviceUserName(
-        userName: _runtimeManager.activeIdentity.name,
-      );
-      await _ensureLinkHostStarted();
+      await _coreClients.server.runtimeRemoteLinkService
+          .updateCurrentDeviceUserName(
+            userName: _runtimeManager.activeIdentity.name,
+          );
+      // 配置和监听生命周期归 runtime；Dart 只调用生成的类型化 Proxy。
+      final peerService = _coreClients.server.runtimeRemoteLinkService;
+      final config = await peerService.localHostConfig();
+      if (config == null) {
+        throw StateError('Runtime listener preferences were not initialized');
+      }
+      // Activate only configured transports whose inbound Host operation exists.
+      final capabilities = await peerService.listenerCapabilities();
+      final transports = config.transports
+          .where(capabilities.transports.contains)
+          .toList();
+      if (transports.isNotEmpty) {
+        await peerService.startListening(transports: transports);
+      }
       await _coreClients.server.runtimeRemoteLinkService.startSpaceSync();
       ClientLogger.i(
         'runtime services start done elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -213,25 +234,6 @@ class CoreApplicationService with WidgetsBindingObserver {
         _pendingStartupError = error;
       }
     }
-  }
-
-  /// Starts LinkHost once the local runtime storage is confirmed.
-  Future<void> _ensureLinkHostStarted() async {
-    if (_linkHostStartAttempted) {
-      ClientLogger.d(
-        'link host initialize skipped attempted=true',
-        tag: _logTag,
-      );
-      return;
-    }
-    _linkHostStartAttempted = true;
-    final linkHostStopwatch = Stopwatch()..start();
-    ClientLogger.i('link host initialize start', tag: _logTag);
-    await LinkAccessHost.instance.initializeFromConfig();
-    ClientLogger.i(
-      'link host initialize done elapsedMs=${linkHostStopwatch.elapsedMilliseconds}',
-      tag: _logTag,
-    );
   }
 
   /// Starts the Android foreground Core service for a local runtime.
@@ -258,22 +260,21 @@ class CoreApplicationService with WidgetsBindingObserver {
   /// Synchronizes owner-host event handling with the selected runtime role.
   Future<void> _syncHostSubscriber() async {
     final shouldInstall = _ownsHostInteractions;
-    if (shouldInstall && !_hostSubscriberInstalled) {
+    final installed = RuntimeHostInteractionSubscriber.isInstalled;
+    if (shouldInstall && !installed) {
       final subscriberStopwatch = Stopwatch()..start();
       ClientLogger.i('host subscriber install start', tag: _logTag);
       RuntimeHostInteractionSubscriber.install();
-      _hostSubscriberInstalled = true;
       ClientLogger.i(
         'host subscriber install done elapsedMs=${subscriberStopwatch.elapsedMilliseconds}',
         tag: _logTag,
       );
       return;
     }
-    if (!shouldInstall && _hostSubscriberInstalled) {
+    if (!shouldInstall && installed) {
       final subscriberStopwatch = Stopwatch()..start();
       ClientLogger.i('host subscriber uninstall start', tag: _logTag);
       await RuntimeHostInteractionSubscriber.uninstall();
-      _hostSubscriberInstalled = false;
       ClientLogger.i(
         'host subscriber uninstall done elapsedMs=${subscriberStopwatch.elapsedMilliseconds}',
         tag: _logTag,

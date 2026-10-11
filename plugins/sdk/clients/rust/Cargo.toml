@@ -1,0 +1,13 @@
+[package]
+name = "operit-plugin-sdk-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+operit-host-api = { path = "../../../../core/crates/foundation/host-api" }
+operit-plugin-sdk-host = { path = "../../../../hosts/plugin-sdk-client" }
+operit-link = { path = "../../../../core/crates/foundation/link" }
+operit-plugin-sdk-ipc = { path = "../../../../core/crates/plugin/sdk-ipc" }
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"

@@ -13,9 +13,12 @@ use operit_host_api::RuntimeStorageHost;
 mod audio_playback;
 mod bluetooth;
 mod filesystem;
+mod document_filesystem;
 mod http;
 #[cfg(target_os = "android")]
 mod local_inference;
+#[cfg(target_os = "android")]
+mod logging;
 mod managed_runtime;
 mod runtime_common;
 #[cfg(target_os = "android")]
@@ -35,6 +38,8 @@ pub use filesystem::AndroidFileSystemHost;
 pub use http::AndroidHttpHost;
 #[cfg(target_os = "android")]
 pub use local_inference::AndroidLocalInferenceHost;
+#[cfg(target_os = "android")]
+pub use logging::installAndroidLogSink;
 pub use managed_runtime::AndroidManagedRuntimeHost;
 pub use operit_host_native_common::NativeHostJavaScriptRuntimeHost as AndroidHostJavaScriptRuntimeHost;
 pub use operit_host_native_common::NativeHostRuntimeTaskSchedulerHost as AndroidHostRuntimeTaskSchedulerHost;
@@ -50,6 +55,10 @@ pub use terminal::AndroidTerminalHost;
 pub use tts_playback::{AndroidTtsPlaybackCommand, AndroidTtsPlaybackHost};
 pub use tts_synthesis::AndroidTtsSynthesisHost;
 pub use web_visit::AndroidWebVisitHost;
+#[cfg(target_os = "android")]
+pub use plugin_sdk_ipc::{AndroidPluginSdkIpcHost, setAndroidPluginSdkBridge, acceptAndroidPluginSdkPipes};
+#[cfg(target_os = "android")]
+mod plugin_sdk_ipc;
 
 /// Creates the Android-owned runtime host manager for explicit storage roots.
 #[cfg(target_os = "android")]
@@ -57,7 +66,9 @@ pub fn createRuntimeHostManager(
     runtimeRoot: PathBuf,
     workspaceRoot: PathBuf,
     webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
+    systemOperationHost: Arc<dyn operit_host_api::SystemOperationHost>,
 ) -> HostManager {
+    installAndroidLogSink();
     let runtimeStorageWriteHost =
         Arc::new(operit_host_native_common::NativeRuntimeStorageHost::new(
             runtimeRoot.clone(),
@@ -75,17 +86,22 @@ pub fn createRuntimeHostManager(
         Arc::new(AndroidFileSystemHost::new()),
         webVisitHost,
         Arc::new(AndroidHttpHost::new()),
-        Arc::new(AndroidSystemOperationHost::new()),
+        systemOperationHost,
         Arc::new(AndroidManagedRuntimeHost::new()),
         runtimeStorageHost,
         runtimeSqliteHost,
     )
     .withHostSecretStore(hostSecretStore)
     .withWebSocketHost(Arc::new(AndroidHttpHost::new()))
+    .withHttpServerHost(Arc::new(operit_host_native_common::NativeHttpServerHost))
+    .withTcpHost(Arc::new(operit_host_native_common::NativeTcpHost))
+    .withSerialPortHost(Arc::new(operit_host_native_common::NativeSerialPortHost))
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withLocalInferenceHost(Arc::new(AndroidLocalInferenceHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(AndroidHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(AndroidHostJavaScriptRuntimeHost::new()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(AndroidHostRuntimeTaskSchedulerHost::new()))
+    .withPluginSdkIpcHost(Arc::new(AndroidPluginSdkIpcHost::new()))
 }

@@ -1,0 +1,23 @@
+name: desktop_widgets_android
+description: Android launcher AppWidget host for desktop_widgets.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+  flutter: '>=3.32.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  desktop_widgets_platform_interface:
+    path: ../desktop_widgets_platform_interface
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  plugin:
+    implements: desktop_widgets
+    platforms:
+      android:
+        package: dev.desktop_widgets
+        pluginClass: DesktopWidgetsAndroidPlugin
+        dartPluginClass: DesktopWidgetsAndroid

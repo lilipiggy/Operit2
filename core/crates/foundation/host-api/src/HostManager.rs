@@ -1,24 +1,78 @@
 use std::sync::{Arc, OnceLock};
+use crate::ServiceDiscovery::ServiceDiscoveryHost;
 
 use crate::{
     ArchiveStagingHost, AudioPlaybackHost, BluetoothHost, BrowserAutomationHost,
-    BrowserSessionHost, ComposeDslWebViewHost, FileSystemHost, HostEnvironmentDescriptor,
-    HostJavaScriptRuntimeHost, HostRuntimeEventHost, HostRuntimeEventSchedulerHost,
-    HostRuntimeTaskSchedulerHost, HostSecretStore, HttpHost, LocalInferenceHost,
-    ManagedRuntimeHost, RuntimeSqliteHost, RuntimeStorageHost, RuntimeStorageWriteHost,
-    SystemOperationHost, TerminalHost, TtsPlaybackHost, TtsSynthesisHost, WebSocketHost,
-    WebVisitHost,
+    BrowserAutomationHostFactory,
+    BrowserSessionHost, ComposeDslWebViewHost, DeviceIoHost, FileSystemHost,
+    HostEnvironmentDescriptor, HostJavaScriptRuntimeHost, HostRuntimeEventHost,
+    HostRuntimeEventSchedulerHost, HostRuntimeTaskSchedulerHost, HostSecretStore, HttpHost,
+    LocalInferenceHost, ManagedRuntimeHost, PluginSdkIpc::PluginSdkIpcHost, RobotFaceHost,
+    RuntimeSqliteHost, RuntimeStorageHost, RuntimeStorageWriteHost, SystemOperationHost,
+    TerminalHost, ToastHost, TtsPlaybackHost, TtsSynthesisHost, WebSocketHost, WebVisitHost,
+    SerialPortHost, TcpHost,
 };
 
+static DEFAULT_HTTP_SERVER_HOST: OnceLock<Arc<dyn crate::HttpServer::HttpServerHost>> = OnceLock::new();
+pub fn setDefaultHttpServerHost(host: Arc<dyn crate::HttpServer::HttpServerHost>) {
+    let _ = DEFAULT_HTTP_SERVER_HOST.set(host);
+}
+pub fn defaultHttpServerHost() -> crate::HostResult<Arc<dyn crate::HttpServer::HttpServerHost>> {
+    DEFAULT_HTTP_SERVER_HOST.get().cloned()
+        .ok_or_else(|| crate::HostError::new("The active Host has not registered an HTTP server provider"))
+}
+static DEFAULT_TCP_HOST: OnceLock<Arc<dyn TcpHost>> = OnceLock::new();
+
+pub fn setDefaultTcpHost(host: Arc<dyn TcpHost>) {
+    let _ = DEFAULT_TCP_HOST.set(host);
+}
+
+pub fn defaultTcpHost() -> crate::HostResult<Arc<dyn TcpHost>> {
+    DEFAULT_TCP_HOST.get().cloned()
+        .ok_or_else(|| crate::HostError::new("The active Host has not registered a TCP provider"))
+}
+
 static DEFAULT_HTTP_HOST: OnceLock<Arc<dyn HttpHost>> = OnceLock::new();
+static DEFAULT_SERIAL_PORT_HOST: OnceLock<Arc<dyn SerialPortHost>> = OnceLock::new();
+
+#[allow(non_snake_case)]
+pub fn setDefaultSerialPortHost(host: Arc<dyn SerialPortHost>) {
+    let _ = DEFAULT_SERIAL_PORT_HOST.set(host);
+}
+
+#[allow(non_snake_case)]
+pub fn defaultSerialPortHost() -> crate::HostResult<Arc<dyn SerialPortHost>> {
+    DEFAULT_SERIAL_PORT_HOST.get().cloned()
+        .ok_or_else(|| crate::HostError::new("The active Host has not registered a serial port provider"))
+}
 static DEFAULT_WEBSOCKET_HOST: OnceLock<Arc<dyn WebSocketHost>> = OnceLock::new();
 static DEFAULT_JAVASCRIPT_RUNTIME_HOST: OnceLock<Arc<dyn HostJavaScriptRuntimeHost>> =
     OnceLock::new();
 static DEFAULT_RUNTIME_TASK_SCHEDULER_HOST: OnceLock<Arc<dyn HostRuntimeTaskSchedulerHost>> =
     OnceLock::new();
 
+static DEFAULT_SERVICE_DISCOVERY_HOST: OnceLock<Arc<dyn ServiceDiscoveryHost>> = OnceLock::new();
+
+/// Registers the service discovery provider installed by the active host.
+pub fn setDefaultServiceDiscoveryHost(host: Arc<dyn ServiceDiscoveryHost>) {
+    let _ = DEFAULT_SERVICE_DISCOVERY_HOST.set(host);
+}
+
+/// Returns the service discovery capability or an explicit unsupported-capability error.
+pub fn defaultServiceDiscoveryHost() -> crate::HostResult<Arc<dyn ServiceDiscoveryHost>> {
+    DEFAULT_SERVICE_DISCOVERY_HOST.get().cloned()
+        .ok_or_else(|| crate::HostError::new("The active Host has not registered service discovery"))
+}
+
 /// Command callback used by hosts that expose core operations as argv-style calls.
-pub type CoreCommandExecutor = Arc<dyn Fn(Vec<String>) -> Result<String, String> + Send + Sync>;
+pub type CoreCommandExecutor = Arc<
+    dyn Fn(
+            Vec<String>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'static>,
+        > + Send
+        + Sync,
+>;
 
 /// Registers the HTTP host shared by services that are not passed an explicit context.
 #[allow(non_snake_case)]
@@ -83,6 +137,10 @@ pub fn defaultHostRuntimeTaskSchedulerHost() -> Arc<dyn HostRuntimeTaskScheduler
 /// Bundles host-provided capabilities that the runtime can call through stable traits.
 #[derive(Clone, Default)]
 pub struct HostManager {
+    pub serviceDiscoveryHost: Option<Arc<dyn ServiceDiscoveryHost>>,
+    pub httpServerHost: Option<Arc<dyn crate::HttpServer::HttpServerHost>>,
+    pub tcpHost: Option<Arc<dyn TcpHost>>,
+    pub serialPortHost: Option<Arc<dyn SerialPortHost>>,
     pub fileSystemHost: Option<Arc<dyn FileSystemHost>>,
     pub webVisitHost: Option<Arc<dyn WebVisitHost>>,
     pub browserAutomationHost: Option<Arc<dyn BrowserAutomationHost>>,
@@ -91,8 +149,11 @@ pub struct HostManager {
     pub httpHost: Option<Arc<dyn HttpHost>>,
     pub webSocketHost: Option<Arc<dyn WebSocketHost>>,
     pub systemOperationHost: Option<Arc<dyn SystemOperationHost>>,
+    pub toastHost: Option<Arc<dyn ToastHost>>,
     pub audioPlaybackHost: Option<Arc<dyn AudioPlaybackHost>>,
     pub bluetoothHost: Option<Arc<dyn BluetoothHost>>,
+    pub deviceIoHost: Option<Arc<dyn DeviceIoHost>>,
+    pub robotFaceHost: Option<Arc<dyn RobotFaceHost>>,
     pub ttsSynthesisHost: Option<Arc<dyn TtsSynthesisHost>>,
     pub ttsPlaybackHost: Option<Arc<dyn TtsPlaybackHost>>,
     pub localInferenceHost: Option<Arc<dyn LocalInferenceHost>>,
@@ -107,11 +168,18 @@ pub struct HostManager {
     pub hostRuntimeEventSchedulerHost: Option<Arc<dyn HostRuntimeEventSchedulerHost>>,
     pub hostRuntimeTaskSchedulerHost: Option<Arc<dyn HostRuntimeTaskSchedulerHost>>,
     pub hostJavaScriptRuntimeHost: Option<Arc<dyn HostJavaScriptRuntimeHost>>,
+    pub pluginSdkIpcHost: Option<Arc<dyn PluginSdkIpcHost>>,
     pub hostEnvironment: HostEnvironmentDescriptor,
     pub coreCommandExecutor: Option<CoreCommandExecutor>,
 }
 
 impl HostManager {
+    /// Installs the host-owned service discovery capability.
+    pub fn withServiceDiscoveryHost(mut self, host: Arc<dyn ServiceDiscoveryHost>) -> Self {
+        self.serviceDiscoveryHost = Some(host);
+        self
+    }
+
     /// Creates a context with no host integrations and the default Android descriptor.
     pub fn new() -> Self {
         Self {
@@ -122,9 +190,16 @@ impl HostManager {
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
+            httpServerHost: None,
+            tcpHost: None,
+            serialPortHost: None,
+            serviceDiscoveryHost: None,
             systemOperationHost: None,
+            toastHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
+            deviceIoHost: None,
+            robotFaceHost: None,
             ttsSynthesisHost: None,
             ttsPlaybackHost: None,
             localInferenceHost: None,
@@ -139,6 +214,7 @@ impl HostManager {
             hostRuntimeEventSchedulerHost: None,
             hostRuntimeTaskSchedulerHost: None,
             hostJavaScriptRuntimeHost: None,
+            pluginSdkIpcHost: None,
             hostEnvironment: HostEnvironmentDescriptor::android(),
             coreCommandExecutor: None,
         }
@@ -156,9 +232,16 @@ impl HostManager {
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
+            httpServerHost: None,
+            tcpHost: None,
+            serialPortHost: None,
+            serviceDiscoveryHost: None,
             systemOperationHost: None,
+            toastHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
+            deviceIoHost: None,
+            robotFaceHost: None,
             ttsSynthesisHost: None,
             ttsPlaybackHost: None,
             localInferenceHost: None,
@@ -173,6 +256,7 @@ impl HostManager {
             hostRuntimeEventSchedulerHost: None,
             hostRuntimeTaskSchedulerHost: None,
             hostJavaScriptRuntimeHost: None,
+            pluginSdkIpcHost: None,
             hostEnvironment,
             coreCommandExecutor: None,
         }
@@ -193,9 +277,16 @@ impl HostManager {
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
+            httpServerHost: None,
+            tcpHost: None,
+            serialPortHost: None,
+            serviceDiscoveryHost: None,
             systemOperationHost: None,
+            toastHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
+            deviceIoHost: None,
+            robotFaceHost: None,
             ttsSynthesisHost: None,
             ttsPlaybackHost: None,
             localInferenceHost: None,
@@ -210,6 +301,7 @@ impl HostManager {
             hostRuntimeEventSchedulerHost: None,
             hostRuntimeTaskSchedulerHost: None,
             hostJavaScriptRuntimeHost: None,
+            pluginSdkIpcHost: None,
             hostEnvironment,
             coreCommandExecutor: None,
         }
@@ -231,9 +323,16 @@ impl HostManager {
             composeDslWebViewHost: None,
             httpHost: None,
             webSocketHost: None,
+            httpServerHost: None,
+            tcpHost: None,
+            serialPortHost: None,
+            serviceDiscoveryHost: None,
             systemOperationHost: Some(systemOperationHost),
+            toastHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
+            deviceIoHost: None,
+            robotFaceHost: None,
             ttsSynthesisHost: None,
             ttsPlaybackHost: None,
             localInferenceHost: None,
@@ -248,6 +347,7 @@ impl HostManager {
             hostRuntimeEventSchedulerHost: None,
             hostRuntimeTaskSchedulerHost: None,
             hostJavaScriptRuntimeHost: None,
+            pluginSdkIpcHost: None,
             hostEnvironment,
             coreCommandExecutor: None,
         }
@@ -273,9 +373,16 @@ impl HostManager {
             composeDslWebViewHost: None,
             httpHost: Some(httpHost),
             webSocketHost: None,
+            httpServerHost: None,
+            tcpHost: None,
+            serialPortHost: None,
+            serviceDiscoveryHost: None,
             systemOperationHost: Some(systemOperationHost),
+            toastHost: None,
             audioPlaybackHost: None,
             bluetoothHost: None,
+            deviceIoHost: None,
+            robotFaceHost: None,
             ttsSynthesisHost: None,
             ttsPlaybackHost: None,
             localInferenceHost: None,
@@ -290,6 +397,7 @@ impl HostManager {
             hostRuntimeEventSchedulerHost: None,
             hostRuntimeTaskSchedulerHost: None,
             hostJavaScriptRuntimeHost: None,
+            pluginSdkIpcHost: None,
             hostEnvironment,
             coreCommandExecutor: None,
         }
@@ -302,10 +410,46 @@ impl HostManager {
         self
     }
 
+    /// Adds frontend-owned transient toast presentation.
+    #[allow(non_snake_case)]
+    pub fn withToastHost(mut self, toastHost: Arc<dyn ToastHost>) -> Self {
+        self.toastHost = Some(toastHost);
+        self
+    }
+
+    /// Replaces the host environment descriptor used by runtime capability queries.
+    #[allow(non_snake_case)]
+    pub fn withHostEnvironment(mut self, hostEnvironment: HostEnvironmentDescriptor) -> Self {
+        self.hostEnvironment = hostEnvironment;
+        self
+    }
+
     /// Adds a host-owned WebSocket implementation for Link transport carriers.
     #[allow(non_snake_case)]
     pub fn withWebSocketHost(mut self, webSocketHost: Arc<dyn WebSocketHost>) -> Self {
         self.webSocketHost = Some(webSocketHost);
+        self
+    }
+
+    pub fn withHttpServerHost(mut self, host: Arc<dyn crate::HttpServer::HttpServerHost>) -> Self {
+        self.httpServerHost = Some(host);
+        self
+    }
+    pub fn withTcpHost(mut self, host: Arc<dyn TcpHost>) -> Self {
+        self.tcpHost = Some(host);
+        self
+    }
+
+    /// Installs the platform serial device/accessory provider.
+    pub fn withSerialPortHost(mut self, host: Arc<dyn SerialPortHost>) -> Self {
+        self.serialPortHost = Some(host);
+        self
+    }
+
+    /// Installs the host-owned virtual runtime storage used by node-local state.
+    #[allow(non_snake_case)]
+    pub fn withRuntimeStorageHost(mut self, host: Arc<dyn RuntimeStorageHost>) -> Self {
+        self.runtimeStorageHost = Some(host);
         self
     }
 
@@ -357,6 +501,20 @@ impl HostManager {
         self
     }
 
+    /// Adds a board-level digital I/O host for Edge device apps.
+    #[allow(non_snake_case)]
+    pub fn withDeviceIoHost(mut self, deviceIoHost: Arc<dyn DeviceIoHost>) -> Self {
+        self.deviceIoHost = Some(deviceIoHost);
+        self
+    }
+
+    /// Adds a board-owned robot face host for expression rendering.
+    #[allow(non_snake_case)]
+    pub fn withRobotFaceHost(mut self, robotFaceHost: Arc<dyn RobotFaceHost>) -> Self {
+        self.robotFaceHost = Some(robotFaceHost);
+        self
+    }
+
     /// Adds a host-backed text-to-speech synthesis service.
     #[allow(non_snake_case)]
     pub fn withTtsSynthesisHost(mut self, ttsSynthesisHost: Arc<dyn TtsSynthesisHost>) -> Self {
@@ -389,6 +547,16 @@ impl HostManager {
     ) -> Self {
         self.browserAutomationHost = Some(browserAutomationHost);
         self
+    }
+
+    /// Constructs a browser automation host with this runtime's file-system capability.
+    #[allow(non_snake_case)]
+    pub fn withBrowserAutomationHostFactory(self, factory: BrowserAutomationHostFactory) -> Self {
+        let fileSystemHost = self
+            .fileSystemHost
+            .clone()
+            .expect("FileSystemHost must be configured before constructing a browser host");
+        self.withBrowserAutomationHost(factory(fileSystemHost))
     }
 
     /// Adds a browser session host for interactive browser sessions.
@@ -448,6 +616,13 @@ impl HostManager {
         hostJavaScriptRuntimeHost: Arc<dyn HostJavaScriptRuntimeHost>,
     ) -> Self {
         self.hostJavaScriptRuntimeHost = Some(hostJavaScriptRuntimeHost);
+        self
+    }
+
+    /// Adds the Plugin SDK IPC carrier used to admit third-party clients into Operit.
+    #[allow(non_snake_case)]
+    pub fn withPluginSdkIpcHost(mut self, pluginSdkIpcHost: Arc<dyn PluginSdkIpcHost>) -> Self {
+        self.pluginSdkIpcHost = Some(pluginSdkIpcHost);
         self
     }
 }

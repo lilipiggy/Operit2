@@ -11,7 +11,7 @@ import '../WorkspaceBrowserViewStore.dart';
 import '../tabs/WorkspaceBrowserTabModels.dart';
 
 class WorkspaceBrowserCompositorSurface extends StatefulWidget {
-  /// Creates a workspace view over the owner WebView compositor texture.
+  /// Creates a workspace view over the owner WebView composition surface.
   const WorkspaceBrowserCompositorSurface({
     super.key,
     required this.tab,
@@ -88,12 +88,6 @@ class _WorkspaceBrowserCompositorSurfaceState
   /// Builds the compositor content for the negotiated transport.
   Widget _buildSurfaceContent(WorkspaceBrowserSurfaceDescriptor descriptor) {
     switch (descriptor.transport) {
-      case 'localTexture':
-        final textureId = descriptor.textureId;
-        if (descriptor.platform != 'windows' || textureId == null) {
-          throw StateError('Invalid local browser surface descriptor');
-        }
-        return Texture(textureId: textureId, filterQuality: FilterQuality.none);
       case 'encodedStream':
         final streamId = descriptor.streamId;
         if (streamId == null || streamId.isEmpty) {

@@ -13,14 +13,33 @@ pub struct JsToolBinding {
     pub tool: BuiltinToolName,
 }
 
+/// Declares one versioned JavaScript Tools method implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JsToolApiVariant {
+    /// Contains the JavaScript namespace containing the gated method.
+    pub namespace: &'static str,
+    /// Contains the public method name controlled by the gate.
+    pub method: &'static str,
+    /// Contains the first version selecting this implementation within its API family.
+    pub since: &'static str,
+    /// Contains an exclusive upper bound; None ends at the next major API family.
+    pub until: Option<&'static str>,
+    /// Contains an optional variant-specific JavaScript parameter list.
+    pub arguments: Option<&'static [&'static str]>,
+}
+
 /// Contains every active JavaScript Tools method binding.
 #[rustfmt::skip]
 pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
+    JsToolBinding { namespace: "Edge", method: "execute", tool: BuiltinToolName::EdgeExecute },
+    JsToolBinding { namespace: "Io", method: "execute", tool: BuiltinToolName::IoExecute },
     JsToolBinding { namespace: "Chat", method: "agentStatus", tool: BuiltinToolName::AgentStatus },
     JsToolBinding { namespace: "Chat", method: "createNew", tool: BuiltinToolName::CreateNewChat },
     JsToolBinding { namespace: "Chat", method: "deleteChat", tool: BuiltinToolName::DeleteChat },
     JsToolBinding { namespace: "Chat", method: "findChat", tool: BuiltinToolName::FindChat },
     JsToolBinding { namespace: "Chat", method: "getMessages", tool: BuiltinToolName::GetChatMessages },
+    JsToolBinding { namespace: "Chat", method: "getMessagesRange", tool: BuiltinToolName::GetChatMessagesRange },
+    JsToolBinding { namespace: "Chat", method: "call", tool: BuiltinToolName::CallChatModel },
     JsToolBinding { namespace: "Chat", method: "listAll", tool: BuiltinToolName::ListChats },
     JsToolBinding { namespace: "Chat", method: "listCharacterCards", tool: BuiltinToolName::ListCharacterCards },
     JsToolBinding { namespace: "Chat", method: "listChats", tool: BuiltinToolName::ListChats },
@@ -53,6 +72,7 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "Files", method: "write", tool: BuiltinToolName::WriteFile },
     JsToolBinding { namespace: "Files", method: "writeBinary", tool: BuiltinToolName::WriteFileBinary },
     JsToolBinding { namespace: "Files", method: "zip", tool: BuiltinToolName::ZipFiles },
+    JsToolBinding { namespace: "Memory", method: "getOwnerKey", tool: BuiltinToolName::GetMemoryOwnerKey },
     JsToolBinding { namespace: "Memory", method: "create", tool: BuiltinToolName::CreateMemory },
     JsToolBinding { namespace: "Memory", method: "deleteLink", tool: BuiltinToolName::DeleteMemoryLink },
     JsToolBinding { namespace: "Memory", method: "deleteMemory", tool: BuiltinToolName::DeleteMemory },
@@ -146,4 +166,22 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "System.terminal", method: "info", tool: BuiltinToolName::GetTerminalInfo },
     JsToolBinding { namespace: "System.terminal", method: "input", tool: BuiltinToolName::InputInTerminalSession },
     JsToolBinding { namespace: "System.terminal", method: "screen", tool: BuiltinToolName::GetTerminalSessionScreen },
+];
+
+/// Contains every versioned implementation applied to generated Tools methods.
+pub const JS_TOOL_API_VARIANTS: &[JsToolApiVariant] = &[
+    JsToolApiVariant {
+        namespace: "Chat",
+        method: "call",
+        since: "1.0.1",
+        until: Some("2.0.0"),
+        arguments: None,
+    },
+    JsToolApiVariant {
+        namespace: "Chat",
+        method: "call",
+        since: "2.0.0",
+        until: None,
+        arguments: None,
+    },
 ];

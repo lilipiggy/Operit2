@@ -1,9 +1,16 @@
 #![allow(non_snake_case)]
 
+pub mod DartPort;
+
+#[cfg(all(feature = "serial", not(any(target_os = "ios", target_os = "espidf", target_arch = "wasm32"))))]
+mod SerialPort;
+#[cfg(all(feature = "serial", not(any(target_os = "ios", target_os = "espidf", target_arch = "wasm32"))))]
+pub use SerialPort::NativeSerialPortHost;
+
 #[cfg(feature = "fs")]
 pub use operit_host_native_filesystem::PosixFileSystemHost;
 #[cfg(feature = "http")]
-pub use operit_host_native_http::NativeHttpHost;
+pub use operit_host_native_http::{NativeHttpHost, NativeHttpServerHost};
 #[cfg(all(feature = "scheduler", not(target_arch = "wasm32")))]
 pub use operit_host_native_scheduler::NativeHostJavaScriptRuntimeHost;
 #[cfg(all(feature = "scheduler", not(target_arch = "wasm32")))]
@@ -20,3 +27,11 @@ pub use operit_host_native_terminal::{NativePtyShellCommand, NativePtyTerminalHo
 mod ManagedRuntimePty;
 #[cfg(feature = "terminal")]
 pub use ManagedRuntimePty::{TerminalManagedRuntimeLaunch, TerminalManagedRuntimeProcess};
+
+#[cfg(not(any(target_os = "espidf", target_arch = "wasm32")))]
+pub mod ServiceDiscovery;
+
+#[cfg(all(feature = "tcp", not(any(target_os = "espidf", target_arch = "wasm32"))))]
+pub mod Tcp;
+#[cfg(all(feature = "tcp", not(any(target_os = "espidf", target_arch = "wasm32"))))]
+pub use Tcp::NativeTcpHost;

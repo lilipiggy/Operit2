@@ -17,6 +17,9 @@ use operit_store::RuntimeStorePaths::RuntimeStorePaths;
 pub struct FunctionModelBinding {
     pub providerId: String,
     pub modelId: String,
+    /// Marks a binding that dynamically follows the chat model binding.
+    #[serde(default)]
+    pub followsChat: bool,
 }
 
 impl Default for FunctionModelBinding {
@@ -24,6 +27,7 @@ impl Default for FunctionModelBinding {
         Self {
             providerId: ModelConfigManager::DEFAULT_PROVIDER_ID.to_string(),
             modelId: ModelConfigManager::DEFAULT_MODEL_ID.to_string(),
+            followsChat: false,
         }
     }
 }
@@ -34,6 +38,7 @@ impl FunctionModelBinding {
         Self {
             providerId,
             modelId,
+            followsChat: false,
         }
     }
 }
@@ -112,14 +117,48 @@ impl FunctionalConfigManager {
         Ok(binding)
     }
 
-    /// Saves the complete function-to-model binding map.
+    /// Saves the complete function-to-model binding map after normalizing follow-chat links.
     pub fn saveFunctionModelBinding(
         &self,
-        binding: HashMap<FunctionType, FunctionModelBinding>,
+        mut binding: HashMap<FunctionType, FunctionModelBinding>,
     ) -> Result<(), FunctionalConfigError> {
+        Self::normalizeBinding(&mut binding);
         self.functionalConfigDataStore
             .try_edit_result(|preferences| Self::writeFunctionModelBinding(preferences, binding))?;
         Ok(())
+    }
+
+    /// Keeps stored follow-chat bindings consistent with the chat binding.
+    fn normalizeBinding(binding: &mut HashMap<FunctionType, FunctionModelBinding>) {
+        let Some(chat) = binding.get_mut(&FunctionType::CHAT) else {
+            for value in binding.values_mut() {
+                value.followsChat = false;
+            }
+            return;
+        };
+        chat.followsChat = false;
+        let providerId = chat.providerId.clone();
+        let modelId = chat.modelId.clone();
+        for value in binding.values_mut() {
+            if value.followsChat {
+                value.providerId = providerId.clone();
+                value.modelId = modelId.clone();
+            }
+        }
+    }
+
+    /// Returns the effective binding for one function, resolving follow-chat links.
+    fn resolveBinding(
+        binding: &HashMap<FunctionType, FunctionModelBinding>,
+        functionType: &FunctionType,
+    ) -> Option<FunctionModelBinding> {
+        let value = binding.get(functionType)?;
+        if value.followsChat && *functionType != FunctionType::CHAT {
+            let mut chat = binding.get(&FunctionType::CHAT)?.clone();
+            chat.followsChat = false;
+            return Some(chat);
+        }
+        Some(value.clone())
     }
 
     /// Writes the complete function binding map into one preferences snapshot.
@@ -161,13 +200,13 @@ impl FunctionalConfigManager {
         }
     }
 
-    /// Reads the model binding currently assigned to one runtime function.
+    /// Reads the effective model binding for one runtime function.
     pub fn getModelBindingForFunction(
         &self,
         functionType: FunctionType,
     ) -> Result<FunctionModelBinding, FunctionalConfigError> {
         let binding = self.functionModelBindingFlow()?.first()?;
-        binding.get(&functionType).cloned().ok_or_else(|| {
+        Self::resolveBinding(&binding, &functionType).ok_or_else(|| {
             FunctionalConfigError::ModelConfigManager(format!(
                 "missing model binding: {}",
                 Self::functionTypeName(functionType)
@@ -187,6 +226,54 @@ impl FunctionalConfigManager {
             .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
         let mut binding = self.functionModelBindingFlow()?.first()?;
         binding.insert(functionType, FunctionModelBinding::new(providerId, modelId));
+        self.saveFunctionModelBinding(binding)
+    }
+
+    /// Assigns one runtime function to dynamically follow the chat model binding.
+    pub fn setFunctionFollowChat(
+        &self,
+        functionType: FunctionType,
+    ) -> Result<(), FunctionalConfigError> {
+        if functionType == FunctionType::CHAT {
+            return Err(FunctionalConfigError::ModelConfigManager(
+                "chat binding cannot follow itself".to_string(),
+            ));
+        }
+        let mut binding = self.functionModelBindingFlow()?.first()?;
+        let chat = binding.get(&FunctionType::CHAT).cloned().ok_or_else(|| {
+            FunctionalConfigError::ModelConfigManager("missing model binding: CHAT".to_string())
+        })?;
+        self.modelConfigManager
+            .getModelProfile(&chat.providerId, &chat.modelId)
+            .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
+        binding.insert(
+            functionType,
+            FunctionModelBinding {
+                providerId: chat.providerId,
+                modelId: chat.modelId,
+                followsChat: true,
+            },
+        );
+        self.saveFunctionModelBinding(binding)
+    }
+
+    /// Assigns every non-chat runtime function to follow the chat model binding.
+    pub fn setAllFunctionsFollowChat(&self) -> Result<(), FunctionalConfigError> {
+        let mut binding = self.functionModelBindingFlow()?.first()?;
+        let chat = binding.get(&FunctionType::CHAT).cloned().ok_or_else(|| {
+            FunctionalConfigError::ModelConfigManager("missing model binding: CHAT".to_string())
+        })?;
+        self.modelConfigManager
+            .getModelProfile(&chat.providerId, &chat.modelId)
+            .map_err(|error| FunctionalConfigError::ModelConfigManager(error.to_string()))?;
+        for (functionType, value) in binding.iter_mut() {
+            if *functionType == FunctionType::CHAT {
+                continue;
+            }
+            value.providerId = chat.providerId.clone();
+            value.modelId = chat.modelId.clone();
+            value.followsChat = true;
+        }
         self.saveFunctionModelBinding(binding)
     }
 
@@ -275,5 +362,100 @@ impl FunctionalConfigManager {
                 value.to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FunctionModelBinding, FunctionType, FunctionalConfigManager};
+    use std::collections::HashMap;
+
+    fn binding(provider: &str, model: &str, follows_chat: bool) -> FunctionModelBinding {
+        FunctionModelBinding {
+            providerId: provider.to_string(),
+            modelId: model.to_string(),
+            followsChat: follows_chat,
+        }
+    }
+
+    #[test]
+    fn normalize_syncs_followers_to_chat() {
+        let mut map = HashMap::new();
+        map.insert(
+            FunctionType::CHAT,
+            binding("chat-provider", "chat-model", true),
+        );
+        map.insert(
+            FunctionType::SUMMARY,
+            binding("old-provider", "old-model", true),
+        );
+        map.insert(
+            FunctionType::TRANSLATION,
+            binding("explicit-provider", "explicit-model", false),
+        );
+
+        FunctionalConfigManager::normalizeBinding(&mut map);
+
+        assert!(!map[&FunctionType::CHAT].followsChat);
+        assert_eq!(map[&FunctionType::SUMMARY].providerId, "chat-provider");
+        assert_eq!(map[&FunctionType::SUMMARY].modelId, "chat-model");
+        assert!(map[&FunctionType::SUMMARY].followsChat);
+        assert_eq!(
+            map[&FunctionType::TRANSLATION].providerId,
+            "explicit-provider"
+        );
+        assert_eq!(map[&FunctionType::TRANSLATION].modelId, "explicit-model");
+    }
+
+    #[test]
+    fn normalize_strips_followers_without_chat() {
+        let mut map = HashMap::new();
+        map.insert(
+            FunctionType::SUMMARY,
+            binding("old-provider", "old-model", true),
+        );
+
+        FunctionalConfigManager::normalizeBinding(&mut map);
+
+        assert!(!map[&FunctionType::SUMMARY].followsChat);
+    }
+
+    #[test]
+    fn resolve_returns_chat_binding_for_followers() {
+        let mut map = HashMap::new();
+        map.insert(
+            FunctionType::CHAT,
+            binding("chat-provider", "chat-model", false),
+        );
+        map.insert(
+            FunctionType::SUMMARY,
+            binding("chat-provider", "chat-model", true),
+        );
+
+        let resolved = FunctionalConfigManager::resolveBinding(&map, &FunctionType::SUMMARY)
+            .expect("resolved summary");
+
+        assert_eq!(resolved.providerId, "chat-provider");
+        assert_eq!(resolved.modelId, "chat-model");
+        assert!(!resolved.followsChat);
+    }
+
+    #[test]
+    fn resolve_keeps_explicit_bindings() {
+        let mut map = HashMap::new();
+        map.insert(
+            FunctionType::CHAT,
+            binding("chat-provider", "chat-model", false),
+        );
+        map.insert(
+            FunctionType::SUMMARY,
+            binding("summary-provider", "summary-model", false),
+        );
+
+        let resolved = FunctionalConfigManager::resolveBinding(&map, &FunctionType::SUMMARY)
+            .expect("resolved summary");
+
+        assert_eq!(resolved.providerId, "summary-provider");
+        assert_eq!(resolved.modelId, "summary-model");
     }
 }

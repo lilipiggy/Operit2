@@ -15,7 +15,10 @@ use crate::dao::MessageDao::MessageDao;
 use crate::dao::MessagePartDao::MessagePartDao;
 use crate::dao::MessageVariantDao::MessageVariantDao;
 use crate::db::AppDatabase::{AppDatabase, AppDatabaseError};
+use crate::repository::WorkspacePreferenceStore::WorkspacePreferenceStore;
 use crate::sync::SqlChatSyncStore::{SqlChatSyncStore, SqlChatSyncStoreError};
+use crate::sqliteParams;
+use crate::SqliteStore::SqliteStore;
 use operit_model::CharacterCardChatStats::CharacterCardChatStats;
 use operit_model::CharacterGroupChatStats::CharacterGroupChatStats;
 use operit_model::ChatEntity::ChatEntity;
@@ -30,6 +33,7 @@ use operit_model::OperitChatArchive::{
     OperitArchivedChat, OperitArchivedMessage, OperitArchivedMessageVariant, OperitChatArchive,
     ARCHIVE_TYPE, CURRENT_FORMAT_VERSION,
 };
+use operit_model::Workspace::{Workspace, WorkspaceFolder};
 use serde::{Deserialize, Serialize};
 
 const LOCATOR_PREVIEW_CHAR_COUNT: i32 = 48;
@@ -89,11 +93,121 @@ pub enum ChatHistoryManagerError {
 /// Result alias used by chat history repository operations.
 pub type ChatHistoryManagerResult<T> = Result<T, ChatHistoryManagerError>;
 
+/// Deletes a revision atomically using the Kotlin promotion and adjacent-selection rules.
+fn deleteMessageVariantRevision(
+    store: &SqliteStore,
+    baseMessage: &MessageEntity,
+    variants: &[MessageVariantEntity],
+    variantIndex: i32,
+) -> ChatHistoryManagerResult<()> {
+    if baseMessage.sender != "ai" {
+        return Err(ChatHistoryManagerError::IllegalArgument(
+            "Only AI messages can delete variants".to_string(),
+        ));
+    }
+    let firstVariant = variants.first().ok_or_else(|| {
+        ChatHistoryManagerError::IllegalState(format!(
+            "Message {} has no deletable variants",
+            baseMessage.timestamp
+        ))
+    })?;
+    let targetVariant = if variantIndex == 0 {
+        firstVariant
+    } else {
+        variants
+            .iter()
+            .find(|variant| variant.variantIndex == variantIndex)
+            .ok_or_else(|| {
+                ChatHistoryManagerError::IllegalArgument(format!(
+                    "Variant {variantIndex} does not exist for message {}",
+                    baseMessage.timestamp
+                ))
+            })?
+    };
+    let selectedVariantIndex = if variantIndex == 0 {
+        0
+    } else if variants
+        .iter()
+        .any(|variant| variant.variantIndex > targetVariant.variantIndex)
+    {
+        targetVariant.variantIndex
+    } else {
+        (targetVariant.variantIndex - 1).max(0)
+    };
+    let chatId = &baseMessage.chatId;
+    let messageTimestamp = baseMessage.timestamp;
+    store.transaction(|transaction| {
+        if variantIndex == 0 {
+            let promotedMessage = targetVariant.applyTo(
+                baseMessage.toChatMessage(Vec::new()),
+                Vec::new(),
+                variants.len() as i32,
+            );
+            transaction.execute(
+                r#"
+                UPDATE messages
+                SET roleName = ?3, provider = ?4, modelName = ?5,
+                    inputTokens = ?6, outputTokens = ?7, cachedInputTokens = ?8,
+                    sentAt = ?9, outputDurationMs = ?10, waitDurationMs = ?11,
+                    completedAt = ?12
+                WHERE chatId = ?1 AND timestamp = ?2
+                "#,
+                sqliteParams![
+                    chatId, messageTimestamp, promotedMessage.roleName,
+                    promotedMessage.provider, promotedMessage.modelName,
+                    promotedMessage.inputTokens, promotedMessage.outputTokens,
+                    promotedMessage.cachedInputTokens, promotedMessage.sentAt,
+                    promotedMessage.outputDurationMs, promotedMessage.waitDurationMs,
+                    promotedMessage.completedAt,
+                ],
+            )?;
+            transaction.execute(
+                "DELETE FROM message_parts WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = 0",
+                sqliteParams![chatId, messageTimestamp],
+            )?;
+            transaction.execute(
+                "UPDATE message_parts SET variantIndex = 0 WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = ?3",
+                sqliteParams![chatId, messageTimestamp, targetVariant.variantIndex],
+            )?;
+        } else {
+            transaction.execute(
+                "DELETE FROM message_parts WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = ?3",
+                sqliteParams![chatId, messageTimestamp, targetVariant.variantIndex],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM message_variants WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = ?3",
+            sqliteParams![chatId, messageTimestamp, targetVariant.variantIndex],
+        )?;
+        // Move revisions in ascending order so each unique destination has been vacated.
+        for variant in variants
+            .iter()
+            .filter(|variant| variant.variantIndex > targetVariant.variantIndex)
+        {
+            transaction.execute(
+                "UPDATE message_variants SET variantIndex = ?4 WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = ?3",
+                sqliteParams![chatId, messageTimestamp, variant.variantIndex, variant.variantIndex - 1],
+            )?;
+            transaction.execute(
+                "UPDATE message_parts SET variantIndex = ?4 WHERE chatId = ?1 AND messageTimestamp = ?2 AND variantIndex = ?3",
+                sqliteParams![chatId, messageTimestamp, variant.variantIndex, variant.variantIndex - 1],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE messages SET selectedVariantIndex = ?3 WHERE chatId = ?1 AND timestamp = ?2",
+            sqliteParams![chatId, messageTimestamp, selectedVariantIndex],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Repository for chats, messages, variants, branches, and sync recording.
 #[derive(Clone)]
 pub struct ChatHistoryManager {
     database: Arc<AppDatabase>,
     chatDao: ChatDao,
+    workspaceStore: WorkspacePreferenceStore,
     messageDao: MessageDao,
     messagePartDao: MessagePartDao,
     messageVariantDao: MessageVariantDao,
@@ -153,6 +267,7 @@ impl ChatHistoryManager {
             PreferencesDataStore::new(paths.current_chat_id_preferences_path());
         let database = AppDatabase::getDatabase(paths.clone())?;
         let chatDao = database.chatDao();
+        let workspaceStore = WorkspacePreferenceStore::new(paths.clone());
         let messageDao = database.messageDao();
         let messagePartDao = database.messagePartDao();
         let messageVariantDao = database.messageVariantDao();
@@ -160,11 +275,10 @@ impl ChatHistoryManager {
         let bindingStore =
             CoreNodeBindingStore::default().map_err(ChatHistoryManagerError::IllegalState)?;
         Self::ensureChatBindings(&chatDao, &bindingStore)?;
-        let chatHistoriesFlow = chatDao.getAllChats()?.map(|chatEntities| {
-            chatEntities
-                .into_iter()
-                .map(|chatEntity| chatEntity.toChatHistory(Vec::new()))
-                .collect::<Vec<_>>()
+        let workspaceStoreForFlow = workspaceStore.clone();
+        let chatHistoriesFlow = chatDao.getAllChats()?.map(move |chatEntities| {
+            attachWorkspaceNames(&workspaceStoreForFlow, chatEntities)
+                .expect("workspace names must load for chat history flow")
         });
         let currentChatIdFlow = currentChatIdDataStore
             .dataFlow()
@@ -185,6 +299,7 @@ impl ChatHistoryManager {
         Ok(Self {
             database,
             chatDao,
+            workspaceStore,
             messageDao,
             messagePartDao,
             messageVariantDao,
@@ -405,12 +520,7 @@ impl ChatHistoryManager {
 
     /// Loads the current chat history list directly from persistent storage.
     pub fn loadChatHistories(&self) -> ChatHistoryManagerResult<Vec<ChatHistory>> {
-        Ok(self
-            .chatDao
-            .getAllChatsDirectly()?
-            .into_iter()
-            .map(|chatEntity| chatEntity.toChatHistory(Vec::new()))
-            .collect())
+        attachWorkspaceNames(&self.workspaceStore, self.chatDao.getAllChatsDirectly()?)
     }
 
     #[allow(non_snake_case)]
@@ -539,10 +649,21 @@ impl ChatHistoryManager {
             .into_iter()
             .map(|chatHistory| self.buildOperitArchivedChat(chatHistory))
             .collect::<ChatHistoryManagerResult<Vec<_>>>()?;
+        let workspaceIds = chats
+            .iter()
+            .filter_map(|chat| chat.workspaceId.clone())
+            .collect::<HashSet<_>>();
+        let workspaces = self
+            .workspaceStore
+            .getAll()?
+            .into_iter()
+            .filter(|workspace| workspaceIds.contains(&workspace.id))
+            .collect::<Vec<_>>();
         let archive = OperitChatArchive {
             archiveType: ARCHIVE_TYPE.to_string(),
             formatVersion: CURRENT_FORMAT_VERSION,
             exportedAt: currentTimeMillis(),
+            workspaces,
             chats,
         };
         serde_json::to_string_pretty(&archive)
@@ -604,6 +725,9 @@ impl ChatHistoryManager {
             updatedCount: 0,
             skippedCount: 0,
         };
+        for workspace in archive.workspaces {
+            self.upsertWorkspace(workspace)?;
+        }
         let totalChatCount = archive.chats.len();
         let mut processedChatCount = 0;
         for archivedChat in archive.chats {
@@ -702,6 +826,13 @@ impl ChatHistoryManager {
         chatId: &str,
         messageToPersist: ChatMessage,
     ) -> ChatHistoryManagerResult<ChatMessage> {
+        // Only a newly persisted user message promotes the conversation. Re-saving
+        // or editing an existing message must not change the sidebar order.
+        let shouldMoveToFront = messageToPersist.sender == "user"
+            && self
+                .messageDao
+                .getMessageByTimestamp(chatId, messageToPersist.timestamp)?
+                .is_none();
         let messageEntity =
             MessageEntity::fromChatMessage(chatId.to_string(), messageToPersist.clone(), 0, 0);
         self.messageDao.insertMessage(messageEntity)?;
@@ -716,7 +847,12 @@ impl ChatHistoryManager {
                 &messageToPersist.parts,
             ),
         )?;
-        self.touchChatMetadata(chatId)?;
+        if shouldMoveToFront {
+            self.chatDao.moveChatToFront(chatId, currentTimeMillis())?;
+            self.recordChatMetadata(chatId)?;
+        } else {
+            self.touchChatMetadata(chatId)?;
+        }
         self.recordMessageSnapshot(chatId, messageToPersist.timestamp)?;
         Ok(messageToPersist)
     }
@@ -983,24 +1119,10 @@ impl ChatHistoryManager {
                     "Message {messageTimestamp} does not exist in chat {chatId}"
                 ))
             })?;
-        if baseMessage.sender != "ai" {
-            return Err(ChatHistoryManagerError::IllegalArgument(
-                "Only AI messages can have variants".to_string(),
-            ));
-        }
-        if variantIndex == 0 {
-            return Err(ChatHistoryManagerError::IllegalArgument(
-                "Cannot delete base variant with deleteMessageVariant".to_string(),
-            ));
-        }
-        self.messageVariantDao
-            .deleteVariant(&chatId, messageTimestamp, variantIndex)?;
-        self.messagePartDao
-            .deletePartsForMessage(&chatId, messageTimestamp, variantIndex)?;
-        if baseMessage.selectedVariantIndex == variantIndex {
-            self.messageDao
-                .updateSelectedVariantIndex(&chatId, messageTimestamp, 0)?;
-        }
+        let variants = self
+            .messageVariantDao
+            .getVariantsForMessage(&chatId, messageTimestamp)?;
+        deleteMessageVariantRevision(self.database.store(), &baseMessage, &variants, variantIndex)?;
         self.touchChatMetadata(&chatId)?;
         self.recordMessageSnapshot(&chatId, messageTimestamp)?;
         Ok(())
@@ -1075,18 +1197,9 @@ impl ChatHistoryManager {
             }
             self.recordMessageSnapshot(&chatId, messageTimestamp)?;
         } else {
-            let messageTimestamp = message.timestamp;
-            let parts = message.parts.clone();
-            let messageEntity = MessageEntity::fromChatMessage(chatId.clone(), message, 0, 0);
-            self.messageDao.insertMessage(messageEntity)?;
-            self.messagePartDao.replaceParts(
-                &chatId,
-                messageTimestamp,
-                0,
-                messagePartEntities(&chatId, messageTimestamp, 0, &parts),
-            )?;
-            self.touchChatMetadata(&chatId)?;
-            self.recordMessageSnapshot(&chatId, messageTimestamp)?;
+            // Background sends also enter through updateMessage, so share the
+            // insertion path and its new-user-message ordering behavior.
+            self.persistMessageLocked(&chatId, message)?;
         }
         Ok(())
     }
@@ -1366,10 +1479,28 @@ impl ChatHistoryManager {
         characterCardName: Option<String>,
         characterGroupId: Option<String>,
     ) -> ChatHistoryManagerResult<ChatHistory> {
+        self.createChatWithId(Uuid::new_v4().to_string(), title, group, characterCardName, characterGroupId, true)
+    }
+
+    /// Materializes metadata on the executor after Space has installed the
+    /// Binding. Reconnects reuse the same chat without changing UI selection.
+    pub fn ensureRoutedChat(&self, chatId: String) -> ChatHistoryManagerResult<()> {
+        self.bindingStore.binding(&chatId).map_err(ChatHistoryManagerError::IllegalState)?;
+        if self.chatDao.getChatById(&chatId)?.is_none() {
+            self.createChatWithId(chatId, Some("Edge Chat".into()), None, None, None, false)?;
+        }
+        Ok(())
+    }
+
+    fn createChatWithId(
+        &self, chatId: String, title: Option<String>, group: Option<String>,
+        characterCardName: Option<String>, characterGroupId: Option<String>,
+        createBinding: bool,
+    ) -> ChatHistoryManagerResult<ChatHistory> {
         let timestamp = currentTimeMillis();
         let finalTitle = title.unwrap_or_else(|| "New Chat".to_string());
         let chatEntity = ChatEntity {
-            id: Uuid::new_v4().to_string(),
+            id: chatId,
             title: finalTitle,
             createdAt: timestamp,
             updatedAt: timestamp,
@@ -1378,7 +1509,7 @@ impl ChatHistoryManager {
             currentWindowSize: 0,
             group,
             displayOrder: -timestamp,
-            workspace: None,
+            workspaceId: None,
             parentChatId: None,
             characterCardName,
             characterGroupId,
@@ -1388,19 +1519,170 @@ impl ChatHistoryManager {
         self.chatDao.insertChat(chatEntity.clone())?;
         let history = chatEntity.toChatHistory(Vec::new());
         self.recordChatMetadata(&history.id)?;
-        self.createBinding(&history.id)?;
+        if createBinding {
+            self.createBinding(&history.id)?;
+        }
         Ok(history)
     }
 
-    /// Updates the workspace binding for a chat.
-    pub fn updateChatWorkspace(
+    /// Updates the workspace id bound to a chat.
+    pub fn updateChatWorkspaceId(
         &self,
         chatId: String,
-        workspace: Option<String>,
+        workspaceId: Option<String>,
     ) -> ChatHistoryManagerResult<()> {
+        if let Some(workspaceId) = workspaceId.as_ref() {
+            let workspace = self.workspaceStore.getById(workspaceId)?.ok_or_else(|| {
+                ChatHistoryManagerError::IllegalArgument(format!(
+                    "workspace does not exist: {workspaceId}"
+                ))
+            })?;
+            workspace
+                .validate()
+                .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        }
         self.chatDao
-            .updateChatWorkspace(&chatId, workspace, currentTimeMillis())?;
+            .updateChatWorkspaceId(&chatId, workspaceId, currentTimeMillis())?;
         self.recordChatMetadata(&chatId)?;
+        Ok(())
+    }
+
+    /// Loads every persisted workspace.
+    pub fn listWorkspaces(&self) -> ChatHistoryManagerResult<Vec<Workspace>> {
+        Ok(self.workspaceStore.getAll()?)
+    }
+
+    /// Loads one workspace by id.
+    pub fn getWorkspace(&self, workspaceId: &str) -> ChatHistoryManagerResult<Option<Workspace>> {
+        Ok(self.workspaceStore.getById(workspaceId)?)
+    }
+
+    /// Loads the workspace bound to a chat.
+    pub fn getWorkspaceForChat(
+        &self,
+        chatId: &str,
+    ) -> ChatHistoryManagerResult<Option<Workspace>> {
+        let chat = self.chatDao.getChatById(chatId)?.ok_or_else(|| {
+            ChatHistoryManagerError::IllegalArgument(format!("Chat does not exist: {chatId}"))
+        })?;
+        let Some(workspaceId) = chat.workspaceId else {
+            return Ok(None);
+        };
+        Ok(self.workspaceStore.getById(&workspaceId)?)
+    }
+
+    /// Creates a named workspace with the supplied folders.
+    pub fn createWorkspace(
+        &self,
+        name: String,
+        folders: Vec<WorkspaceFolder>,
+    ) -> ChatHistoryManagerResult<Workspace> {
+        let timestamp = currentTimeMillis();
+        let workspace = Workspace {
+            id: Uuid::new_v4().to_string(),
+            name,
+            folders,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        };
+        workspace
+            .validate()
+            .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        Ok(self.workspaceStore.upsert(workspace)?)
+    }
+
+    /// Persists an existing workspace record.
+    pub fn upsertWorkspace(&self, workspace: Workspace) -> ChatHistoryManagerResult<Workspace> {
+        workspace
+            .validate()
+            .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        Ok(self.workspaceStore.upsert(workspace)?)
+    }
+
+    /// Renames a workspace.
+    pub fn renameWorkspace(
+        &self,
+        workspaceId: String,
+        name: String,
+    ) -> ChatHistoryManagerResult<Workspace> {
+        let mut workspace = self.workspaceStore.getById(&workspaceId)?.ok_or_else(|| {
+            ChatHistoryManagerError::IllegalArgument(format!(
+                "workspace does not exist: {workspaceId}"
+            ))
+        })?;
+        workspace.name = name;
+        workspace.updatedAt = currentTimeMillis();
+        workspace
+            .validate()
+            .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        Ok(self.workspaceStore.upsert(workspace)?)
+    }
+
+    /// Adds a folder to an existing workspace.
+    ///
+    /// Mounting stays idempotent: a path that is already mounted under another
+    /// name leaves the workspace untouched, and a known folder name whose path
+    /// changed is rebound instead of failing validation with a duplicate name.
+    pub fn addWorkspaceFolder(
+        &self,
+        workspaceId: String,
+        folder: WorkspaceFolder,
+    ) -> ChatHistoryManagerResult<Workspace> {
+        let mut workspace = self.workspaceStore.getById(&workspaceId)?.ok_or_else(|| {
+            ChatHistoryManagerError::IllegalArgument(format!(
+                "workspace does not exist: {workspaceId}"
+            ))
+        })?;
+        if !workspace.mountFolder(folder) {
+            return Ok(workspace);
+        }
+        workspace.updatedAt = currentTimeMillis();
+        workspace
+            .validate()
+            .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        Ok(self.workspaceStore.upsert(workspace)?)
+    }
+
+    /// Removes a folder from an existing workspace.
+    pub fn removeWorkspaceFolder(
+        &self,
+        workspaceId: String,
+        folderName: String,
+    ) -> ChatHistoryManagerResult<Workspace> {
+        let mut workspace = self.workspaceStore.getById(&workspaceId)?.ok_or_else(|| {
+            ChatHistoryManagerError::IllegalArgument(format!(
+                "workspace does not exist: {workspaceId}"
+            ))
+        })?;
+        let originalLen = workspace.folders.len();
+        workspace
+            .folders
+            .retain(|folder| folder.name != folderName);
+        if workspace.folders.len() == originalLen {
+            return Err(ChatHistoryManagerError::IllegalArgument(format!(
+                "workspace folder not found: {folderName}"
+            )));
+        }
+        workspace.updatedAt = currentTimeMillis();
+        workspace
+            .validate()
+            .map_err(ChatHistoryManagerError::IllegalArgument)?;
+        Ok(self.workspaceStore.upsert(workspace)?)
+    }
+
+    /// Deletes a workspace that is not bound to any chat.
+    pub fn deleteWorkspace(&self, workspaceId: String) -> ChatHistoryManagerResult<()> {
+        let bound = self
+            .chatDao
+            .getAllChatsDirectly()?
+            .into_iter()
+            .any(|chat| chat.workspaceId.as_deref() == Some(workspaceId.as_str()));
+        if bound {
+            return Err(ChatHistoryManagerError::IllegalArgument(format!(
+                "workspace is bound to a chat: {workspaceId}"
+            )));
+        }
+        self.workspaceStore.delete(&workspaceId)?;
         Ok(())
     }
 
@@ -1457,6 +1739,43 @@ impl ChatHistoryManager {
         self.hydrateMessagesForChat(&chatId, messageEntities)
     }
 
+    /// Loads hydrated messages inside an inclusive zero-based index range.
+    pub fn loadChatMessagesRange(
+        &self,
+        chatId: String,
+        order: String,
+        start: i32,
+        end: i32,
+    ) -> ChatHistoryManagerResult<Vec<ChatMessage>> {
+        if start < 0 || end < start {
+            return Err(ChatHistoryManagerError::IllegalArgument(
+                "range requires 0 <= start <= end".to_string(),
+            ));
+        }
+        let limit = end
+            .checked_sub(start)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                ChatHistoryManagerError::IllegalArgument(
+                    "range length exceeds supported integer limits".to_string(),
+                )
+            })?;
+        let messageEntities = match order.trim().to_lowercase().as_str() {
+            "asc" => self
+                .messageDao
+                .getMessagesForChatAscRange(&chatId, start, limit)?,
+            "desc" => self
+                .messageDao
+                .getMessagesForChatDescRange(&chatId, start, limit)?,
+            value => {
+                return Err(ChatHistoryManagerError::IllegalArgument(format!(
+                    "order must be asc/desc, got {value}"
+                )))
+            }
+        };
+        self.hydrateMessagesForChat(&chatId, messageEntities)
+    }
+
     /// Searches message content and returns matching chat ids.
     pub fn searchChatIdsByContent(
         &self,
@@ -1499,7 +1818,7 @@ impl ChatHistoryManager {
             currentWindowSize: parentChat.currentWindowSize,
             group: parentChat.group,
             displayOrder: -timestamp,
-            workspace: parentChat.workspace,
+            workspaceId: parentChat.workspaceId,
             parentChatId: Some(parentChatId.clone()),
             characterCardName: parentChat.characterCardName,
             characterGroupId: parentChat.characterGroupId,
@@ -2031,3 +2350,33 @@ impl ChatImportResult {
 fn currentTimeMillis() -> i64 {
     operit_host_api::TimeUtils::currentTimeMillis()
 }
+
+/// Attaches workspace display names onto chat histories loaded from persistence.
+fn attachWorkspaceNames(
+    workspaceStore: &WorkspacePreferenceStore,
+    chatEntities: Vec<ChatEntity>,
+) -> ChatHistoryManagerResult<Vec<ChatHistory>> {
+    let workspaces = workspaceStore
+        .getAll()?
+        .into_iter()
+        .map(|workspace| (workspace.id.clone(), workspace))
+        .collect::<HashMap<_, _>>();
+    Ok(chatEntities
+        .into_iter()
+        .map(|chatEntity| {
+            let workspace = chatEntity
+                .workspaceId
+                .as_ref()
+                .and_then(|workspaceId| workspaces.get(workspaceId));
+            let mut history = chatEntity.toChatHistory(Vec::new());
+            history.workspaceName = workspace.map(|item| item.name.clone());
+            history.workspacePrimaryPath =
+                workspace.map(|item| item.primaryFolder().path.clone());
+            history
+        })
+        .collect())
+}
+
+#[cfg(test)]
+#[path = "ChatHistoryManagerTests.rs"]
+mod tests;

@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:desktop_widgets/desktop_widgets.dart';
 
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../core/notifications/NotificationActivationService.dart';
@@ -18,9 +19,12 @@ import '../layout/PhoneLayout.dart';
 import '../MainLayoutController.dart';
 import '../TopBarController.dart';
 import '../layout/TabletLayout.dart';
+import '../layout/SidebarDockController.dart';
 import '../navigation/AppNavigationModels.dart';
 import '../navigation/AppRouteCatalog.dart';
+import '../navigation/ToolPkgCatalogChangeBus.dart';
 import 'OperitScreens.dart';
+import '../../features/packages/screens/ToolPkgUiLauncherScreen.dart';
 
 class OperitMainScreen extends StatefulWidget {
   const OperitMainScreen({super.key});
@@ -39,6 +43,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   late final AppRouterState _routerState;
   late final TopBarController _topBarController;
   late final MainLayoutController _mainLayoutController;
+  late final SidebarDockController _sidebarDockController;
   List<core_proxy.ToolPkgUiRoute> _toolPkgUiRoutes =
       const <core_proxy.ToolPkgUiRoute>[];
   List<core_proxy.ToolPkgNavigationEntry> _toolPkgNavigationEntries =
@@ -47,6 +52,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   StreamSubscription<List<core_proxy.ChatHistoryListItem>>?
   _drawerHistoriesSubscription;
   StreamSubscription<String?>? _drawerCurrentChatSubscription;
+  StreamSubscription<List<String>>? _drawerActiveStreamingChatIdsSubscription;
   StreamSubscription<List<core_proxy.CharacterGroupCard>>?
   _drawerCharacterGroupsSubscription;
   StreamSubscription<List<String>>? _drawerCharacterCardIdsSubscription;
@@ -58,6 +64,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   bool _isTabletSidebarExpanded = false;
   bool _isNavigatingBack = false;
   bool _requestedInitialToolPkgNavigationRefresh = false;
+  StreamSubscription<void>? _toolPkgCatalogChangeSubscription;
   int _backPressedTime = 0;
 
   /// Initializes navigation services and drawer data subscriptions.
@@ -66,6 +73,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     super.initState();
     _topBarController = TopBarController();
     _mainLayoutController = MainLayoutController();
+    _sidebarDockController = SidebarDockController();
     _routerState = AppRouterState(AppRouteCatalog.initialEntry());
     _drawerConversationState = ValueNotifier<DrawerConversationState>(
       const DrawerConversationState(),
@@ -75,7 +83,99 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     NotificationActivationService.instance.installChatHandler(
       _activateNotificationChat,
     );
+    _toolPkgCatalogChangeSubscription = ToolPkgCatalogChangeBus.listen(() {
+      if (mounted) {
+        unawaited(_refreshToolPkgNavigationModel());
+      }
+    });
+    unawaited(_loadSidebarDockPreferences());
     unawaited(_initializeDrawerData());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_initializeDesktopWidgets());
+      }
+    });
+  }
+
+  /// Supplies application content and navigation callbacks to the unified widget plugin.
+  Future<void> _initializeDesktopWidgets() async {
+    try {
+      await DesktopWidgets.setActionHandler(_handleDesktopWidgetAction);
+      if (!mounted) return;
+      await DesktopWidgets.setSnapshotRenderer((payload, size) async {
+        final instanceId = payload['instanceId'] as String;
+        final frame = await ToolPkgDesktopWidgetFrame.load(
+          clients: _clients,
+          definition: core_proxy.ToolPkgDesktopWidget.fromJson(
+            (payload['definition'] as Map).cast<String, Object?>(),
+          ),
+          instanceId: instanceId,
+          useEnglish: Localizations.localeOf(context).languageCode == 'en',
+        );
+        if (!mounted) throw StateError('The widget content owner is closed');
+        final png = await DesktopWidgetRasterizer.render(
+          context: context,
+          size: size,
+          child: frame.buildContent(
+            clients: _clients,
+            instanceId: instanceId,
+            onOpenRoute: (package, route) async {
+              await _handleDesktopWidgetAction(
+                MethodCall('openDesktopWidgetRoute', {
+                  'packageName': package,
+                  'routeId': route,
+                }),
+              );
+            },
+          ),
+        );
+        return DesktopWidgetSnapshot(
+          png: png,
+          description: frame.definition.title,
+          action: 'openDesktopWidgetRoute',
+          actionArguments: {
+            'packageName': frame.definition.containerPackageName,
+            'routeId': frame.definition.routeId,
+          },
+        );
+      });
+    } catch (error) {
+      if (!mounted) rethrow;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  /// Resolves widget clicks through the existing route catalog and navigation gateway.
+  Future<Object?> _handleDesktopWidgetAction(MethodCall call) async {
+    try {
+      if (call.method != 'openDesktopWidgetRoute') {
+        throw UnsupportedError('Unknown widget action: ${call.method}');
+      }
+      if (!mounted) throw StateError('The widget navigation owner is closed');
+      final args = (call.arguments as Map).cast<String, Object?>();
+      final package = args['packageName'] as String;
+      final route = args['routeId'] as String;
+      await _refreshToolPkgNavigationModel();
+      if (!mounted) throw StateError('The widget navigation owner is closed');
+      final spec = _navigationModel.routesById[route];
+      if (spec == null ||
+          spec.ownerPackageName != package ||
+          spec.runtime != RouteRuntime.toolPkgComposeDsl) {
+        throw StateError('Widget route is not registered for $package: $route');
+      }
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      AppRouterGateway.navigate(routeId: route);
+      return null;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+      rethrow;
+    }
   }
 
   /// Loads drawer data before subscribing to its live updates.
@@ -98,6 +198,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       toolPkgNavigationEntries: _toolPkgNavigationEntries,
     );
     AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+    _synchronizeSidebarDock();
     if (!_requestedInitialToolPkgNavigationRefresh) {
       _requestedInitialToolPkgNavigationRefresh = true;
       _refreshToolPkgNavigationModel();
@@ -106,11 +207,15 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
 
   @override
   void dispose() {
+    unawaited(DesktopWidgets.setActionHandler(null));
+    unawaited(DesktopWidgets.setSnapshotRenderer(null));
     AppRouterGateway.clear();
     AppRouteDiscoveryGateway.clear();
     NotificationActivationService.instance.clearChatHandler();
+    _toolPkgCatalogChangeSubscription?.cancel();
     _drawerHistoriesSubscription?.cancel();
     _drawerCurrentChatSubscription?.cancel();
+    _drawerActiveStreamingChatIdsSubscription?.cancel();
     _drawerCharacterGroupsSubscription?.cancel();
     _drawerCharacterCardIdsSubscription?.cancel();
     for (final subscription in _drawerCharacterCardSubscriptions.values) {
@@ -121,6 +226,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     _routerState.dispose();
     _topBarController.dispose();
     _mainLayoutController.dispose();
+    _sidebarDockController.dispose();
     super.dispose();
   }
 
@@ -203,7 +309,36 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
         toolPkgNavigationEntries: _toolPkgNavigationEntries,
       );
       AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+      _synchronizeSidebarDock();
     });
+  }
+
+  /// Synchronizes dock placement with the current navigation catalog.
+  void _synchronizeSidebarDock() {
+    _sidebarDockController.synchronize(
+      pluginEntries: _navigationModel.navigationEntries
+          .where(
+            (entry) => entry.surface == NavigationSurface.mainSidebarPlugins,
+          )
+          .toList(growable: false),
+      routesById: _navigationModel.routesById,
+    );
+  }
+
+  /// Loads the persisted sidebar dock layout through the Flutter preference layer.
+  Future<void> _loadSidebarDockPreferences() async {
+    try {
+      await _sidebarDockController.loadPreferences();
+    } catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'sidebar dock persistence',
+          context: ErrorDescription('while loading sidebar dock layout'),
+        ),
+      );
+    }
   }
 
   /// Loads drawer conversations and their character avatar metadata.
@@ -211,6 +346,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     final currentState = _drawerConversationState.value;
     _drawerConversationState.value = DrawerConversationState(
       histories: currentState.histories,
+      activeStreamingChatIds: currentState.activeStreamingChatIds,
       characterGroupNamesById: currentState.characterGroupNamesById,
       characterCardAvatarUrisByName: currentState.characterCardAvatarUrisByName,
       currentChatId: currentState.currentChatId,
@@ -225,17 +361,22 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
         _clients.chatRuntimeHolderMain.currentChatIdFlow().first,
         characterGroupCoreProxy.allCharacterGroupCardsFlow().first,
         characterCardCoreProxy.getAllCharacterCards(),
+        _clients.chatRuntimeHolderMain.activeStreamingChatIds(),
       ]);
       final histories = results[0] as List<core_proxy.ChatHistoryListItem>;
       final currentChatId = results[1] as String?;
       final characterGroups = results[2] as List<core_proxy.CharacterGroupCard>;
       final characterCards = results[3] as List<core_proxy.CharacterCard>;
+      final activeStreamingChatIds = results[4] as List<String>;
       if (!mounted) {
         return;
       }
       _replaceDrawerCharacterCardAvatars(characterCards);
       _drawerConversationState.value = DrawerConversationState(
         histories: List<core_proxy.ChatHistoryListItem>.unmodifiable(histories),
+        activeStreamingChatIds: Set<String>.unmodifiable(
+          activeStreamingChatIds,
+        ),
         characterGroupNamesById: _characterGroupNameMap(characterGroups),
         characterCardAvatarUrisByName:
             _drawerConversationState.value.characterCardAvatarUrisByName,
@@ -253,6 +394,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       final state = _drawerConversationState.value;
       _drawerConversationState.value = DrawerConversationState(
         histories: state.histories,
+        activeStreamingChatIds: state.activeStreamingChatIds,
         characterGroupNamesById: state.characterGroupNamesById,
         characterCardAvatarUrisByName: state.characterCardAvatarUrisByName,
         currentChatId: state.currentChatId,
@@ -276,6 +418,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
               histories: List<core_proxy.ChatHistoryListItem>.unmodifiable(
                 histories,
               ),
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: state.characterGroupNamesById,
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -293,6 +436,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             final state = _drawerConversationState.value;
             _drawerConversationState.value = DrawerConversationState(
               histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: state.characterGroupNamesById,
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -314,6 +458,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             final state = _drawerConversationState.value;
             _drawerConversationState.value = DrawerConversationState(
               histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: state.characterGroupNamesById,
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -332,6 +477,48 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             final state = _drawerConversationState.value;
             _drawerConversationState.value = DrawerConversationState(
               histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
+              characterGroupNamesById: state.characterGroupNamesById,
+              characterCardAvatarUrisByName:
+                  state.characterCardAvatarUrisByName,
+              currentChatId: state.currentChatId,
+              errorMessage: error.toString(),
+              loading: state.loading,
+            );
+          },
+        );
+
+    _drawerActiveStreamingChatIdsSubscription?.cancel();
+    _drawerActiveStreamingChatIdsSubscription = _clients.chatRuntimeHolderMain
+        .activeStreamingChatIdsFlow()
+        .listen(
+          (activeChatIds) {
+            if (!mounted) {
+              return;
+            }
+            final state = _drawerConversationState.value;
+            _drawerConversationState.value = DrawerConversationState(
+              histories: state.histories,
+              activeStreamingChatIds: Set<String>.unmodifiable(activeChatIds),
+              characterGroupNamesById: state.characterGroupNamesById,
+              characterCardAvatarUrisByName:
+                  state.characterCardAvatarUrisByName,
+              currentChatId: state.currentChatId,
+              errorMessage: state.errorMessage,
+              loading: state.loading,
+            );
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint(
+              'Failed to watch drawer active chat ids: $error\n$stackTrace',
+            );
+            if (!mounted) {
+              return;
+            }
+            final state = _drawerConversationState.value;
+            _drawerConversationState.value = DrawerConversationState(
+              histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: state.characterGroupNamesById,
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -356,6 +543,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             final state = _drawerConversationState.value;
             _drawerConversationState.value = DrawerConversationState(
               histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: _characterGroupNameMap(groups),
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -374,6 +562,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             final state = _drawerConversationState.value;
             _drawerConversationState.value = DrawerConversationState(
               histories: state.histories,
+              activeStreamingChatIds: state.activeStreamingChatIds,
               characterGroupNamesById: state.characterGroupNamesById,
               characterCardAvatarUrisByName:
                   state.characterCardAvatarUrisByName,
@@ -471,6 +660,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     final state = _drawerConversationState.value;
     _drawerConversationState.value = DrawerConversationState(
       histories: state.histories,
+      activeStreamingChatIds: state.activeStreamingChatIds,
       characterGroupNamesById: state.characterGroupNamesById,
       characterCardAvatarUrisByName: avatarUrisByName,
       currentChatId: state.currentChatId,
@@ -504,6 +694,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     final state = _drawerConversationState.value;
     _drawerConversationState.value = DrawerConversationState(
       histories: state.histories,
+      activeStreamingChatIds: state.activeStreamingChatIds,
       characterGroupNamesById: state.characterGroupNamesById,
       characterCardAvatarUrisByName: avatarUrisByName,
       currentChatId: state.currentChatId,
@@ -523,6 +714,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     final state = _drawerConversationState.value;
     _drawerConversationState.value = DrawerConversationState(
       histories: state.histories,
+      activeStreamingChatIds: state.activeStreamingChatIds,
       characterGroupNamesById: state.characterGroupNamesById,
       characterCardAvatarUrisByName: avatarUrisByName,
       currentChatId: state.currentChatId,
@@ -540,6 +732,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     final state = _drawerConversationState.value;
     _drawerConversationState.value = DrawerConversationState(
       histories: state.histories,
+      activeStreamingChatIds: state.activeStreamingChatIds,
       characterGroupNamesById: state.characterGroupNamesById,
       characterCardAvatarUrisByName: state.characterCardAvatarUrisByName,
       currentChatId: state.currentChatId,
@@ -670,6 +863,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     );
   }
 
+  /// Terminates the Android process after the exit gesture is confirmed.
   void _handleExitBackPress() {
     final currentTime = DateTime.now().millisecondsSinceEpoch;
     if (currentTime - _backPressedTime > _backPressedIntervalMs) {
@@ -684,7 +878,9 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
         ),
       );
     } else {
-      SystemNavigator.pop();
+      const MethodChannel(
+        'operit/runtime',
+      ).invokeMethod<void>('terminateApplication');
     }
   }
 
@@ -707,18 +903,17 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _routerState,
+      animation: Listenable.merge(<Listenable>[
+        _routerState,
+        _sidebarDockController,
+      ]),
       builder: (context, _) {
         final currentRouteEntry = _routerState.currentEntry;
         final currentScreen = AppRouteCatalog.resolveScreen(
           _navigationModel,
           currentRouteEntry,
         );
-        final pluginSidebarEntries = _navigationModel.navigationEntries
-            .where(
-              (entry) => entry.surface == NavigationSurface.mainSidebarPlugins,
-            )
-            .toList(growable: false);
+        final pluginSidebarEntries = _sidebarDockController.primaryEntries;
         final appBarEntries = _navigationModel.navigationEntries
             .where((entry) => entry.surface == NavigationSurface.appBar)
             .toList(growable: false);
@@ -728,86 +923,93 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
             '';
         final screenSize = MediaQuery.sizeOf(context);
         final useTabletLayout = useTabletLayoutForWidth(screenSize.width);
-        final content = AppContent(
-          routerState: _routerState,
-          currentScreen: currentScreen,
-          currentRouteEntry: currentRouteEntry,
-          currentRouteTitle: currentRouteTitle,
-          useTabletLayout: useTabletLayout,
-          isTabletSidebarExpanded: _isTabletSidebarExpanded,
-          canGoBack: _routerState.canPop,
-          enableNavigationAnimation: true,
-          isNavigatingBack: _isNavigatingBack,
-          topBarController: _topBarController,
-          appBarEntries: appBarEntries,
-          onGoBack: _goBack,
-          onNavigationButtonPressed: () {
-            if (useTabletLayout) {
-              setState(() {
-                _isTabletSidebarExpanded = !_isTabletSidebarExpanded;
-              });
-            } else {
-              _drawerOpenState.value = true;
-            }
-          },
-          onAppBarEntrySelected: _navigateToNavigationEntry,
+        final content = Stack(
+          children: <Widget>[
+            AppContent(
+              routerState: _routerState,
+              currentScreen: currentScreen,
+              currentRouteEntry: currentRouteEntry,
+              currentRouteTitle: currentRouteTitle,
+              useTabletLayout: useTabletLayout,
+              isTabletSidebarExpanded: _isTabletSidebarExpanded,
+              canGoBack: _routerState.canPop,
+              enableNavigationAnimation: true,
+              isNavigatingBack: _isNavigatingBack,
+              topBarController: _topBarController,
+              appBarEntries: appBarEntries,
+              onGoBack: _goBack,
+              onNavigationButtonPressed: () {
+                if (useTabletLayout) {
+                  setState(() {
+                    _isTabletSidebarExpanded = !_isTabletSidebarExpanded;
+                  });
+                } else {
+                  _drawerOpenState.value = true;
+                }
+              },
+              onAppBarEntrySelected: _navigateToNavigationEntry,
+            ),
+          ],
         );
 
-        return MainLayoutScope(
-          controller: _mainLayoutController,
-          child: TopBarScope(
-            controller: _topBarController,
-            child: ValueListenableBuilder<bool>(
-              valueListenable: _drawerOpenState,
-              child: Scaffold(
-                body: useTabletLayout
-                    ? TabletLayout(
-                        content: content,
-                        navigationEntries: _navigationModel.navigationEntries,
-                        pluginSidebarEntries: pluginSidebarEntries,
-                        selectedRouteId: currentRouteEntry.routeId,
-                        drawerConversationState: _drawerConversationState,
-                        isTabletSidebarExpanded: _isTabletSidebarExpanded,
-                        tabletSidebarWidth: 280,
-                        collapsedTabletSidebarWidth: 56,
-                        onNavigationEntrySelected: _navigateToNavigationEntry,
-                        onConversationActivated: _activateConversationRoute,
-                      )
-                    : PhoneLayout(
-                        content: content,
-                        navigationEntries: _navigationModel.navigationEntries,
-                        pluginSidebarEntries: pluginSidebarEntries,
-                        selectedRouteId: currentRouteEntry.routeId,
-                        drawerConversationState: _drawerConversationState,
-                        drawerWidth: screenSize.width * 0.75,
-                        drawerOpenState: _drawerOpenState,
-                        enableNavigationAnimation: true,
-                        onOpenDrawer: () {
-                          _drawerOpenState.value = true;
-                        },
-                        onCloseDrawer: () {
-                          _drawerOpenState.value = false;
-                        },
-                        onNavigationEntrySelected: _navigateToNavigationEntry,
-                        onConversationActivated: _activateConversationRoute,
-                      ),
+        return SidebarDockScope(
+          controller: _sidebarDockController,
+          child: MainLayoutScope(
+            controller: _mainLayoutController,
+            child: TopBarScope(
+              controller: _topBarController,
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _drawerOpenState,
+                child: Scaffold(
+                  body: useTabletLayout
+                      ? TabletLayout(
+                          content: content,
+                          navigationEntries: _navigationModel.navigationEntries,
+                          pluginSidebarEntries: pluginSidebarEntries,
+                          selectedRouteId: currentRouteEntry.routeId,
+                          drawerConversationState: _drawerConversationState,
+                          isTabletSidebarExpanded: _isTabletSidebarExpanded,
+                          tabletSidebarWidth: 280,
+                          collapsedTabletSidebarWidth: 56,
+                          onNavigationEntrySelected: _navigateToNavigationEntry,
+                          onConversationActivated: _activateConversationRoute,
+                        )
+                      : PhoneLayout(
+                          content: content,
+                          navigationEntries: _navigationModel.navigationEntries,
+                          pluginSidebarEntries: pluginSidebarEntries,
+                          selectedRouteId: currentRouteEntry.routeId,
+                          drawerConversationState: _drawerConversationState,
+                          drawerWidth: screenSize.width * 0.75,
+                          drawerOpenState: _drawerOpenState,
+                          enableNavigationAnimation: true,
+                          onOpenDrawer: () {
+                            _drawerOpenState.value = true;
+                          },
+                          onCloseDrawer: () {
+                            _drawerOpenState.value = false;
+                          },
+                          onNavigationEntrySelected: _navigateToNavigationEntry,
+                          onConversationActivated: _activateConversationRoute,
+                        ),
+                ),
+                builder: (context, drawerOpen, child) {
+                  final phoneDrawerOpen = !useTabletLayout && drawerOpen;
+                  return PopScope(
+                    canPop:
+                        defaultTargetPlatform != TargetPlatform.android &&
+                        !phoneDrawerOpen &&
+                        !_routerState.canPop,
+                    onPopInvokedWithResult: (didPop, result) {
+                      if (didPop) {
+                        return;
+                      }
+                      _handleSystemBack(currentScreen);
+                    },
+                    child: child!,
+                  );
+                },
               ),
-              builder: (context, drawerOpen, child) {
-                final phoneDrawerOpen = !useTabletLayout && drawerOpen;
-                return PopScope(
-                  canPop:
-                      defaultTargetPlatform != TargetPlatform.android &&
-                      !phoneDrawerOpen &&
-                      !_routerState.canPop,
-                  onPopInvokedWithResult: (didPop, result) {
-                    if (didPop) {
-                      return;
-                    }
-                    _handleSystemBack(currentScreen);
-                  },
-                  child: child!,
-                );
-              },
             ),
           ),
         );

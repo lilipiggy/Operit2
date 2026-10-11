@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -209,6 +210,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
     std::vector<std::string> command_line_arguments =
         GetCommandLineArguments();
+    // SDK activations share the primary process even while its Core is initializing.
+    const bool sdk_activation = std::find(command_line_arguments.begin(),
+        command_line_arguments.end(), "operit2://plugin-sdk") != command_line_arguments.end();
+    const bool child_window = !command_line_arguments.empty() &&
+        command_line_arguments.front() == "multi_window";
+    HANDLE sdk_owner = nullptr;
+    if (!child_window) {
+      sdk_owner = ::CreateMutexW(nullptr, FALSE, L"Local\\Operit2.PluginSdkOwner");
+      if (sdk_owner == nullptr) {
+        throw std::runtime_error("Cannot create Operit Plugin SDK process identity");
+      }
+      const bool existing_owner = ::GetLastError() == ERROR_ALREADY_EXISTS;
+      if (sdk_activation && existing_owner) {
+        ::CloseHandle(sdk_owner);
+        ::CoUninitialize();
+        return EXIT_SUCCESS;
+      }
+    }
     const std::optional<std::string> notification_activation =
         NotificationActivationArgument(command_line_arguments);
     if (notification_activation.has_value() &&

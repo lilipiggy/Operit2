@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -19,7 +19,7 @@ tokio::task_local! {
     static ASYNC_CORE_STREAM_CAPTURE: Arc<Mutex<Vec<CoreStreamAttachment>>>;
 }
 
-static NEXT_CORE_STREAM_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_CORE_STREAM_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Carries one in-process stream source from a serialized Core value into its owning proxy.
 #[derive(Clone)]
@@ -132,7 +132,7 @@ pub struct CoreStreamDescriptor {
     /// Identifies one logical stream independently from its current source.
     pub streamId: String,
     /// Identifies the generated object that owns the stream property.
-    pub targetObjectId: u32,
+    pub target: String,
     pub propertyName: String,
     pub args: CoreValue,
 }
@@ -211,6 +211,12 @@ impl<T, U> PartialEq<CoreStream<U>> for CoreStream<T> {
 }
 
 impl<T> CoreStream<T> {
+    /// Returns the in-process source for a local, typed stream adapter.
+    /// Wire-only descriptors have no attached source.
+    pub fn localSource(&self) -> Option<Arc<CoreStreamSource>> {
+        self.source.clone()
+    }
+
     /// Creates an anonymous stream handle backed by one stable logical source.
     #[allow(non_snake_case)]
     pub fn fromSource(source: Arc<CoreStreamSource>) -> Self {
@@ -226,7 +232,7 @@ impl<T> CoreStream<T> {
         Self {
             descriptor: CoreStreamDescriptor {
                 streamId: streamId.clone(),
-                targetObjectId: crate::CORE_STREAM_POOL_OBJECT_ID,
+                target: crate::CORE_STREAM_TARGET.to_string(),
                 propertyName: "openCoreStream".to_string(),
                 args: CoreValue::Map(BTreeMap::from([(
                     "streamId".to_string(),

@@ -3,6 +3,12 @@
 // found in the LICENSE file.
 
 export 'http_auth_request.dart';
+export 'javascript_execution_exception.dart';
+export 'javascript_invocation_params.dart';
+export 'load_file_params.dart';
+export 'platform_webview_data_manager_creation_params.dart';
+export 'webview_data.dart';
+export 'webview_user_script.dart';
 export 'http_response_error.dart';
 export 'javascript_console_message.dart';
 export 'javascript_dialog_request.dart';

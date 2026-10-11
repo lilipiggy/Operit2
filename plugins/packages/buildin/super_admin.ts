@@ -32,6 +32,9 @@ type PersistedTerminalOutput = {
     output_chars: number;
     operit_clean_on_exit_dir: string;
     hint: string;
+    platform: string;
+    terminal: string;
+    terminalType: string;
     terminalEnvironment?: unknown;
     timeoutMsUsed?: number;
 };
@@ -191,6 +194,68 @@ type PersistedTerminalOutput = {
             ]
         },
         {
+            "id": "macos",
+            "condition": "platform.macos",
+            "inheritTools": true,
+            "tools": [
+                {
+                    "name": "bash",
+                    "description": { "zh": "在 macOS Bash 终端会话中执行命令并收集输出结果。会话按当前对话维护，上下文连贯。强烈建议每次都显式传 timeoutMs，避免命令卡住。前台未传 timeoutMs 时默认15秒；background=true 时不使用该默认超时。命令超时时会取消当前命令并保留终端会话。", "en": "Execute commands in a macOS Bash terminal session and collect output. The session is maintained per chat and preserves context. Strongly recommend explicitly passing timeoutMs every time to avoid hangs. Foreground mode defaults to 15s timeout when timeoutMs is omitted; background=true does not use this default timeout. When a command times out, the current command is cancelled and the terminal session is kept." },
+                    "parameters": [
+                        {
+                            "name": "command",
+                            "description": { "zh": "要执行的 Bash 命令", "en": "Bash command to execute." },
+                            "type": "string",
+                            "required": true
+                        },
+                        {
+                            "name": "background",
+                            "description": { "zh": "是否在后台运行命令,\"true\" 表示后台执行并立即返回,适合启动服务器等长时间运行的任务（AI 不会收到该命令的输出结果），\"false\" 或未提供则前台执行并等待并返回命令结果", "en": "Run command in background. 'true' runs in background and returns immediately (good for long-running tasks like servers; AI will not receive output). 'false' or omitted runs in foreground and returns the command result." },
+                            "type": "string",
+                            "required": false
+                        },
+                        {
+                            "name": "timeoutMs",
+                            "description": { "zh": "可选超时（毫秒，最低3000ms）。强烈建议显式传入；未传时前台默认15000ms，background=true时不使用默认超时。", "en": "Optional timeout (ms, minimum 3000ms). Strongly recommended to pass explicitly; if omitted, foreground defaults to 15000ms, and background=true does not use the default timeout." },
+                            "type": "string",
+                            "required": false
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "ios",
+            "condition": "platform.ios",
+            "inheritTools": true,
+            "tools": [
+                {
+                    "name": "shell",
+                    "description": { "zh": "在 iOS Shell 终端会话中执行命令并收集输出结果。默认使用 iSH Alpine Linux Shell；在具备相应权限时也可使用系统 Shell。会话按当前对话维护，上下文连贯。强烈建议每次都显式传 timeoutMs，避免命令卡住。前台未传 timeoutMs 时默认15秒；background=true 时不使用该默认超时。命令超时时会取消当前命令并保留终端会话。", "en": "Execute commands in an iOS shell terminal session and collect output. The default backend is the iSH Alpine Linux shell; a system shell may also be available on privileged hosts. The session is maintained per chat and preserves context. Strongly recommend explicitly passing timeoutMs every time to avoid hangs. Foreground mode defaults to 15s timeout when timeoutMs is omitted; background=true does not use this default timeout. When a command times out, the current command is cancelled and the terminal session is kept." },
+                    "parameters": [
+                        {
+                            "name": "command",
+                            "description": { "zh": "要执行的 Shell 命令", "en": "Shell command to execute." },
+                            "type": "string",
+                            "required": true
+                        },
+                        {
+                            "name": "background",
+                            "description": { "zh": "是否在后台运行命令,\"true\" 表示后台执行并立即返回,适合启动服务器等长时间运行的任务（AI 不会收到该命令的输出结果），\"false\" 或未提供则前台执行并等待并返回命令结果", "en": "Run command in background. 'true' runs in background and returns immediately (good for long-running tasks like servers; AI will not receive output). 'false' or omitted runs in foreground and returns the command result." },
+                            "type": "string",
+                            "required": false
+                        },
+                        {
+                            "name": "timeoutMs",
+                            "description": { "zh": "可选超时（毫秒，最低3000ms）。强烈建议显式传入；未传时前台默认15000ms，background=true时不使用默认超时。", "en": "Optional timeout (ms, minimum 3000ms). Strongly recommended to pass explicitly; if omitted, foreground defaults to 15000ms, and background=true does not use the default timeout." },
+                            "type": "string",
+                            "required": false
+                        }
+                    ]
+                }
+            ]
+        },
+        {
             "id": "android",
             "condition": "platform.android",
             "inheritTools": true,
@@ -291,17 +356,17 @@ const superAdmin = (function () {
     const BACKGROUND_TERMINAL_SESSION_PREFIX = "super_admin_background";
 
     /**
-     * Returns the stable foreground terminal session name for the current chat.
+     * Returns a stable foreground session name scoped to the chat and interpreter type.
      */
-    function getDefaultTerminalSessionName(): string {
-        return `${DEFAULT_TERMINAL_SESSION_PREFIX}_${getChatId()}`;
+    function getDefaultTerminalSessionName(type: TerminalCommandType): string {
+        return `${DEFAULT_TERMINAL_SESSION_PREFIX}_${type}_${getChatId()}`;
     }
 
     /**
-     * Returns a distinct terminal session name for a background command.
+     * Returns a distinct background session name scoped to the chat and interpreter type.
      */
-    function getBackgroundTerminalSessionName(): string {
-        return `${BACKGROUND_TERMINAL_SESSION_PREFIX}_${getChatId()}_${Date.now()}`;
+    function getBackgroundTerminalSessionName(type: TerminalCommandType): string {
+        return `${BACKGROUND_TERMINAL_SESSION_PREFIX}_${type}_${getChatId()}_${Date.now()}`;
     }
 
     /**
@@ -324,6 +389,9 @@ const superAdmin = (function () {
             output: "(saved_to_file)",
             exitCode: result?.exitCode,
             sessionId: result?.sessionId,
+            platform: result.platform,
+            terminal: result.terminal,
+            terminalType: result.terminalType,
             timedOut: result?.timedOut === true,
             context_preserved: result?.timedOut !== true,
             output_saved_to: filePath,
@@ -346,7 +414,7 @@ const superAdmin = (function () {
             const command = params.command;
             const background = params.background;
             const timeoutMs = params.timeoutMs;
-            const terminalEnvironment = await Tools.System.terminal.info();
+            const terminalInfo = await Tools.System.terminal.info();
             console.log(`执行终端命令: ${command}`);
             const isBackground = background === "true";
             let timeout;
@@ -363,7 +431,13 @@ const superAdmin = (function () {
                 }
             }
             if (isBackground) {
-                const session = await Tools.System.terminal.create(getBackgroundTerminalSessionName());
+                const session = await Tools.System.terminal.create(getBackgroundTerminalSessionName(type), type);
+                const terminalEnvironment = {
+                    ...terminalInfo,
+                    platform: session.platform,
+                    terminal: session.terminal,
+                    terminalType: session.terminalType
+                };
                 const sessionId = session.sessionId;
                 /**
                  * Runs the background terminal command inside the created session.
@@ -382,12 +456,21 @@ const superAdmin = (function () {
                     background: true,
                     sessionId: sessionId,
                     started: true,
+                    platform: session.platform,
+                    terminal: session.terminal,
+                    terminalType: session.terminalType,
                     terminalEnvironment
                 };
             }
-            const session = await Tools.System.terminal.create(getDefaultTerminalSessionName());
+            const session = await Tools.System.terminal.create(getDefaultTerminalSessionName(type), type);
             const sessionId = session.sessionId;
             const result = await Tools.System.terminal.exec(sessionId, command, timeout);
+            const terminalEnvironment = {
+                ...terminalInfo,
+                platform: result.platform,
+                terminal: result.terminal,
+                terminalType: result.terminalType
+            };
             const timedOut = result.timedOut === true;
             const persistedResult = await persistTerminalOutputIfTooLong(command, result);
             if (persistedResult) {
@@ -400,6 +483,9 @@ const superAdmin = (function () {
                 output: result.output,
                 exitCode: result.exitCode,
                 sessionId: result.sessionId,
+                platform: result.platform,
+                terminal: result.terminal,
+                terminalType: result.terminalType,
                 timedOut: timedOut,
                 timeoutMsUsed: timeout,
                 terminalEnvironment,

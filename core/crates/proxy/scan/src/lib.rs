@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
+use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{
     Attribute, Expr, Fields, FnArg, ImplItem, ImplItemFn, Item, ItemEnum, ItemImpl, ItemStruct,
@@ -27,7 +28,6 @@ pub struct CoreProxyRegisteredRoots {
     plugin_sdk_src: PathBuf,
     store_src: PathBuf,
     link_src: PathBuf,
-    link_access_src: PathBuf,
     server_src: PathBuf,
     util_src: PathBuf,
     tools_src: PathBuf,
@@ -47,7 +47,6 @@ impl CoreProxyRegisteredRoots {
             plugin_sdk_src: proxy_manifest_dir.join("../../plugin/sdk/src"),
             store_src: proxy_manifest_dir.join("../../persistence/store/src"),
             link_src: proxy_manifest_dir.join("../../foundation/link/src"),
-            link_access_src: proxy_manifest_dir.join("../../access/runtime/src"),
             server_src: proxy_manifest_dir.join("../../node/runtime/src"),
             util_src: proxy_manifest_dir.join("../../foundation/util/src"),
             tools_src: proxy_manifest_dir.join("../../tool/services/src"),
@@ -102,7 +101,7 @@ pub fn scan_core_proxy(config: CoreProxyScanConfig) -> CoreProxyScanOutput {
     let plugin_sdk_root = SourceRoot::new(roots.plugin_sdk_src, "operit_plugin_sdk");
     let store_root = SourceRoot::new(roots.store_src, "operit_store");
     let link_root = SourceRoot::new(roots.link_src, "operit_link");
-    let link_access_root = SourceRoot::new(roots.link_access_src, "operit_access_runtime");
+    let peer_link_root = SourceRoot::new(roots.server_src.join("../../peer-link/src"), "operit_peer_link");
     let server_root = SourceRoot::new(roots.server_src, "operit_node_runtime");
     let util_root = SourceRoot::new(roots.util_src, "operit_util");
     let tools_root = SourceRoot::new(roots.tools_src, "operit_tools");
@@ -131,13 +130,13 @@ pub fn scan_core_proxy(config: CoreProxyScanConfig) -> CoreProxyScanOutput {
         plugin_sdk_root,
         store_root.clone(),
         link_root,
-        link_access_root.clone(),
         util_root,
         tools_root.clone(),
         provider_root.clone(),
         javascript_bridge_root,
         host_api_root,
         server_root.clone(),
+        peer_link_root,
     ];
     for source_root in &source_roots {
         emit_source_tree_rerun_if_changed(source_root.as_path());
@@ -167,7 +166,6 @@ pub fn scan_core_proxy(config: CoreProxyScanConfig) -> CoreProxyScanOutput {
         &store_root,
         &tools_root,
         &provider_root,
-        &link_access_root,
         &server_root,
     );
     let public_object_types = collect_public_object_types(&source_roots);
@@ -207,8 +205,10 @@ pub fn scan_core_proxy(config: CoreProxyScanConfig) -> CoreProxyScanOutput {
         )
     }));
     objects.sort_by(|left, right| left.schema_key.cmp(&right.schema_key));
-    for (object_id, object) in objects.iter_mut().enumerate() {
-        object.object_id = object_id as u32;
+    let mut routes = HashSet::new();
+    for object in &mut objects {
+        object.object_id = stable_target(&object.schema_key);
+        assert!(routes.insert(object.object_id.clone()), "Duplicate Core target: {}", object.object_id);
     }
     CoreProxyScanOutput {
         proxy_manifest_dir,
@@ -232,5 +232,27 @@ fn emit_source_tree_rerun_if_changed(path: &Path) {
         } else {
             println!("cargo:rerun-if-changed={}", entry_path.display());
         }
+    }
+}
+
+/// Encodes the public schema name directly, without a registry index or hash.
+fn stable_target(schema_key: &str) -> String {
+    format!("core/{schema_key}")
+}
+
+#[cfg(test)]
+mod stable_target_tests {
+    use super::*;
+
+    /// Keeps existing addresses unchanged when declarations are added or reordered.
+    #[test]
+    fn insertion_and_order_do_not_change_targets() {
+        let original = ["application", "application.packageManager"];
+        let expanded = ["z.new", "application.packageManager", "a.new", "application"];
+        let targets: HashMap<_, _> = expanded.into_iter().map(|key| (key, stable_target(key))).collect();
+        for key in original {
+            assert_eq!(targets[key], stable_target(key));
+        }
+        assert_eq!(stable_target("application.packageManager"), "core/application.packageManager");
     }
 }

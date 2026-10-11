@@ -8,7 +8,7 @@ use operit_tools::tools::ToolExecutionLimits::ToolExecutionLimits;
 use operit_tools::tools::ToolResultDataClasses::stringResultData;
 use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::{
-    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutor, ToolValidationResult,
+    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, AsyncToolExecutor, ToolInvocationFuture, ToolValidationResult,
 };
 use operit_util::AppLogger::AppLogger;
 
@@ -161,7 +161,7 @@ impl MCPToolExecutor {
 
     #[allow(non_snake_case)]
     fn getToolInfo(&self, serverName: &str, toolName: &str) -> Option<Value> {
-        let client = self.mcpManager.getOrCreateClient(serverName)?;
+        let client = self.mcpManager.getClientForMetadata(serverName)?;
         client
             .getTools()
             .into_iter()
@@ -169,20 +169,41 @@ impl MCPToolExecutor {
     }
 
     #[allow(non_snake_case)]
+    /// Filters top-level arguments against the tool definition before converting their types.
+    /// Without usable properties, preserve arguments rather than guessing which are valid.
     fn convertParameterTypes(
-        &self,
         parameters: BTreeMap<String, Value>,
         toolInfo: Option<&Value>,
     ) -> BTreeMap<String, Value> {
+        let properties = toolInfo
+            .and_then(|tool| tool.get("inputSchema"))
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object);
         let mut result = BTreeMap::new();
+        let mut filteredNames = Vec::new();
         for (name, value) in parameters {
-            let expectedType = toolInfo
-                .and_then(|tool| tool.get("inputSchema"))
-                .and_then(|schema| schema.get("properties"))
+            if properties.is_some_and(|properties| !properties.contains_key(&name)) {
+                filteredNames.push(name);
+                continue;
+            }
+            let expectedType = properties
                 .and_then(|properties| properties.get(&name))
                 .and_then(|parameter| parameter.get("type"))
                 .and_then(Value::as_str);
             result.insert(name, MCPToolParameter::smartConvert(value, expectedType));
+        }
+        if !filteredNames.is_empty() {
+            AppLogger::d(
+                TAG,
+                &format!(
+                    "Filtered undeclared MCP arguments: tool={}, parameters={}",
+                    toolInfo
+                        .and_then(|tool| tool.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                    filteredNames.join(", "),
+                ),
+            );
         }
         result
     }
@@ -209,7 +230,7 @@ impl MCPToolExecutor {
 
     #[allow(non_snake_case)]
     /// Invokes one MCP tool and converts its structured response into tool result text.
-    pub fn invoke(&self, tool: &AITool) -> ToolResult {
+    pub async fn invoke(&self, tool: &AITool) -> ToolResult {
         let toolNameParts = tool.name.split(':').collect::<Vec<_>>();
         if toolNameParts.len() < 2 {
             return ToolResult {
@@ -223,7 +244,7 @@ impl MCPToolExecutor {
         }
         let serverName = toolNameParts[0];
         let actualToolName = toolNameParts[1..].join(":");
-        let Some(mcpClient) = self.mcpManager.getOrCreateClient(serverName) else {
+        let Some(mcpClient) = self.mcpManager.getOrCreateClient(serverName).await else {
             let error = self
                 .mcpManager
                 .getLastConnectionFailureReason(serverName)
@@ -257,8 +278,8 @@ impl MCPToolExecutor {
             })
             .collect::<BTreeMap<_, _>>();
         let toolInfo = self.getToolInfo(serverName, &actualToolName);
-        let convertedParameters = self.convertParameterTypes(parameters, toolInfo.as_ref());
-        let response = mcpClient.callToolSync(&actualToolName, convertedParameters);
+        let convertedParameters = Self::convertParameterTypes(parameters, toolInfo.as_ref());
+        let response = mcpClient.callToolWithArguments(&actualToolName, convertedParameters).await;
         if response
             .get("success")
             .and_then(Value::as_bool)
@@ -292,7 +313,7 @@ impl MCPToolExecutor {
     }
 }
 
-impl ToolExecutor for MCPToolExecutor {
+impl AsyncToolExecutor for MCPToolExecutor {
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
         let toolNameParts = tool.name.split(':').collect::<Vec<_>>();
         if toolNameParts.len() < 2 {
@@ -341,7 +362,102 @@ impl ToolExecutor for MCPToolExecutor {
         })
     }
 
-    fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult> {
-        vec![self.invoke(tool)]
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        Box::pin(async move { vec![self.invoke(tool).await] })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MCPToolExecutor;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+
+    fn arguments(value: Value) -> BTreeMap<String, Value> {
+        value.as_object().unwrap().clone().into_iter().collect()
+    }
+
+    /// Drops unknown top-level arguments while preserving schema-based scalar conversion.
+    #[test]
+    fn undeclared_arguments_are_filtered_before_conversion() {
+        let tool = json!({
+            "name": "write_file",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "enabled": {"type": "boolean"}
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }
+        });
+        let actual = MCPToolExecutor::convertParameterTypes(
+            arguments(json!({
+                "path": "test.txt", "content": "00123", "count": "3", "enabled": "true",
+                "extra": "[1,2]", "tool_name": "server:write_file"
+            })),
+            Some(&tool),
+        );
+        assert_eq!(
+            actual,
+            arguments(json!({
+                "path": "test.txt", "content": "00123", "count": 3, "enabled": true
+            }))
+        );
+    }
+
+    /// A tool with an explicit empty property map receives no arguments.
+    #[test]
+    fn parameterless_tool_filters_all_arguments() {
+        let tool = json!({"inputSchema": {"type": "object", "properties": {}}});
+        assert!(MCPToolExecutor::convertParameterTypes(
+            arguments(json!({"extra": "value"})),
+            Some(&tool)
+        )
+        .is_empty());
+    }
+
+    /// Missing or unusable definitions must not silently erase all supplied arguments.
+    #[test]
+    fn unavailable_properties_preserve_arguments() {
+        let inputs = arguments(json!({"path": "test.txt", "count": "3"}));
+        let expected = arguments(json!({"path": "test.txt", "count": 3}));
+        assert_eq!(
+            MCPToolExecutor::convertParameterTypes(inputs.clone(), None),
+            expected
+        );
+        for tool in [
+            json!({}),
+            json!({"inputSchema": {"type": "object"}}),
+            json!({"inputSchema": {"properties": null}}),
+            json!({"inputSchema": {"properties": []}}),
+        ] {
+            assert_eq!(
+                MCPToolExecutor::convertParameterTypes(inputs.clone(), Some(&tool)),
+                expected
+            );
+        }
+    }
+
+    /// Only argument names are filtered; nested payload keys and strings remain intact.
+    #[test]
+    fn declared_optional_and_nested_arguments_are_preserved() {
+        let payload = json!({"extra": "00123", "items": ["true", {"unknown": "false"}]});
+        let tool = json!({"inputSchema": {
+            "properties": {"payload": {"type": "object"}, "optional": {}},
+            "required": ["payload"]
+        }});
+        assert_eq!(
+            MCPToolExecutor::convertParameterTypes(
+                arguments(
+                    json!({"payload": payload.to_string(), "optional": "note", "extra": "drop"})
+                ),
+                Some(&tool),
+            ),
+            arguments(json!({"payload": payload, "optional": "note"})),
+        );
     }
 }

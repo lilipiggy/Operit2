@@ -8,6 +8,10 @@ pub mod ChatHistoryManager;
 pub mod CustomEmojiRepository;
 #[path = "MemoryAutoSaveCandidateRepository.rs"]
 pub mod MemoryAutoSaveCandidateRepository;
+#[path = "MemorySettingsRepository.rs"]
+pub mod MemorySettingsRepository;
+#[path = "MemorySearch.rs"]
+pub(crate) mod MemorySearch;
 #[path = "MemoryRepository.rs"]
 pub mod MemoryRepository;
 #[path = "RuntimeStorageRepository.rs"]
@@ -18,8 +22,8 @@ pub mod UIHierarchyManager;
 pub mod UsageStatisticsStore;
 #[path = "UserMarkdownRepository.rs"]
 pub mod UserMarkdownRepository;
-#[path = "WorkflowRepository.rs"]
-pub mod WorkflowRepository;
+#[path = "WorkspacePreferenceStore.rs"]
+pub mod WorkspacePreferenceStore;
 
 pub use AvatarRepository::*;
 pub use ChatHistoryManager::*;
@@ -30,4 +34,4 @@ pub use RuntimeStorageRepository::*;
 pub use UIHierarchyManager::*;
 pub use UsageStatisticsStore::*;
 pub use UserMarkdownRepository::*;
-pub use WorkflowRepository::*;
+pub use WorkspacePreferenceStore::*;

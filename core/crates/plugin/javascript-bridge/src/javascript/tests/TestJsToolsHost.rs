@@ -167,6 +167,17 @@ pub fn expect_js_output(output: JsExecutionResult<Option<String>>, context: &str
 #[macro_export]
 macro_rules! impl_rejecting_js_tools_host {
     ($host:ty) => {
+        impl operit_plugin_sdk::js_sdk::edge::EdgeHost for $host {
+            fn execute(&self, _nodeId: String, _interfaceInfo: operit_plugin_sdk::js_sdk::edge::EdgeInterfaceInfo, _args: Option<serde_json::Value>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::EdgePortResultData> {
+                Box::pin(async { Err(operit_plugin_sdk::js_sdk::JsHostError::new("Edge port is unavailable in this test host")) })
+            }
+        }
+        impl operit_plugin_sdk::js_sdk::edge::IoHost for $host {
+            fn execute(&self, _nodeId: String, _interfaceInfo: operit_plugin_sdk::js_sdk::edge::IoInterfaceInfo, _args: Option<serde_json::Value>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::EdgePortResultData> {
+                Box::pin(async { Err(operit_plugin_sdk::js_sdk::JsHostError::new("I/O port is unavailable in this test host")) })
+            }
+        }
+
         #[allow(non_snake_case)]
         impl operit_plugin_sdk::js_sdk::files::FilesHost for $host {
             /// Rejects directory listing in this test host.
@@ -643,7 +654,7 @@ macro_rules! impl_rejecting_js_tools_host {
             }
 
             /// Rejects terminal creation in this test host.
-            fn create(&self, _sessionName: String) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::TerminalSessionCreationResultData> {
+            fn create(&self, _sessionName: String, _type: Option<operit_plugin_sdk::js_sdk::results::TerminalType>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::TerminalSessionCreationResultData> {
                 $crate::javascript::TestJsToolsHost::rejecting_js_future("Terminal.create is not part of this test")
             }
 
@@ -805,10 +816,24 @@ macro_rules! impl_rejecting_js_tools_host {
             fn getMessages(&self, _chatId: String, _options: Option<operit_plugin_sdk::js_sdk::chat::ChatHostGetMessagesOptions>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::ChatMessagesResultData> {
                 $crate::javascript::TestJsToolsHost::rejecting_js_future("Chat.getMessages is not part of this test")
             }
+
+            /// Rejects ranged message reads in this test host.
+            fn getMessagesRange(&self, _chatId: String, _options: Option<operit_plugin_sdk::js_sdk::chat::ChatHostGetMessagesRangeOptions>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::ChatMessagesResultData> {
+                $crate::javascript::TestJsToolsHost::rejecting_js_future("Chat.getMessagesRange is not part of this test")
+            }
+
+            /// Rejects functional model calls in this test host.
+            fn call(&self, _options: operit_plugin_sdk::js_sdk::chat::ChatCallOptions) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::ChatCallResultData> {
+                $crate::javascript::TestJsToolsHost::rejecting_js_future("Chat.call is not part of this test")
+            }
         }
 
         #[allow(non_snake_case)]
         impl operit_plugin_sdk::js_sdk::memory::MemoryHost for $host {
+            /// Rejects memory owner resolution outside tests that provide this capability.
+            fn getOwnerKey(&self, _callerCardId: String) -> operit_plugin_sdk::js_sdk::JsFuture<String> {
+                $crate::javascript::TestJsToolsHost::rejecting_js_future("Memory.getOwnerKey is not part of this test")
+            }
             /// Rejects memory queries in this test host.
             fn query_overload_1(&self, _query: String, _folderPath: Option<String>, _limit: Option<f64>, _startTime: Option<String>, _endTime: Option<String>, _snapshotId: Option<String>, _threshold: Option<f64>, _targetOwnerKey: Option<String>) -> operit_plugin_sdk::js_sdk::JsFuture<operit_plugin_sdk::js_sdk::results::MemoryQueryResultData> {
                 $crate::javascript::TestJsToolsHost::rejecting_js_future("Memory.query is not part of this test")

@@ -75,6 +75,9 @@ pub fn createRuntimeHostManager(
         systemOperationHost,
     );
     context.httpHost = Some(Arc::new(OhosHttpHost::new()));
+    context.httpServerHost = Some(Arc::new(operit_host_native_common::NativeHttpServerHost));
+    context.tcpHost = Some(Arc::new(operit_host_native_common::NativeTcpHost));
+    context.serialPortHost = Some(Arc::new(operit_host_native_common::NativeSerialPortHost));
     context.webSocketHost = Some(Arc::new(OhosHttpHost::new()));
     context.managedRuntimeHost = Some(managedRuntimeHost);
     context.runtimeStorageHost = Some(runtimeStorageHost);
@@ -86,6 +89,7 @@ pub fn createRuntimeHostManager(
         .withHostRuntimeEventSchedulerHost(Arc::new(OhosHostRuntimeEventSchedulerHost::new()));
     context = context.withHostJavaScriptRuntimeHost(Arc::new(OhosHostJavaScriptRuntimeHost::new()));
     context =
-        context.withHostRuntimeTaskSchedulerHost(Arc::new(OhosHostRuntimeTaskSchedulerHost::new()));
+        context.withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
+    .withHostRuntimeTaskSchedulerHost(Arc::new(OhosHostRuntimeTaskSchedulerHost::new()));
     context
 }

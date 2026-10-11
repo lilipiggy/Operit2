@@ -99,6 +99,8 @@ pub struct JsToolNameResolutionRequest {
 /// Describes one ToolPkg runtime-to-runtime IPC request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct JsToolPkgIpcRequest {
+    /// Identifies a dependency caller injected by the engine, never by JavaScript arguments.
+    pub dependency_caller: Option<String>,
     pub package_target: String,
     pub caller_context_key: String,
     pub target_context_key: Option<String>,
@@ -113,10 +115,37 @@ pub type JsToolPkgIpcCompletion = Box<dyn FnOnce(Result<Value, String>) + Send +
 /// Represents one locally polled JavaScript execution future.
 pub type JsExecutionFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
+/// Represents a Send result while its local JavaScript session is driven by the owning Host.
+pub type JsExecutionCompletion<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// Identifies the storage scope selected before a ToolPkg registration is evaluated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolPkgConfigScope {
+    Device,
+    Space,
+}
+
+impl ToolPkgConfigScope {
+    /// Returns the stable scope key understood by the runtime storage compatibility layer.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Space => "space",
+        }
+    }
+}
+
 /// Defines the fixed Rust execution contract required by package JavaScript.
 pub trait JsExecutionHost: crate::js_sdk::JsToolsHost + Send + Sync {
+    /// Returns the current executable tool catalog with parameter schemas.
+    fn get_tool_catalog(&self) -> Result<serde_json::Value, String>;
+
     /// Executes one validated tool call through the embedding application's tool system.
-    fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult;
+    fn execute_tool_call(
+        &self,
+        request: JsToolCallRequest,
+    ) -> JsExecutionCompletion<JsToolCallResult>;
 
     /// Returns the language code exposed to package JavaScript.
     fn package_language(&self) -> Result<String, String>;
@@ -124,15 +153,29 @@ pub trait JsExecutionHost: crate::js_sdk::JsToolsHost + Send + Sync {
     /// Reads one environment variable exposed to package JavaScript.
     fn read_environment_variable(&self, key: &str) -> Result<Option<String>, String>;
 
+    /// Writes one environment variable exposed to package JavaScript.
+    fn write_environment_variable(&self, key: &str, value: &str) -> Result<(), String>;
+
     /// Returns the writable configuration directory for one plugin.
     fn plugin_config_dir(&self, plugin_id: &str) -> Result<String, String>;
+
+    /// Returns a named configuration directory owned by the executing package.
+    fn scoped_plugin_config_dir(&self, owner_id: &str, plugin_id: &str) -> Result<String, String>;
+
+    /// Creates package configuration in the explicit scope selected for registration.
+    fn registration_plugin_config_dir(
+        &self,
+        owner_id: &str,
+        plugin_id: &str,
+        scope: ToolPkgConfigScope,
+    ) -> Result<String, String>;
 
     /// Reads one UTF-8 ToolPkg resource.
     fn read_toolpkg_text_resource(
         &self,
         package_name_or_subpackage_id: &str,
         resource_path: &str,
-    ) -> Result<String, String>;
+    ) -> Result<Option<String>, String>;
 
     /// Materializes one ToolPkg resource and returns its output path.
     fn materialize_toolpkg_resource(
@@ -147,13 +190,10 @@ pub trait JsExecutionHost: crate::js_sdk::JsToolsHost + Send + Sync {
     ) -> Result<JsToolPkgWasmResult, String>;
 
     /// Handles one Compose DSL WebView controller command.
-    fn handle_compose_webview_controller_command(
-        &self,
-        payload_json: &str,
-    ) -> Result<String, String>;
+    fn handle_compose_webview_controller_command(&self, payload: &Value) -> Result<Value, String>;
 
     /// Opens one Compose DSL file picker through the embedding application's host UI.
-    fn open_compose_file_picker(&self, payload_json: &str) -> Result<String, String>;
+    fn open_compose_file_picker(&self, payload: &Value) -> Result<Value, String>;
 
     /// Returns whether one package is currently imported.
     fn is_package_imported(&self, package_name: &str) -> Result<bool, String>;
@@ -191,7 +231,7 @@ pub trait JsPackageExecutor: Send + Sync {
         &self,
         script: &str,
         request: &JsPackageToolCallRequest,
-    ) -> JsPackageToolCallResult;
+    ) -> JsExecutionCompletion<JsPackageToolCallResult>;
 }
 
 /// Supplies concrete JavaScript execution services to an embedding application.
@@ -263,6 +303,8 @@ pub struct ToolPkgMainRegistrationCapture {
     pub toolboxUiModules: Vec<String>,
     #[serde(rename = "uiRoutes", default)]
     pub uiRoutes: Vec<String>,
+    #[serde(rename = "chatComposerSlots", default)]
+    pub chatComposerSlots: Vec<String>,
     #[serde(rename = "navigationEntries", default)]
     pub navigationEntries: Vec<String>,
     #[serde(rename = "desktopWidgets", default)]
@@ -281,6 +323,10 @@ pub struct ToolPkgMainRegistrationCapture {
     pub chatViewHooks: Vec<String>,
     #[serde(rename = "chatMessageHooks", default)]
     pub chatMessageHooks: Vec<String>,
+    #[serde(rename = "chatMessageMenuItems", default)]
+    pub chatMessageMenuItems: Vec<String>,
+    #[serde(rename = "chatRuntimeHooks", default)]
+    pub chatRuntimeHooks: Vec<String>,
     #[serde(rename = "hostEventHooks", default)]
     pub hostEventHooks: Vec<String>,
     #[serde(rename = "toolLifecycleHooks", default)]
@@ -301,8 +347,14 @@ pub struct ToolPkgMainRegistrationCapture {
     pub promptEstimateFinalizeHooks: Vec<String>,
     #[serde(rename = "summaryGenerateHooks", default)]
     pub summaryGenerateHooks: Vec<String>,
+    #[serde(rename = "coreCommands", default)]
+    pub coreCommands: Vec<String>,
     #[serde(rename = "aiProviders", default)]
     pub aiProviders: Vec<String>,
+    #[serde(rename = "manifestExtensions", default)]
+    pub manifestExtensions: Vec<String>,
+    #[serde(rename = "publicApis", default)]
+    pub publicApis: Vec<String>,
 }
 
 /// Resolves UTF-8 module resources for ToolPkg JavaScript execution contexts.
@@ -312,7 +364,7 @@ pub trait ToolPkgTextResourceHost: Send + Sync {
         &self,
         package_name_or_subpackage_id: &str,
         resource_path: &str,
-    ) -> Result<String, String>;
+    ) -> Result<Option<String>, String>;
 }
 
 /// Immutable package environment owned by one ToolPkg JavaScript execution context.
@@ -320,6 +372,7 @@ pub trait ToolPkgTextResourceHost: Send + Sync {
 pub struct ToolPkgExecutionContext {
     pub context_key: String,
     pub container_package_name: String,
+    pub api_version: String,
     pub text_resource_host: Arc<dyn ToolPkgTextResourceHost>,
 }
 
@@ -335,7 +388,7 @@ pub trait JsExecutionEngine: Send + Sync {
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         dispatch_intermediate_on_main: bool,
         timeout_sec: u64,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes a named JavaScript function with an exact millisecond timeout for ToolPkg runtime hooks.
     fn execute_script_function_with_timeout_millis(
@@ -347,7 +400,7 @@ pub trait JsExecutionEngine: Send + Sync {
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
         dispatch_intermediate_on_main: bool,
         timeout_millis: u64,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes a named JavaScript function without blocking the caller runtime.
     fn execute_script_function_async(
@@ -377,7 +430,7 @@ pub trait JsExecutionEngine: Send + Sync {
         runtime_options: &BTreeMap<String, Value>,
         env_overrides: &BTreeMap<String, String>,
         text_resources: Arc<BTreeMap<String, String>>,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Executes one Compose DSL render without blocking the caller runtime.
     fn execute_compose_dsl_script_async(
@@ -396,7 +449,7 @@ pub trait JsExecutionEngine: Send + Sync {
         runtime_options: &BTreeMap<String, Value>,
         env_overrides: &BTreeMap<String, String>,
         on_intermediate_result: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> JsExecutionResult<Option<String>>;
+    ) -> JsExecutionCompletion<JsExecutionResult<Option<String>>>;
 
     /// Dispatches one Compose DSL action without blocking the caller runtime.
     fn dispatch_compose_dsl_action_result_async(

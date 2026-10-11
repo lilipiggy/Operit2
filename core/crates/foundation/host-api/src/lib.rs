@@ -1,7 +1,21 @@
 #![allow(non_snake_case)]
 
+pub mod AtomicCounter;
+pub mod FileSystemResource;
 pub mod HostManager;
+pub mod HttpServer;
+pub mod PluginSdkIpc;
+pub mod Tcp;
+pub mod TerminalWorkingDirectory;
 pub mod TimeUtils;
+pub use Tcp::{TcpConnection, TcpHost, TcpListener};
+pub mod SerialPort;
+pub use SerialPort::{SerialPortConnection, SerialPortHost};
+
+pub use PluginSdkIpc::{
+    pluginSdkIpcError, PluginSdkIpcEndpoint, PluginSdkIpcHost, PluginSdkIpcSessionCallbacks,
+    PluginSdkIpcSessionId, PLUGIN_SDK_IPC_ENDPOINT_NAME,
+};
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -26,6 +40,8 @@ pub type HostRuntimeEventScheduleSink =
 
 type HostLogSink = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 static HOST_LOG_SINK: OnceLock<RwLock<Option<HostLogSink>>> = OnceLock::new();
+pub type HostConsoleLogSink = Arc<dyn Fn(i32, &str, &str) + Send + Sync + 'static>;
+static HOST_CONSOLE_LOG_SINK: OnceLock<RwLock<Option<HostConsoleLogSink>>> = OnceLock::new();
 
 /// Installs the process-wide host log sink used for host error reporting.
 pub fn setHostLogSink(sink: HostLogSink) {
@@ -42,6 +58,27 @@ pub fn logHostError(tag: &str, message: &str) {
         .clone()
         .expect("host log sink must be installed before host errors are logged");
     sink(tag, message);
+}
+
+/// Installs the host-owned live console sink for runtime log records.
+pub fn setHostConsoleLogSink(sink: HostConsoleLogSink) {
+    let holder = HOST_CONSOLE_LOG_SINK.get_or_init(|| RwLock::new(None));
+    *holder.write().expect("host console log sink lock poisoned") = Some(sink);
+}
+
+/// Emits one runtime log record through the host-owned live console sink.
+pub fn tryLogHostConsole(priority: i32, tag: &str, message: &str) -> bool {
+    let sink = HOST_CONSOLE_LOG_SINK
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .expect("host console log sink lock poisoned")
+        .clone();
+    if let Some(sink) = sink {
+        sink(priority, tag, message);
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +119,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: "optional, execution environment. Values: \"android\" (Android file system) | \"linux\" (local terminal environment) | \"repo:<repositoryName>\" (attached local storage repository)".to_string(),
             environmentParameterDescriptionCn: "可选，执行环境。取值：\"android\"（Android 文件系统）| \"linux\"（本地终端环境）| \"repo:<仓库名>\"（附加本地储存仓库）".to_string(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -105,7 +144,32 @@ impl HostEnvironmentDescriptor {
                 "runtime.storage".to_string(),
                 "runtime.sqlite".to_string(),
             ],
-            structuredCapabilities: defaultHostCapabilities(),
+            structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
+                "fs.read",
+                "fs.write",
+                "fs.search",
+                "fs.archive",
+                "os.open",
+                "os.share",
+                "audio.playback",
+                "music.playback",
+                "bluetooth.classic",
+                "bluetooth.ble",
+                "tts.synthesis",
+                "tts.playback",
+                "system.location",
+                "system.notifications.read",
+                "system.notifications.send",
+                "system.app_usage",
+                "system.app.install",
+                "system.app.uninstall",
+                "system.settings",
+                "runtime.process",
+                "runtime.storage",
+                "runtime.sqlite",
+            ]),
             onboardingRequirements: androidOnboardingRequirements(),
             workspaceRoots: Vec::new(),
         }
@@ -127,6 +191,7 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -154,6 +219,7 @@ impl HostEnvironmentDescriptor {
                 "runtime.sqlite".to_string(),
             ],
             structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
                 "fs.read",
                 "fs.write",
                 "fs.search",
@@ -207,6 +273,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -227,7 +295,29 @@ impl HostEnvironmentDescriptor {
                 "system.app.uninstall".to_string(),
                 "system.settings".to_string(),
             ],
-            structuredCapabilities: defaultHostCapabilities(),
+            structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
+                "fs.read",
+                "fs.write",
+                "fs.search",
+                "fs.archive",
+                "os.open",
+                "os.share",
+                "audio.playback",
+                "music.playback",
+                "bluetooth.classic",
+                "bluetooth.ble",
+                "tts.synthesis",
+                "tts.playback",
+                "system.location",
+                "system.notifications.read",
+                "system.notifications.send",
+                "system.app_usage",
+                "system.app.install",
+                "system.app.uninstall",
+                "system.settings",
+            ]),
             onboardingRequirements: windowsOnboardingRequirements(),
             workspaceRoots: Vec::new(),
         }
@@ -235,6 +325,7 @@ impl HostEnvironmentDescriptor {
 
     /// Builds the Linux host descriptor used by desktop runtime prompts.
     pub fn linux() -> Self {
+        let capabilityIds = linuxHostCapabilityIds();
         Self {
             id: "linux".to_string(),
             displayName: "Linux".to_string(),
@@ -249,28 +340,8 @@ impl HostEnvironmentDescriptor {
             usesEnvironmentParameter: false,
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
-            capabilities: vec![
-                "fs.read".to_string(),
-                "fs.write".to_string(),
-                "fs.search".to_string(),
-                "fs.archive".to_string(),
-                "os.open".to_string(),
-                "os.share".to_string(),
-                "audio.playback".to_string(),
-                "music.playback".to_string(),
-                "bluetooth.classic".to_string(),
-                "bluetooth.ble".to_string(),
-                "tts.synthesis".to_string(),
-                "tts.playback".to_string(),
-                "system.location".to_string(),
-                "system.notifications.read".to_string(),
-                "system.notifications.send".to_string(),
-                "system.app_usage".to_string(),
-                "system.app.install".to_string(),
-                "system.app.uninstall".to_string(),
-                "system.settings".to_string(),
-            ],
-            structuredCapabilities: defaultHostCapabilities(),
+            capabilities: capabilityIdStrings(&capabilityIds),
+            structuredCapabilities: hostCapabilities(&capabilityIds),
             onboardingRequirements: vec![HostOnboardingRequirement {
                 id: "linux.root".to_string(),
                 title: "root / service account".to_string(),
@@ -304,6 +375,8 @@ impl HostEnvironmentDescriptor {
             environmentParameterDescriptionEn: String::new(),
             environmentParameterDescriptionCn: String::new(),
             capabilities: vec![
+                "screen.capture".to_string(),
+                "ocr.recognition".to_string(),
                 "fs.read".to_string(),
                 "fs.write".to_string(),
                 "fs.search".to_string(),
@@ -320,14 +393,60 @@ impl HostEnvironmentDescriptor {
                 "os.open".to_string(),
                 "os.share".to_string(),
                 "system.location".to_string(),
-                "system.notifications.read".to_string(),
                 "system.notifications.send".to_string(),
                 "system.app_usage".to_string(),
                 "system.app.install".to_string(),
                 "system.app.uninstall".to_string(),
                 "system.settings".to_string(),
             ],
-            structuredCapabilities: defaultHostCapabilities(),
+            structuredCapabilities: hostCapabilities(&[
+                "screen.capture",
+                "ocr.recognition",
+                "fs.read",
+                "fs.write",
+                "fs.search",
+                "fs.archive",
+                "web.visit",
+                "runtime.process",
+                "runtime.storage",
+                "runtime.sqlite",
+                "audio.playback",
+                "music.playback",
+                "bluetooth.classic",
+                "bluetooth.ble",
+                "tts.playback",
+                "os.open",
+                "os.share",
+                "system.location",
+                "system.notifications.send",
+                "system.app_usage",
+                "system.app.install",
+                "system.app.uninstall",
+                "system.settings",
+            ]),
+            onboardingRequirements: Vec::new(),
+            workspaceRoots: Vec::new(),
+        }
+    }
+
+    /// Builds the ESP32 device host descriptor used by Edge Core apps.
+    pub fn esp32() -> Self {
+        Self {
+            id: "esp32".to_string(),
+            displayName: "ESP32".to_string(),
+            platform: HostPlatform::Esp32,
+            privilege: HostPrivilege::Normal,
+            isolation: HostIsolation::None,
+            pathStyleDescriptionEn:
+                "Use paths mounted by the ESP-IDF VFS, such as /data/config.json.".to_string(),
+            pathStyleDescriptionCn: "使用 ESP-IDF VFS 挂载的路径，例如 /data/config.json。"
+                .to_string(),
+            examplePaths: vec!["/data".to_string(), "/data/config.json".to_string()],
+            usesEnvironmentParameter: false,
+            environmentParameterDescriptionEn: String::new(),
+            environmentParameterDescriptionCn: String::new(),
+            capabilities: vec!["device.gpio".to_string()],
+            structuredCapabilities: hostCapabilities(&["device.gpio"]),
             onboardingRequirements: Vec::new(),
             workspaceRoots: Vec::new(),
         }
@@ -349,6 +468,7 @@ pub enum HostPlatform {
     Macos,
     Ios,
     Web,
+    Esp32,
     Other,
 }
 
@@ -533,6 +653,18 @@ fn defaultHostCapabilities() -> Vec<HostCapability> {
             operations: vec![CapabilityOperation::Read, CapabilityOperation::Execute],
         },
         HostCapability {
+            id: "screen.capture".to_string(),
+            displayName: "屏幕采集".to_string(),
+            scope: CapabilityScope::System,
+            operations: vec![CapabilityOperation::Read],
+        },
+        HostCapability {
+            id: "ocr.recognition".to_string(),
+            displayName: "图片文字识别".to_string(),
+            scope: CapabilityScope::Media,
+            operations: vec![CapabilityOperation::Read],
+        },
+        HostCapability {
             id: "system.location".to_string(),
             displayName: "定位".to_string(),
             scope: CapabilityScope::System,
@@ -586,7 +718,47 @@ fn defaultHostCapabilities() -> Vec<HostCapability> {
             scope: CapabilityScope::Device,
             operations: vec![CapabilityOperation::Read, CapabilityOperation::Connect],
         },
+        HostCapability {
+            id: "device.gpio".to_string(),
+            displayName: "GPIO 控制".to_string(),
+            scope: CapabilityScope::Device,
+            operations: vec![CapabilityOperation::Read, CapabilityOperation::Write],
+        },
     ]
+}
+
+/// Builds the base Linux host capability id list.
+#[allow(non_snake_case)]
+fn linuxHostCapabilityIds() -> Vec<&'static str> {
+    vec![
+        "screen.capture",
+        "ocr.recognition",
+        "fs.read",
+        "fs.write",
+        "fs.search",
+        "fs.archive",
+        "os.open",
+        "os.share",
+        "audio.playback",
+        "music.playback",
+        "bluetooth.classic",
+        "bluetooth.ble",
+        "tts.synthesis",
+        "tts.playback",
+        "system.location",
+        "system.notifications.read",
+        "system.notifications.send",
+        "system.app_usage",
+        "system.app.install",
+        "system.app.uninstall",
+        "system.settings",
+    ]
+}
+
+/// Converts capability ids into owned descriptor strings.
+#[allow(non_snake_case)]
+fn capabilityIdStrings(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| id.to_string()).collect()
 }
 
 /// Builds structured capabilities for the provided capability id order.
@@ -802,7 +974,7 @@ impl From<std::io::Error> for HostError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub isDirectory: bool,
@@ -811,14 +983,14 @@ pub struct FileEntry {
     pub lastModified: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileExistence {
     pub exists: bool,
     pub isDirectory: bool,
     pub size: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
     pub path: String,
     pub exists: bool,
@@ -831,7 +1003,7 @@ pub struct FileInfo {
     pub rawStatOutput: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindFilesRequest {
     pub path: String,
     pub pattern: String,
@@ -840,7 +1012,7 @@ pub struct FindFilesRequest {
     pub caseInsensitive: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepCodeRequest {
     pub path: String,
     pub pattern: String,
@@ -850,20 +1022,20 @@ pub struct GrepCodeRequest {
     pub maxResults: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepLineMatch {
     pub lineNumber: usize,
     pub lineContent: String,
     pub matchContext: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepFileMatch {
     pub filePath: String,
     pub lineMatches: Vec<GrepLineMatch>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepCodeResult {
     pub matches: Vec<GrepFileMatch>,
     pub totalMatches: usize,
@@ -916,6 +1088,10 @@ pub trait BrowserAutomationHost: Send + Sync {
         request: BrowserAutomationRequest,
     ) -> HostResult<BrowserAutomationResponse>;
 }
+
+/// Constructs a browser host with the file-system capability selected by its runtime.
+pub type BrowserAutomationHostFactory =
+    Arc<dyn Fn(Arc<dyn FileSystemHost>) -> Arc<dyn BrowserAutomationHost> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserSessionInfo {
@@ -995,8 +1171,10 @@ pub trait BrowserSessionHost: Send + Sync {
 pub enum ComposeDslFilePickerMode {
     Document,
     Photo,
+    Image,
     Video,
     Media,
+    Directory,
 }
 
 /// Compose DSL options that describe one file-picker request.
@@ -1005,6 +1183,8 @@ pub enum ComposeDslFilePickerMode {
 pub struct ComposeDslFilePickerOptions {
     pub picker: Option<ComposeDslFilePickerMode>,
     pub allowMultiple: Option<bool>,
+    /// Restricts selectable documents by MIME type.
+    pub mimeTypes: Option<Vec<String>>,
 }
 
 /// A fully validated file-picker request issued by a Compose DSL screen.
@@ -1015,11 +1195,23 @@ pub struct ComposeDslFilePickerRequest {
     pub executionContextKey: String,
     pub picker: ComposeDslFilePickerMode,
     pub allowMultiple: bool,
+    /// MIME filters passed unchanged to the platform selector.
+    pub mimeTypes: Vec<String>,
 }
 
 impl ComposeDslFilePickerRequest {
-    /// Decodes and validates the JSON payload supplied by the Compose DSL JavaScript bridge.
+    /// Decodes the explicit external JSON file-picker protocol.
     pub fn parse(payloadJson: &str) -> HostResult<Self> {
+        let payload = serde_json::from_str(payloadJson).map_err(|error| {
+            HostError::new(format!(
+                "Compose DSL file picker request decode failed: {error}"
+            ))
+        })?;
+        Self::fromValue(payload)
+    }
+
+    /// Validates a structured request from the JavaScript host bridge.
+    pub fn fromValue(payload: Value) -> HostResult<Self> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct RawRequest {
@@ -1030,7 +1222,7 @@ impl ComposeDslFilePickerRequest {
             options: ComposeDslFilePickerOptions,
         }
 
-        let raw: RawRequest = serde_json::from_str(payloadJson).map_err(|error| {
+        let raw: RawRequest = serde_json::from_value(payload).map_err(|error| {
             HostError::new(format!(
                 "Compose DSL file picker request decode failed: {error}"
             ))
@@ -1049,6 +1241,7 @@ impl ComposeDslFilePickerRequest {
             routeInstanceId: raw.routeInstanceId.trim().to_string(),
             executionContextKey: executionContextKey.to_string(),
             allowMultiple: options.allowMultiple.unwrap_or(false),
+            mimeTypes: options.mimeTypes.unwrap_or_default(),
             picker,
         })
     }
@@ -1056,10 +1249,10 @@ impl ComposeDslFilePickerRequest {
 
 pub trait ComposeDslWebViewHost: Send + Sync {
     /// Executes one imperative WebView controller command for a Compose DSL screen.
-    fn handleControllerCommand(&self, payloadJson: &str) -> HostResult<String>;
+    fn handleControllerCommand(&self, payload: &Value) -> HostResult<Value>;
 
     /// Opens one validated Compose DSL file picker through the platform owner.
-    fn openFilePicker(&self, request: ComposeDslFilePickerRequest) -> HostResult<String>;
+    fn openFilePicker(&self, request: ComposeDslFilePickerRequest) -> HostResult<Value>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1093,6 +1286,14 @@ pub struct HttpResponseData {
     pub statusMessage: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+/// Describes one HTTP response streamed into a destination file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpFileDownloadResult {
+    pub finalUrl: String,
+    pub targetPath: String,
+    pub downloadedBytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1181,6 +1382,17 @@ impl HttpDownloadControl {
 
 pub type HttpDownloadProgressCallback = Arc<dyn Fn(HttpDownloadProgress) + Send + Sync + 'static>;
 
+/// HTTP response metadata delivered before the first streamed body chunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponseHead {
+    pub finalUrl: String,
+    pub statusCode: i32,
+    pub statusMessage: String,
+    pub headers: Vec<(String, String)>,
+}
+
+pub type HttpStreamResponseCallback = Arc<dyn Fn(HttpResponseHead) + Send + Sync + 'static>;
+
 pub type HttpStreamOpenedCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 pub type HttpStreamChunkCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync + 'static>;
@@ -1227,9 +1439,32 @@ pub trait WebSocketHost: Send + Sync {
     fn closeWebSocket(&self, streamId: &str) -> HostResult<()>;
 }
 
+/// Declares how the host delivers remote images to its presentation surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpImageDelivery {
+    Bytes,
+    DisplayUrl,
+}
+
 pub trait HttpHost: HttpStreamHost + Send + Sync {
+    /// Selects image delivery before any request is started.
+    fn imageDelivery(&self) -> HttpImageDelivery;
+
     /// Executes one buffered HTTP request.
     fn executeHttpRequest(&self, request: HttpRequestData) -> HostResult<HttpResponseData>;
+
+    /// Streams one successful HTTP response to a file without a declared byte count.
+    /// Implementations must not publish an incomplete response as the destination file.
+    #[allow(non_snake_case)]
+    fn downloadToFile(
+        &self,
+        _request: HttpRequestData,
+        _targetPath: String,
+    ) -> HostResult<HttpFileDownloadResult> {
+        Err(HostError::new(
+            "HTTP download to file is not supported by this host",
+        ))
+    }
 
     /// Downloads files with bounded worker concurrency and progress reporting.
     fn downloadFiles(
@@ -1252,6 +1487,23 @@ pub trait HttpStreamHost: Send + Sync {
         onChunk: HttpStreamChunkCallback,
         onClosed: HttpStreamClosedCallback,
     ) -> HostResult<()>;
+
+    /// Opens an HTTP response stream, including non-success statuses. Metadata must
+    /// precede ordered body chunks; close must cancel header and body reads alike.
+    /// This must not buffer the response or silently fall back to a blocking request.
+    #[allow(non_snake_case)]
+    fn openHttpResponseStream(
+        &self,
+        _streamId: String,
+        _request: HttpRequestData,
+        _onResponse: HttpStreamResponseCallback,
+        _onChunk: HttpStreamChunkCallback,
+        _onClosed: HttpStreamClosedCallback,
+    ) -> HostResult<()> {
+        Err(HostError::new(
+            "HTTP response streaming is not supported by this host",
+        ))
+    }
 
     /// Closes one previously opened HTTP byte stream.
     #[allow(non_snake_case)]
@@ -1400,6 +1652,14 @@ pub struct TerminalInfo {
 }
 
 pub trait TerminalHost: Send + Sync {
+    /// Resolves a working directory in the exact selected terminal filesystem.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String>;
     fn terminalInfo(&self) -> HostResult<TerminalInfo>;
     fn startPtySession(
         &self,
@@ -1416,7 +1676,14 @@ pub trait TerminalHost: Send + Sync {
     fn pollPtyExitCode(&self, sessionId: &str) -> HostResult<Option<i32>>;
     fn closePtySession(&self, sessionId: &str) -> HostResult<()>;
     fn listSessions(&self) -> HostResult<Vec<TerminalSessionListEntry>>;
+    /// Creates or reuses a named session in the host's configured default terminal.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo>;
+    /// Creates or reuses a named session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo>;
     fn executeInSession(
         &self,
         sessionId: &str,
@@ -1462,6 +1729,12 @@ pub trait RuntimeStorageHost: Send + Sync {
     }
     /// Writes bytes to a virtual runtime storage path.
     fn writeBytes(&self, path: &str, content: &[u8]) -> HostResult<()>;
+    /// Publishes a complete private catalog without exposing a partially written file.
+    /// Persistent hosts must flush data before publishing; unsupported hosts fail explicitly.
+    fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
+        let _ = (path, content);
+        Err(HostError::new("Runtime storage host does not expose atomic catalog writes"))
+    }
     /// Appends bytes to a virtual runtime storage path.
     fn appendBytes(&self, path: &str, content: &[u8]) -> HostResult<()>;
     /// Deletes a virtual runtime storage entry.
@@ -1499,6 +1772,15 @@ pub trait RuntimeStorageWriteHost: Send + Sync {
 pub trait ArchiveStagingHost: Send + Sync {
     /// Creates an empty staged archive with its final byte length reserved by the owner host.
     fn createArchive(&self, archiveId: &str, expectedByteLength: u64) -> HostResult<()>;
+
+    /// Creates a growable archive for a host-backed snapshot export.
+    fn createExportArchive(&self, archiveId: &str) -> HostResult<()>;
+
+    /// Writes a bounded export range, including ZIP header updates.
+    fn writeExportArchive(&self, archiveId: &str, offset: u64, chunk: &[u8]) -> HostResult<()>;
+
+    /// Returns a file-backed reference without reading archive bytes into application memory.
+    fn archiveFileReference(&self, archiveId: &str) -> HostResult<String>;
 
     /// Appends one ordered byte chunk to an existing staged archive.
     fn appendArchive(&self, archiveId: &str, chunk: &[u8]) -> HostResult<()>;
@@ -1660,13 +1942,14 @@ pub type HostRuntimeAsyncTask =
 /// Represents one host-owned asynchronous runtime turn boundary that may cross runtime schedulers.
 pub type HostRuntimeTurnFuture = Pin<Box<dyn Future<Output = HostResult<()>> + Send + 'static>>;
 
-/// Handles one host JavaScript function that returns a string value.
-pub type HostJavaScriptStringCallback =
-    Arc<dyn Fn(Vec<String>) -> HostResult<String> + Send + Sync + 'static>;
+/// Submits an owned JSON-compatible request. The request id refers to a Promise
+/// whose JS resolve/reject functions remain on the runtime's owning executor.
+pub type HostJavaScriptAsyncJsonCallback =
+    Arc<dyn Fn(u64, Vec<Value>) -> HostResult<()> + Send + Sync + 'static>;
 
-/// Handles one host JavaScript function that returns `undefined`.
-pub type HostJavaScriptVoidCallback =
-    Arc<dyn Fn(Vec<String>) -> HostResult<()> + Send + Sync + 'static>;
+/// Handles a synchronous host operation using owned JSON-compatible arguments and results.
+pub type HostJavaScriptJsonCallback =
+    Arc<dyn Fn(Vec<Value>) -> HostResult<Value> + Send + Sync + 'static>;
 
 /// Supplies one interrupt predicate to a host-owned JavaScript runtime.
 pub type HostJavaScriptInterruptHandler = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
@@ -1692,18 +1975,33 @@ pub trait HostJavaScriptRuntime {
         handler: Option<HostJavaScriptInterruptHandler>,
     ) -> HostResult<()>;
 
-    /// Registers one global JavaScript function that returns a string.
-    fn registerHostJavaScriptStringFunction(
+    /// Calls a lifecycle function with structured arguments and returns its structured result.
+    fn callHostJavaScriptFunction(&mut self, name: &str, arguments: &[Value]) -> HostResult<Value>;
+
+    /// Registers a required structured asynchronous binding with an owning execution scope.
+    /// Hosts convert arguments to owned JSON-compatible values without producing JSON text.
+    fn registerHostJavaScriptAsyncJsonFunction(
         &mut self,
         name: &str,
-        callback: HostJavaScriptStringCallback,
+        callback: HostJavaScriptAsyncJsonCallback,
     ) -> HostResult<()>;
 
-    /// Registers one global JavaScript function that returns `undefined`.
-    fn registerHostJavaScriptVoidFunction(
+    /// Settles a Promise on its owning executor exactly once; cancelled ids are ignored.
+    fn settleHostJavaScriptPromise(
+        &mut self,
+        id: u64,
+        value: &Value,
+        reject: bool,
+    ) -> HostResult<()>;
+
+    /// Releases the Promise handles owned by the cancelled execution scope.
+    fn cancelHostJavaScriptPromises(&mut self, scope: &str) -> HostResult<()>;
+
+    /// Registers a required synchronous structured binding without JSON text transport.
+    fn registerHostJavaScriptJsonFunction(
         &mut self,
         name: &str,
-        callback: HostJavaScriptVoidCallback,
+        callback: HostJavaScriptJsonCallback,
     ) -> HostResult<()>;
 }
 
@@ -1844,11 +2142,23 @@ pub trait HostJavaScriptRuntimeHost: Send + Sync {
 }
 
 pub trait HostRuntimeTaskSchedulerHost: Send + Sync {
+    /// Reads monotonic milliseconds from this Host's timer clock, independent of wall-clock changes.
+    /// Readings must remain comparable across tasks using the same scheduler instance.
+    fn monotonicTimeMillis(&self) -> HostResult<u64>;
+
     /// Schedules a named one-shot runtime task through the platform execution mechanism.
     fn scheduleHostRuntimeTask(&self, taskName: &str, task: HostRuntimeTask) -> HostResult<()>;
 
     /// Schedules a named asynchronous runtime task through the platform executor.
     fn scheduleHostRuntimeAsyncTask(
+        &self,
+        taskName: &str,
+        task: HostRuntimeAsyncTask,
+    ) -> HostResult<()>;
+
+    /// Schedules a nonblocking task on the host's reusable affine executor.
+    /// Callers must not block the executor or rely on exclusive thread-local state.
+    fn scheduleHostRuntimeCooperativeAsyncTask(
         &self,
         taskName: &str,
         task: HostRuntimeAsyncTask,
@@ -1890,14 +2200,14 @@ pub struct AppListData {
     pub packages: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationEntry {
     pub packageName: String,
     pub text: String,
     pub timestamp: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationData {
     pub notifications: Vec<NotificationEntry>,
     pub timestamp: i64,
@@ -1923,7 +2233,7 @@ pub struct AppUsageTimeResultData {
     pub entries: Vec<AppUsageTimeEntry>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LocationData {
     pub latitude: f64,
     pub longitude: f64,
@@ -1937,7 +2247,7 @@ pub struct LocationData {
     pub country: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeviceInfoData {
     pub deviceId: String,
     pub model: String,
@@ -2207,6 +2517,8 @@ pub struct BluetoothBleNotificationData {
 }
 
 pub trait BluetoothHost: Send + Sync {
+    /// Declares inbound RFCOMM support independently of BLE operations and permissions.
+    fn supportsClassicListening(&self) -> bool;
     fn requestBluetoothPermission(&self) -> HostResult<String>;
     fn bluetoothState(&self) -> HostResult<BluetoothStateData>;
     fn requestEnableBluetooth(&self) -> HostResult<String>;
@@ -2270,6 +2582,53 @@ pub trait BluetoothHost: Send + Sync {
         sessionId: &str,
         limit: i64,
     ) -> HostResult<BluetoothBleNotificationData>;
+}
+
+/// Describes one digital output write requested by an Edge Core Service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceDigitalOutputRequest {
+    pub pin: u8,
+    pub level: bool,
+}
+
+/// Describes the current state of one digital output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceDigitalOutputState {
+    pub pin: u8,
+    pub level: bool,
+}
+
+/// Provides board-level digital I/O through the host capability boundary.
+pub trait DeviceIoHost: Send + Sync {
+    /// Writes one digital output and returns its committed state.
+    fn setDigitalOutput(
+        &self,
+        request: DeviceDigitalOutputRequest,
+    ) -> HostResult<DeviceDigitalOutputState>;
+
+    /// Reads the last committed state of one digital output.
+    fn getDigitalOutput(&self, pin: u8) -> HostResult<DeviceDigitalOutputState>;
+}
+
+/// Describes one robot face expression update requested by an Edge Service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobotFaceExpressionRequest {
+    pub expression: String,
+}
+
+/// Describes the current expression shown by a robot face display.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobotFaceState {
+    pub expression: String,
+}
+
+/// Provides robot face expression rendering through the host capability boundary.
+pub trait RobotFaceHost: Send + Sync {
+    /// Writes one robot expression and returns the committed display state.
+    fn setExpression(&self, request: RobotFaceExpressionRequest) -> HostResult<RobotFaceState>;
+
+    /// Reads the current robot expression display state.
+    fn getExpression(&self) -> HostResult<RobotFaceState>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2405,9 +2764,23 @@ pub struct SystemNotificationRequest {
     pub activation: SystemNotificationActivation,
 }
 
+pub trait ToastHost: Send + Sync {
+    /// Presents one transient message inside the active frontend.
+    fn toast(&self, message: &str) -> HostResult<()>;
+}
+
+impl<F> ToastHost for F
+where
+    F: Fn(&str) -> HostResult<()> + Send + Sync,
+{
+    /// Invokes the frontend-owned toast presenter.
+    fn toast(&self, message: &str) -> HostResult<()> {
+        self(message)
+    }
+}
+
 pub trait SystemOperationHost: Send + Sync {
     fn getSystemLanguageCode(&self) -> HostResult<String>;
-    fn toast(&self, message: &str) -> HostResult<()>;
     fn sendNotification(&self, request: &SystemNotificationRequest) -> HostResult<()>;
     fn modifySystemSetting(
         &self,
@@ -2604,15 +2977,30 @@ mod tests {
         assert!(!request.allowMultiple);
     }
 
-    /// Verifies that the unpublished MIME-only option is rejected by the cross-platform contract.
+    /// Verifies that MIME filters reach the cross-platform owner without alteration.
     #[test]
-    fn composeDslFilePickerRejectsMimeTypes() {
-        let error = ComposeDslFilePickerRequest::parse(
+    fn composeDslFilePickerPreservesMimeTypes() {
+        let request = ComposeDslFilePickerRequest::parse(
             r#"{"executionContextKey":"compose-route","options":{"mimeTypes":["image/png"]}}"#,
         )
-        .expect_err("MIME-only filter must be rejected");
+        .expect("MIME filters must parse");
 
-        assert!(error.to_string().contains("mimeTypes"));
+        assert_eq!(request.mimeTypes, vec!["image/png"]);
+    }
+
+    /// Verifies that v1 image and directory modes retain their explicit selection source.
+    #[test]
+    fn composeDslFilePickerAcceptsImageAndDirectory() {
+        for (token, expected) in [
+            ("image", ComposeDslFilePickerMode::Image),
+            ("directory", ComposeDslFilePickerMode::Directory),
+        ] {
+            let payload = format!(
+                r#"{{"executionContextKey":"compose-route","options":{{"picker":"{token}"}}}}"#
+            );
+            let request = ComposeDslFilePickerRequest::parse(&payload).expect("mode must parse");
+            assert_eq!(request.picker, expected);
+        }
     }
 
     /// Verifies that visual-media requests retain their multi-selection flag.
@@ -2627,3 +3015,5 @@ mod tests {
         assert!(request.allowMultiple);
     }
 }
+
+pub mod ServiceDiscovery;

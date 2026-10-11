@@ -9,6 +9,7 @@ import androidx.annotation.Nullable;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.activity.ActivityAware;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
+import io.flutter.plugin.common.MethodChannel;
 
 /**
  * Java platform implementation of the webview_flutter plugin.
@@ -18,6 +19,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
 public class WebViewFlutterPlugin implements FlutterPlugin, ActivityAware {
   private FlutterPluginBinding pluginBinding;
   private ProxyApiRegistrar proxyApiRegistrar;
+  private MethodChannel themeChannel;
 
   /**
    * Add an instance of this to {@link io.flutter.embedding.engine.plugins.PluginRegistry} to
@@ -31,6 +33,20 @@ public class WebViewFlutterPlugin implements FlutterPlugin, ActivityAware {
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
     pluginBinding = binding;
+    themeChannel = new MethodChannel(binding.getBinaryMessenger(), "operit/webview_theme");
+    // Applies appearance through native WebView contexts, independently of page JavaScript.
+    themeChannel.setMethodCallHandler((call, result) -> {
+      if (!call.method.equals("setPreferredColorScheme")) {
+        result.notImplemented();
+        return;
+      }
+      if (!"dark".equals(call.arguments) && !"light".equals(call.arguments)) {
+        result.error("invalid_color_scheme", "Expected dark or light", null);
+        return;
+      }
+      WebViewTheme.setDark("dark".equals(call.arguments));
+      result.success(null);
+    });
 
     proxyApiRegistrar =
         new ProxyApiRegistrar(
@@ -50,7 +66,10 @@ public class WebViewFlutterPlugin implements FlutterPlugin, ActivityAware {
 
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
+    themeChannel.setMethodCallHandler(null);
     if (proxyApiRegistrar != null) {
+      proxyApiRegistrar.userScripts.dispose();
+      proxyApiRegistrar.localResources.dispose();
       proxyApiRegistrar.tearDown();
       proxyApiRegistrar.getInstanceManager().stopFinalizationListener();
       proxyApiRegistrar = null;

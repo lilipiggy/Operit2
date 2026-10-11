@@ -1,0 +1,554 @@
+// ignore_for_file: file_names
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
+import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as generated;
+import '../../../../l10n/generated/app_localizations.dart';
+import '../../../common/components/M3LoadingIndicator.dart';
+import 'SpaceIdentityLabels.dart';
+
+/// Shows the local identity and the administrator controls it unlocks.
+///
+/// The panel owns identity definitions and audit only: devices and their
+/// commands - identity assignment included - live in the device section, so
+/// no device list is duplicated here.
+class NetworkControlPanel extends StatefulWidget {
+  /// Creates the identity and permission panel over the generated runtime clients.
+  const NetworkControlPanel({
+    super.key,
+    required this.clients,
+    required this.onChanged,
+  });
+
+  final GeneratedCoreProxyClients clients;
+  final Future<void> Function() onChanged;
+
+  /// Creates the panel state.
+  @override
+  State<NetworkControlPanel> createState() => _NetworkControlPanelState();
+}
+
+/// Loads the synchronized control state visible to the current identity.
+class _NetworkControlPanelState extends State<NetworkControlPanel> {
+  generated.NetworkControlState? _state;
+  generated.RuntimeDeviceSpaceTopology? _topology;
+  List<generated.NetworkControlAuditRecord>? _audit;
+  String? _error;
+
+  /// Starts the first state load.
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_reload());
+  }
+
+  /// Reloads the panel and the device projection it depends on.
+  Future<void> _reloadSettings() async {
+    await _reload();
+    await widget.onChanged();
+  }
+
+  /// Reads the current synchronized state, projection, and allowed audit.
+  Future<void> _reload() async {
+    try {
+      final results = await Future.wait<Object>(<Future<Object>>[
+        widget.clients.server.runtimeRemoteLinkService.deviceSpaceControl(),
+        widget.clients.server.runtimeRemoteLinkService.deviceSpaceTopology(),
+      ]);
+      final topology = results[1] as generated.RuntimeDeviceSpaceTopology;
+      final audit = _hasCapability(topology, 'network.audit.read')
+          ? await widget.clients.server.runtimeRemoteLinkService
+                .deviceSpaceControlAudit()
+          : null;
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _state = results[0] as generated.NetworkControlState;
+        _topology = topology;
+        _audit = audit;
+        _error = null;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    }
+  }
+
+  /// Builds the panel sections the current identity is allowed to see.
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final state = _state;
+    final topology = _topology;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                l10n.settingsRuntimeNetworkControlDescription,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: MaterialLocalizations.of(
+                context,
+              ).refreshIndicatorSemanticLabel,
+              onPressed: _reloadSettings,
+              icon: const Icon(Icons.refresh_outlined),
+            ),
+          ],
+        ),
+        if (state == null || topology == null)
+          const SizedBox(
+            height: 36,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: M3LoadingIndicator(size: 18),
+            ),
+          )
+        else
+          ..._sections(context, l10n, state, topology),
+        if (_error case final error?) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            error,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.error,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Builds the identity, assignment, and audit sections of the panel.
+  List<Widget> _sections(
+    BuildContext context,
+    AppLocalizations l10n,
+    generated.NetworkControlState state,
+    generated.RuntimeDeviceSpaceTopology topology,
+  ) {
+    final canManageIdentities = _hasCapability(
+      topology,
+      'network.identity.manage',
+    );
+    final canReadAudit = _hasCapability(topology, 'network.audit.read');
+    return <Widget>[
+      _selfIdentity(l10n, topology),
+      if (canManageIdentities)
+        _CollapsibleSection(
+          title: l10n.settingsRuntimeControlIdentityDefinitions,
+          summary: l10n.settingsRuntimeControlIdentityCount(
+            state.roles.length,
+          ),
+          action: FilledButton.tonalIcon(
+            onPressed: () => _defineIdentity(l10n),
+            icon: const Icon(Icons.add_outlined, size: 18),
+            label: Text(l10n.settingsRuntimeControlAddRole),
+          ),
+          children: <Widget>[
+            for (final role in state.roles.values)
+              _identityCard(context, role, l10n),
+          ],
+        ),
+      if (canReadAudit)
+        _CollapsibleSection(
+          title: l10n.settingsRuntimeControlAudit,
+          summary: l10n.settingsRuntimeControlAuditCount(
+            _audit?.length ?? 0,
+          ),
+          children: _auditRecords(context, l10n),
+        ),
+    ];
+  }
+
+  /// Shows what the current identity is and what it may do.
+  ///
+  /// This is the only identity information every member owns; devices show the
+  /// same readout for their own identities in the device section.
+  Widget _selfIdentity(
+    AppLocalizations l10n,
+    generated.RuntimeDeviceSpaceTopology topology,
+  ) {
+    final identity = _localIdentityOf(topology);
+    final capabilities = identity == null
+        ? const <String>[]
+        : spaceCapabilityValues(identity.capabilities)
+              .map((value) => spaceCapabilityLabel(value, l10n))
+              .toList(growable: false);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          '${l10n.settingsRuntimeControlCurrentIdentity}: ${identity == null ? l10n.settingsRuntimeControlNoIdentity : spaceIdentityDisplayName(identity.displayName, l10n)}',
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        if (capabilities.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 2),
+          Text(
+            '${l10n.settingsRuntimeControlCurrentCapabilities}: ${capabilities.join('、')}',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Builds one identity definition card.
+  Widget _identityCard(
+    BuildContext context,
+    generated.NetworkControlRole role,
+    AppLocalizations l10n,
+  ) {
+    final capabilities = spaceCapabilityValues(
+      role.capabilities,
+    ).map((value) => spaceCapabilityLabel(value, l10n)).join('、');
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: const Icon(Icons.badge_outlined),
+        title: Text(spaceIdentityDisplayName(role.displayName, l10n)),
+        subtitle: Text(
+          '${l10n.settingsRuntimeControlCurrentCapabilities}: $capabilities',
+        ),
+      ),
+    );
+  }
+
+  /// Builds the authorization history shown inside the audit section.
+  List<Widget> _auditRecords(BuildContext context, AppLocalizations l10n) {
+    final records = _audit;
+    if (records == null) {
+      return const <Widget>[
+        SizedBox(
+          height: 24,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: M3LoadingIndicator(size: 18),
+          ),
+        ),
+      ];
+    }
+    if (records.isEmpty) {
+      return <Widget>[
+        Text(
+          l10n.settingsRuntimeControlNoAudit,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ];
+    }
+    return <Widget>[
+      for (final record in records) _auditCard(context, l10n, record),
+    ];
+  }
+
+  /// Builds one authorization history entry.
+  Widget _auditCard(
+    BuildContext context,
+    AppLocalizations l10n,
+    generated.NetworkControlAuditRecord record,
+  ) {
+    final accepted = record.accepted;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: Icon(
+          accepted ? Icons.verified_outlined : Icons.error_outline,
+          color: accepted
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.error,
+        ),
+        title: Text(record.summary),
+        subtitle: Text(
+          '${accepted ? l10n.settingsRuntimeControlGranted : l10n.settingsRuntimeControlRevoked} · ${record.reason}',
+        ),
+      ),
+    );
+  }
+
+  /// Opens the administrator identity definition editor.
+  Future<void> _defineIdentity(AppLocalizations l10n) async {
+    final topology = _topology;
+    if (topology == null) {
+      return;
+    }
+    final result = await _IdentityEditor.show(
+      context,
+      title: l10n.settingsRuntimeControlAddRole,
+      choices: spaceCapabilityChoices(l10n)
+          .where((choice) => _hasCapability(topology, choice.value))
+          .toList(growable: false),
+    );
+    if (result == null) {
+      return;
+    }
+    await _runCommand(
+      () => widget.clients.server.runtimeRemoteLinkService
+          .defineDeviceSpaceRole(
+            role: generated.NetworkControlRole(
+              roleId: _generatedControlId('identity'),
+              displayName: result.name,
+              capabilities: result.capabilities,
+            ),
+          ),
+    );
+  }
+
+  /// Runs one administrator command and refreshes the synchronized state.
+  Future<void> _runCommand(
+    Future<void> Function() command, {
+    String? feedback,
+  }) async {
+    try {
+      await command();
+      await _reload();
+      await widget.onChanged();
+      if (mounted && feedback != null) {
+        _showFeedback(feedback);
+      }
+    } catch (error) {
+      if (mounted) {
+        _showFeedback(error.toString(), failed: true);
+      }
+    }
+  }
+
+  /// Surfaces one outcome with the same feedback channel for every command.
+  void _showFeedback(String message, {bool failed = false}) {
+    final scheme = Theme.of(context).colorScheme;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: failed ? TextStyle(color: scheme.onErrorContainer) : null,
+        ),
+        backgroundColor: failed ? scheme.errorContainer : null,
+      ),
+    );
+  }
+}
+
+/// Keeps one long administrator list collapsed behind a counted header.
+///
+/// The identity definitions and the audit history grow without bound, so the
+/// page only pays for their height once an administrator opens them.
+class _CollapsibleSection extends StatelessWidget {
+  const _CollapsibleSection({
+    required this.title,
+    required this.summary,
+    required this.children,
+    this.action,
+  });
+
+  final String title;
+  final String summary;
+  final List<Widget> children;
+  final Widget? action;
+
+  /// Builds the counted header with the list it opens.
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Theme(
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(top: 8),
+        shape: const Border(),
+        collapsedShape: const Border(),
+        title: Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                title,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            ?action,
+          ],
+        ),
+        subtitle: Text(
+          summary,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        children: children,
+      ),
+    );
+  }
+}
+
+/// Represents the submitted identity definition form.
+class _IdentityDefinition {
+  /// Creates one identity definition result.
+  const _IdentityDefinition({required this.name, required this.capabilities});
+
+  final String name;
+  final List<String> capabilities;
+}
+
+/// Edits an identity name and its human-readable capabilities.
+class _IdentityEditor extends StatefulWidget {
+  /// Creates the identity editor.
+  const _IdentityEditor({required this.title, required this.choices});
+
+  final String title;
+  final List<SpaceCapabilityChoice> choices;
+
+  /// Opens the editor and returns a validated definition.
+  static Future<_IdentityDefinition?> show(
+    BuildContext context, {
+    required String title,
+    required List<SpaceCapabilityChoice> choices,
+  }) {
+    return showDialog<_IdentityDefinition>(
+      context: context,
+      builder: (_) => _IdentityEditor(title: title, choices: choices),
+    );
+  }
+
+  /// Creates the editor state.
+  @override
+  State<_IdentityEditor> createState() => _IdentityEditorState();
+}
+
+/// Owns the identity editor controls.
+class _IdentityEditorState extends State<_IdentityEditor> {
+  late final TextEditingController _name;
+  late final Set<String> _selected;
+
+  /// Allocates the editor controls.
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController();
+    _selected = <String>{};
+  }
+
+  /// Releases the editor controls.
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  /// Submits the identity definition when both name and capabilities exist.
+  void _submit() {
+    final name = _name.text.trim();
+    if (name.isEmpty || _selected.isEmpty) {
+      return;
+    }
+    Navigator.of(context).pop(
+      _IdentityDefinition(
+        name: name,
+        capabilities: _selected.toList(growable: false),
+      ),
+    );
+  }
+
+  /// Builds the identity editor dialog.
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextField(
+                controller: _name,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: AppLocalizations.of(
+                    context,
+                  )!.settingsRuntimeControlIdentityName,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (final choice in widget.choices)
+                CheckboxListTile(
+                  dense: true,
+                  value: _selected.contains(choice.value),
+                  title: Text(choice.label),
+                  onChanged: (value) => setState(() {
+                    if (value == true) {
+                      if (choice.value == '*') {
+                        _selected
+                          ..clear()
+                          ..add(choice.value);
+                      } else {
+                        _selected
+                          ..remove('*')
+                          ..add(choice.value);
+                      }
+                    } else {
+                      _selected.remove(choice.value);
+                    }
+                  }),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: Text(MaterialLocalizations.of(context).okButtonLabel),
+        ),
+      ],
+    );
+  }
+}
+
+/// Returns the identity of the current device, when the Space assigned one.
+generated.RuntimeDeviceSpaceIdentity? _localIdentityOf(
+  generated.RuntimeDeviceSpaceTopology topology,
+) {
+  for (final device in topology.devices) {
+    if (device.deviceId == topology.currentDeviceId) {
+      return device.currentIdentity;
+    }
+  }
+  return null;
+}
+
+/// Returns whether the current device identity owns one capability.
+bool _hasCapability(
+  generated.RuntimeDeviceSpaceTopology topology,
+  String capability,
+) {
+  final identity = _localIdentityOf(topology);
+  return identity != null &&
+      (identity.capabilities.contains('*') ||
+          identity.capabilities.contains(capability));
+}
+
+/// Generates an internal assignment identifier for the replicated command.
+String _generatedControlId(String prefix) {
+  return '$prefix-${DateTime.now().microsecondsSinceEpoch}';
+}

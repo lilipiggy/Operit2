@@ -1,10 +1,11 @@
-use js_sys::{Array, Reflect};
+use js_sys::{Array, Reflect, Uint8Array};
 use operit_host_api::{
     AppListData, AppOperationData, AppUsageTimeEntry, AppUsageTimeResultData, DeviceInfoData,
-    HostResult, LocationData, NotificationData, NotificationEntry, OCRLanguage, OCRQuality,
-    SystemNotificationRequest, SystemOperationHost, SystemSettingData,
+    FileSystemHost, HostError, HostResult, LocationData, NotificationData, NotificationEntry, OCRLanguage, OCRQuality,
+    SystemNotificationRequest, SystemOperationHost, SystemSettingData, ToastHost,
 };
 use wasm_bindgen::prelude::*;
+use crate::tools::fs::WebFileSystemHost;
 
 use crate::common::{
     app_operation_data, call_system, js_error, js_string_array, js_string_map, read_bool_property,
@@ -24,14 +25,17 @@ impl WebSystemOperationHost {
     }
 }
 
-impl SystemOperationHost for WebSystemOperationHost {
-    fn getSystemLanguageCode(&self) -> HostResult<String> {
-        read_string_property(&call_system("getSystemLanguageCode", &[])?, "languageCode")
-    }
-
+impl ToastHost for WebSystemOperationHost {
+    /// Presents one toast through the browser application host.
     fn toast(&self, message: &str) -> HostResult<()> {
         call_system("toast", &[JsValue::from_str(message)])?;
         Ok(())
+    }
+}
+
+impl SystemOperationHost for WebSystemOperationHost {
+    fn getSystemLanguageCode(&self) -> HostResult<String> {
+        read_string_property(&call_system("getSystemLanguageCode", &[])?, "languageCode")
     }
 
     fn sendNotification(&self, request: &SystemNotificationRequest) -> HostResult<()> {
@@ -228,21 +232,36 @@ impl SystemOperationHost for WebSystemOperationHost {
         })
     }
 
+    /// Persists browser display bytes in the runtime worker's file-system host.
     fn captureScreenshot(&self) -> HostResult<String> {
-        read_string_property(&call_system("captureScreenshot", &[])?, "path")
+        let response = call_system("captureScreenshot", &[])?;
+        let path = read_string_property(&response, "path")?;
+        let value = Reflect::get(&response, &JsValue::from_str("bytes")).map_err(js_error)?;
+        let bytes = Uint8Array::new(&value).to_vec();
+        if bytes.is_empty() {
+            return Err(HostError::new("Browser screen capture returned no image bytes"));
+        }
+        let (directory, _) = path.rsplit_once('/')
+            .ok_or_else(|| HostError::new("Browser screen capture path has no parent directory"))?;
+        let files = WebFileSystemHost::new();
+        files.makeDirectory(directory, true)?;
+        files.writeFileBytes(&path, &bytes)?;
+        Ok(path)
     }
 
+    /// Sends runtime-owned image bytes to the browser UI OCR host.
     fn recognizeText(
         &self,
         imagePath: &str,
         language: OCRLanguage,
         quality: OCRQuality,
     ) -> HostResult<String> {
+        let bytes = WebFileSystemHost::new().readFileBytes(imagePath)?;
         read_string_property(
             &call_system(
                 "recognizeText",
                 &[
-                    JsValue::from_str(imagePath),
+                    Uint8Array::from(bytes.as_slice()).into(),
                     JsValue::from_str(language.asHostValue()),
                     JsValue::from_str(quality.asHostValue()),
                 ],

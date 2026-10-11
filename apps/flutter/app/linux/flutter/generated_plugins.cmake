@@ -6,6 +6,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   desktop_drop
   desktop_multi_window
+  desktop_widgets_linux
   dynamic_color
   file_selector_linux
   printing

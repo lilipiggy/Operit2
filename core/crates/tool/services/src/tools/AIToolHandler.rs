@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use operit_host_api::HostEnvironmentDescriptor;
 use operit_host_api::HostManager::HostManager;
 use operit_plugin_sdk::javascript::{
     JsExecutionHost, JsToolCallRequest, JsToolCallResult, JsToolCallResultData,
     JsToolNameResolutionRequest, JsToolPkgIpcCompletion, JsToolPkgIpcRequest,
-    JsToolPkgResourceRequest, JsToolPkgWasmRequest, JsToolPkgWasmResult,
+    JsToolPkgResourceRequest, JsToolPkgWasmRequest, JsToolPkgWasmResult, ToolPkgConfigScope,
 };
 use operit_plugin_sdk::js_sdk::tool_types::BuiltinToolName;
 use operit_plugin_sdk::package::ToolPackage;
@@ -22,22 +22,28 @@ use operit_tools::tools::ToolRegistration::registerAllTools;
 use operit_tools::tools::ToolResultDataClasses::{stringResultData, ToolResultData};
 use operit_tools::ConversationMarkupManager::ToolResult;
 use operit_tools::ToolExecutionManager::{
-    AITool, ToolAccessSpec, ToolBoundary, ToolEffect, ToolExecutionManager, ToolExecutor,
-    ToolParameter, ToolValidationResult,
+    AITool, AsyncToolExecutor, RegisteredToolExecutor, ToolAccessSpec, ToolBoundary, ToolEffect,
+    ToolExecutionManager, ToolExecutor, ToolInvocationFuture, ToolParameter, ToolValidationResult,
 };
 use operit_util::ChainLogger::{self, TOOL_CHAIN};
 use operit_util::LocaleUtils::LocaleUtils;
 use operit_util::OperitPaths;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::runtime_support::{ToolRuntimeDependencies, ToolRuntimeSupport};
-
-const PACKAGE_PROXY_TOOL_NAME: &str = "package_proxy";
 
 #[derive(Clone, Copy)]
 enum ToolExecutionAccess {
     AiPermission,
     Direct,
+}
+
+/// Classifies file-bound invocation failures as policy restrictions or invalid requests.
+#[derive(Debug, PartialEq, Eq)]
+enum WorkspaceBoundaryError {
+    RequiresApproval(String),
+    InvalidRequest(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,11 +55,63 @@ pub enum ToolRegistrationVisibility {
 #[derive(Clone)]
 pub struct AIToolHandler {
     inner: Arc<Mutex<AIToolHandlerState>>,
-    executorAvailability: Arc<Condvar>,
+    executorAvailability: Arc<tokio::sync::Notify>,
+}
+
+/// Returns a taken executor on normal completion, cancellation or panic unwinding.
+struct ToolExecutorLease {
+    name: String,
+    executor: Option<RegisteredToolExecutor>,
+    state: Arc<Mutex<AIToolHandlerState>>,
+    available: Arc<tokio::sync::Notify>,
+}
+
+impl std::ops::Deref for ToolExecutorLease {
+    type Target = RegisteredToolExecutor;
+    /// Borrows the executor while its registry lease remains owned.
+    fn deref(&self) -> &Self::Target {
+        self.executor
+            .as_ref()
+            .expect("tool executor lease must remain owned")
+    }
+}
+
+impl std::ops::DerefMut for ToolExecutorLease {
+    /// Mutably borrows the executor while its registry lease remains owned.
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.executor
+            .as_mut()
+            .expect("tool executor lease must remain owned")
+    }
+}
+
+impl Drop for ToolExecutorLease {
+    /// Restores the exact executor and wakes queued invocations after releasing the registry lock.
+    fn drop(&mut self) {
+        let executor = self
+            .executor
+            .take()
+            .expect("tool executor lease must remain owned");
+        {
+            let mut state = self.state.lock().expect("AIToolHandler mutex poisoned");
+            assert!(
+                state.executingTools.remove(&self.name),
+                "tool must remain marked executing"
+            );
+            assert!(
+                state
+                    .availableTools
+                    .insert(self.name.clone(), executor)
+                    .is_none(),
+                "tool executor must not be replaced during execution"
+            );
+        }
+        self.available.notify_waiters();
+    }
 }
 
 pub struct AIToolHandlerState {
-    availableTools: BTreeMap<String, Box<dyn ToolExecutor>>,
+    availableTools: BTreeMap<String, RegisteredToolExecutor>,
     executingTools: BTreeSet<String>,
     toolVisibility: BTreeMap<String, ToolRegistrationVisibility>,
     unavailableBuiltinTools: BTreeMap<BuiltinToolName, String>,
@@ -66,6 +124,34 @@ pub struct AIToolHandlerState {
 }
 
 impl AIToolHandler {
+    /// Creates one scope-owned directory through the filesystem Host without package manager locks.
+    fn createPackageConfigDirectory(
+        &self,
+        owner_id: &str,
+        plugin_id: &str,
+        scope: &str,
+    ) -> Result<String, String> {
+        let root =
+            operit_store::ExtensionStore::ExtensionStore::configPathForScope(owner_id, scope)?;
+        let path = if plugin_id == owner_id {
+            root
+        } else {
+            let name = operit_util::OperitPaths::pluginConfigDirName(plugin_id)?;
+            format!("{root}/namespaces/{name}")
+        };
+        let configDir = RuntimeStorePaths::default().runtime_storage_path(&path);
+        self.getContext()
+            .fileSystemHost
+            .as_ref()
+            .ok_or("FileSystemHost is required for plugin configuration")?
+            .makeDirectory(&configDir.to_string_lossy(), true)
+            .map_err(|error| error.to_string())?;
+        let relative = path
+            .strip_prefix("runtime/")
+            .ok_or("Configuration is outside runtime storage")?;
+        PathMapper::joinVfsPath("/app/data", relative)
+    }
+
     fn truncateLogValue(value: &str, maxChars: usize) -> String {
         let mut truncated = String::new();
         for character in value.chars().take(maxChars) {
@@ -111,7 +197,7 @@ impl AIToolHandler {
                 toolPermissionSystem: ToolPermissionSystem::getInstance(),
                 packageManager: None,
             })),
-            executorAvailability: Arc::new(Condvar::new()),
+            executorAvailability: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -162,7 +248,7 @@ impl AIToolHandler {
         guard.unregisterMCPServerPackage(serverName)
     }
 
-    /// Returns the permission system used before write or package tool execution.
+    /// Returns the permission system used before operations that require an approval.
     #[allow(non_snake_case)]
     pub fn getToolPermissionSystem(&self) -> ToolPermissionSystem {
         self.inner
@@ -228,7 +314,7 @@ impl AIToolHandler {
 
     /// Returns the first hook decision for a tool call before execution begins.
     #[allow(non_snake_case)]
-    pub fn checkToolInterception(&self, tool: &AITool) -> AIToolHookDecision {
+    pub async fn checkToolInterception(&self, tool: &AITool) -> AIToolHookDecision {
         let hooks = self
             .inner
             .lock()
@@ -236,7 +322,7 @@ impl AIToolHandler {
             .hooks
             .clone();
         for hook in hooks {
-            match hook.onToolCallIntercept(tool) {
+            match hook.onToolCallInterceptAsync(tool).await {
                 AIToolHookDecision::Allow => {}
                 decision @ AIToolHookDecision::Block(_) => return decision,
             }
@@ -322,6 +408,19 @@ impl AIToolHandler {
             .clone()
     }
 
+    /// Installs the live Core command callback after the local application has been assembled.
+    #[allow(non_snake_case)]
+    pub fn setCoreCommandExecutor(
+        &self,
+        executor: operit_host_api::HostManager::CoreCommandExecutor,
+    ) {
+        self.inner
+            .lock()
+            .expect("AIToolHandler mutex poisoned")
+            .context
+            .coreCommandExecutor = Some(executor);
+    }
+
     /// Returns the dependency set associated with this handler.
     #[allow(non_snake_case)]
     pub fn runtimeDependencies(&self) -> ToolRuntimeDependencies {
@@ -397,10 +496,10 @@ impl AIToolHandler {
 
     /// Registers one statically declared built-in tool with explicit visibility.
     #[allow(non_snake_case)]
-    pub fn registerBuiltinTool(
+    pub fn registerBuiltinTool<E: Into<RegisteredToolExecutor>>(
         &mut self,
         name: BuiltinToolName,
-        executor: Box<dyn ToolExecutor>,
+        executor: E,
         visibility: ToolRegistrationVisibility,
     ) {
         let toolName = name.as_str().to_string();
@@ -415,7 +514,10 @@ impl AIToolHandler {
         );
         guard.availableTools.insert(
             toolName.clone(),
-            Box::new(ContractCheckedBuiltinToolExecutor { name, executor }),
+            RegisteredToolExecutor::Asynchronous(Box::new(ContractCheckedBuiltinToolExecutor {
+                name,
+                executor: executor.into(),
+            })),
         );
         guard.toolVisibility.insert(toolName, visibility);
     }
@@ -452,8 +554,25 @@ impl AIToolHandler {
             "Built-in tools must use registerBuiltinTool: {name}"
         );
         let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
-        guard.availableTools.insert(name.clone(), executor);
+        guard
+            .availableTools
+            .insert(name.clone(), RegisteredToolExecutor::Synchronous(executor));
         guard.toolVisibility.insert(name, visibility);
+    }
+
+    /// Registers a public tool with an explicitly asynchronous execution contract.
+    pub fn registerAsyncTool(&mut self, name: String, executor: Box<dyn AsyncToolExecutor>) {
+        assert!(
+            BuiltinToolName::from_name(&name).is_none(),
+            "Built-in tools must use their typed registration"
+        );
+        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+        guard
+            .availableTools
+            .insert(name.clone(), RegisteredToolExecutor::Asynchronous(executor));
+        guard
+            .toolVisibility
+            .insert(name, ToolRegistrationVisibility::PUBLIC);
     }
 
     /// Returns the configured visibility for one tool.
@@ -509,43 +628,51 @@ impl AIToolHandler {
     }
 
     /// Acquires one named executor, waiting for an in-flight invocation of that same tool to finish.
-    fn takeToolExecutorForExecution(&self, toolName: &str) -> Option<Box<dyn ToolExecutor>> {
-        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+    async fn takeToolExecutorForExecution(&self, toolName: &str) -> Option<ToolExecutorLease> {
         loop {
-            if let Some(executor) = guard.availableTools.remove(toolName) {
-                assert!(
-                    guard.executingTools.insert(toolName.to_string()),
-                    "Tool executor was already marked executing: {toolName}"
-                );
-                return Some(executor);
+            let notified = self.executorAvailability.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
+                if let Some(executor) = guard.availableTools.remove(toolName) {
+                    assert!(
+                        guard.executingTools.insert(toolName.to_owned()),
+                        "Tool executor was already marked executing: {toolName}"
+                    );
+                    return Some(ToolExecutorLease {
+                        name: toolName.to_owned(),
+                        executor: Some(executor),
+                        state: self.inner.clone(),
+                        available: self.executorAvailability.clone(),
+                    });
+                }
+                if !guard.executingTools.contains(toolName) {
+                    return None;
+                }
             }
-            if !guard.executingTools.contains(toolName) {
-                return None;
-            }
-            guard = self
-                .executorAvailability
-                .wait(guard)
-                .expect("AIToolHandler mutex poisoned while waiting for tool executor");
+            notified.await;
         }
     }
 
     /// Restores one completed executor and wakes calls queued for the same tool name.
-    fn restoreToolExecutorAfterExecution(&self, toolName: String, executor: Box<dyn ToolExecutor>) {
-        let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
-        assert!(
-            guard.executingTools.remove(&toolName),
-            "Tool executor was not marked executing: {toolName}"
+    fn restoreToolExecutorAfterExecution(&self, toolName: String, executor: ToolExecutorLease) {
+        assert_eq!(
+            toolName, executor.name,
+            "the restored tool must own this lease"
         );
-        assert!(
-            guard.availableTools.insert(toolName, executor).is_none(),
-            "Tool executor was unexpectedly registered while executing"
-        );
-        self.executorAvailability.notify_all();
+        drop(executor);
     }
 
     /// Ensures default or package tools are registered, then reports whether a tool exists.
     #[allow(non_snake_case)]
-    pub fn getToolExecutorOrActivate(&mut self, toolName: &str) -> bool {
+    pub async fn getToolExecutorOrActivate(&mut self, toolName: &str) -> bool {
+        if let Some((packageName, _)) = toolName.split_once(':') {
+            let manager = self.getOrCreatePackageManager();
+            if RuntimePackageManager::prepareMcpPackage(&manager, packageName.trim()).await.is_err() {
+                return false;
+            }
+        }
         if self.hasToolExecutor(toolName) {
             if let Some((packageName, _)) = toolName.split_once(':') {
                 let packageName = packageName.trim();
@@ -607,7 +734,7 @@ impl AIToolHandler {
     #[allow(non_snake_case)]
     fn isMcpServiceActive(&self, packageName: &str) -> bool {
         let mcpManager = MCPManager::getInstance(self.getContext());
-        let Some(client) = mcpManager.getOrCreateClient(packageName) else {
+        let Some(client) = mcpManager.getClientForMetadata(packageName) else {
             return false;
         };
         client
@@ -638,14 +765,14 @@ impl AIToolHandler {
         for packageTool in executableTools {
             let toolName = format!("{}:{}", toolPackage.name, packageTool.name);
             if isMcpPackage {
-                self.registerTool(
+                self.registerAsyncTool(
                     toolName,
                     Box::new(MCPToolExecutor::new(MCPManager::getInstance(
                         context.clone(),
                     ))),
                 );
             } else {
-                self.registerTool(
+                self.registerAsyncTool(
                     toolName,
                     Box::new(PackageToolExecutor::new(
                         toolPackage.clone(),
@@ -664,6 +791,8 @@ impl AIToolHandler {
         accessSpec: ToolAccessSpec,
     ) -> Result<ToolAccessSpec, ToolResult> {
         let permissionSystem = self.getToolPermissionSystem();
+        let chatId = ToolExecutionManager::currentToolRuntimeContext()
+            .and_then(|context| context.callerChatId);
         let mode = permissionSystem
             .getAiPermissionMode()
             .map_err(|error| ToolResult {
@@ -672,44 +801,58 @@ impl AIToolHandler {
                 result: stringResultData(""),
                 error: Some(error.to_string()),
             })?;
-        if !mode.allowsEffect(accessSpec.effect) {
-            return Err(ToolResult {
-                toolName: tool.name.clone(),
-                success: false,
-                result: stringResultData(""),
-                error: Some(format!(
-                    "AI permission mode {} does not allow {:?} tool execution.",
-                    mode.name(),
-                    accessSpec.effect
-                )),
-            });
-        }
-
-        if let Err(error) = Self::checkWorkspaceBoundary(&mode, tool, &accessSpec) {
-            return Err(ToolResult {
-                toolName: tool.name.clone(),
-                success: false,
-                result: stringResultData(""),
-                error: Some(error),
-            });
-        }
-
-        let usesPackagePermission =
-            tool.name == PACKAGE_PROXY_TOOL_NAME || tool.name.split_once(':').is_some();
-        let packageApprovalTool = if tool.name == PACKAGE_PROXY_TOOL_NAME {
-            let resolvedTarget = ToolExecutionManager::resolveProxyTargetTool(tool);
-            (resolvedTarget.name != tool.name).then_some(resolvedTarget)
+        let context = self.getContext();
+        let workspaceBoundary = Self::checkWorkspaceBoundary(&mode, tool, &accessSpec, context.runtimeStorageHost.as_ref());
+        let policyOverrideReason = match (mode.allowsEffect(accessSpec.effect), workspaceBoundary) {
+            (_, Err(WorkspaceBoundaryError::InvalidRequest(error))) => {
+                return Err(ToolResult {
+                    toolName: tool.name.clone(),
+                    success: false,
+                    result: stringResultData(""),
+                    error: Some(error),
+                });
+            }
+            (false, _) => Some(format!(
+                "AI permission mode {} requires approval for {:?} tool execution.",
+                mode.name(),
+                accessSpec.effect
+            )),
+            (true, Err(WorkspaceBoundaryError::RequiresApproval(reason))) => Some(reason),
+            (true, Ok(())) => None,
+        };
+        let policyOverrideApproved = if let Some(reason) = policyOverrideReason.as_deref() {
+            let approved = permissionSystem
+                .checkSandboxEscapeApprovalAsync(tool, chatId.clone())
+                .await
+                .map_err(|error| ToolResult {
+                    toolName: tool.name.clone(),
+                    success: false,
+                    result: stringResultData(""),
+                    error: Some(error.to_string()),
+                })?;
+            if !approved {
+                let error = "User cancelled the tool execution.".to_string();
+                self.notifyToolPermissionChecked(tool, false, Some(&error));
+                return Err(ToolResult {
+                    toolName: tool.name.clone(),
+                    success: false,
+                    result: stringResultData(""),
+                    error: Some(error),
+                });
+            }
+            self.notifyToolPermissionChecked(tool, true, Some(reason));
+            true
         } else {
-            tool.name.split_once(':').map(|_| tool.clone())
+            false
         };
 
         if mode == AiPermissionMode::WorkspaceWrite
             && accessSpec.effect == ToolEffect::WRITE
             && matches!(accessSpec.boundary, ToolBoundary::None)
-            && !usesPackagePermission
+            && !policyOverrideApproved
         {
             let approved = permissionSystem
-                .checkSandboxEscapeApprovalAsync(tool)
+                .checkSandboxEscapeApprovalAsync(tool, chatId.clone())
                 .await
                 .map_err(|error| ToolResult {
                     toolName: tool.name.clone(),
@@ -734,95 +877,107 @@ impl AIToolHandler {
             );
         }
 
-        if let Some(packageApprovalTool) = packageApprovalTool {
-            let approved = permissionSystem
-                .checkPackageToolApprovalAsync(&packageApprovalTool)
-                .await
-                .map_err(|error| ToolResult {
-                    toolName: packageApprovalTool.name.clone(),
-                    success: false,
-                    result: stringResultData(""),
-                    error: Some(error.to_string()),
-                })?;
-            if !approved {
-                let error = "User cancelled the tool execution.".to_string();
-                self.notifyToolPermissionChecked(&packageApprovalTool, false, Some(&error));
-                return Err(ToolResult {
-                    toolName: packageApprovalTool.name.clone(),
-                    success: false,
-                    result: stringResultData(""),
-                    error: Some(error),
-                });
-            }
-            self.notifyToolPermissionChecked(
-                &packageApprovalTool,
-                true,
-                Some("PackageTool approved."),
-            );
-        }
-
         Ok(accessSpec)
     }
 
-    /// Checks workspace membership for file-bound tools in workspace-scoped modes.
+    /// Restricts file writes to the current workspace in workspace-scoped modes.
     fn checkWorkspaceBoundary(
         mode: &AiPermissionMode,
         tool: &AITool,
         accessSpec: &ToolAccessSpec,
-    ) -> Result<(), String> {
+        storage: Option<&Arc<dyn operit_host_api::RuntimeStorageHost>>,
+    ) -> Result<(), WorkspaceBoundaryError> {
         if *mode == AiPermissionMode::Full {
             return Ok(());
         }
         match &accessSpec.boundary {
             ToolBoundary::None => Ok(()),
-            ToolBoundary::FilePath { effect } => Self::checkWorkspacePath(tool, "path", *effect),
+            ToolBoundary::FilePath { effect } => {
+                Self::checkWorkspaceWritePath(tool, "path", *effect, storage)
+            }
             ToolBoundary::FilePair {
                 source,
                 destination,
             } => {
-                Self::checkWorkspacePath(tool, "source", *source)?;
-                Self::checkWorkspacePath(tool, "destination", *destination)
+                Self::checkWorkspaceWritePath(tool, "source", *source, storage)?;
+                Self::checkWorkspaceWritePath(tool, "destination", *destination, storage)
             }
         }
     }
 
-    /// Checks that one file parameter stays inside the current workspace.
-    fn checkWorkspacePath(
+    /// Checks that one file write parameter stays inside the current workspace.
+    fn checkWorkspaceWritePath(
         tool: &AITool,
         parameterName: &str,
         effect: ToolEffect,
-    ) -> Result<(), String> {
+        storage: Option<&Arc<dyn operit_host_api::RuntimeStorageHost>>,
+    ) -> Result<(), WorkspaceBoundaryError> {
+        if effect == ToolEffect::READ {
+            return Ok(());
+        }
         let path = tool
             .parameters
             .iter()
             .find(|parameter| parameter.name == parameterName)
             .map(|parameter| parameter.value.trim())
-            .ok_or_else(|| format!("{parameterName} parameter is required"))?;
+            .ok_or_else(|| {
+                WorkspaceBoundaryError::InvalidRequest(format!(
+                    "{parameterName} parameter is required"
+                ))
+            })?;
         if path.is_empty() {
-            return Err(format!("{parameterName} parameter is required"));
+            return Err(WorkspaceBoundaryError::InvalidRequest(format!(
+                "{parameterName} parameter is required"
+            )));
         }
 
-        let runtimeContext = ToolExecutionManager::currentToolRuntimeContext()
-            .ok_or_else(|| "File tool execution requires tool runtime context".to_string())?;
-        let workspacePath = runtimeContext
-            .workspacePath
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "File tool execution requires a current workspace".to_string())?;
-
-        let paths = RuntimeStorePaths::default();
-        let mapper = PathMapper::new(paths.runtime_dir().to_path_buf(), paths.workspace_dir());
-        let resolvedWorkspace = mapper.resolve(workspacePath)?;
-        let resolvedPath = mapper.resolve(path)?;
-        let relative = PathMapper::relativePath(&resolvedWorkspace.vfsPath, &resolvedPath.vfsPath)?;
-        if relative.is_none() {
-            return Err(format!(
-                "{:?} file access is limited to current workspace: {}",
-                effect, resolvedWorkspace.vfsPath
+        let runtimeContext =
+            ToolExecutionManager::currentToolRuntimeContext().ok_or_else(|| {
+                WorkspaceBoundaryError::RequiresApproval(
+                    "File tool execution requires tool runtime context".to_string(),
+                )
+            })?;
+        let workspaceFolders = runtimeContext
+            .workspaceFolders
+            .iter()
+            .map(|folder| folder.trim().to_string())
+            .filter(|folder| !folder.is_empty())
+            .collect::<Vec<_>>();
+        if workspaceFolders.is_empty() {
+            return Err(WorkspaceBoundaryError::RequiresApproval(
+                "File tool execution requires a current workspace".to_string(),
             ));
         }
-        Ok(())
+
+        let storage = storage.ok_or_else(|| WorkspaceBoundaryError::RequiresApproval(
+            "File tool execution requires its runtime storage Host".to_string()
+        ))?;
+        let runtimeRoot = storage.runtimeRootDir().ok_or_else(|| WorkspaceBoundaryError::InvalidRequest(
+            "Runtime storage Host does not expose its runtime root".to_string()
+        ))?;
+        let workspaceRoot = storage.workspaceRootDir().ok_or_else(|| WorkspaceBoundaryError::InvalidRequest(
+            "Runtime storage Host does not expose its workspace root".to_string()
+        ))?;
+        let mapper = PathMapper::new(runtimeRoot, workspaceRoot, storage.clone());
+        let resolvedPath = mapper
+            .resolve(path)
+            .map_err(WorkspaceBoundaryError::InvalidRequest)?;
+        for folder in &workspaceFolders {
+            let resolvedWorkspace = mapper
+                .resolve(folder)
+                .map_err(WorkspaceBoundaryError::InvalidRequest)?;
+            let relative =
+                PathMapper::relativePath(&resolvedWorkspace.vfsPath, &resolvedPath.vfsPath)
+                    .map_err(WorkspaceBoundaryError::InvalidRequest)?;
+            if relative.is_some() {
+                return Ok(());
+            }
+        }
+        return Err(WorkspaceBoundaryError::RequiresApproval(format!(
+            "{:?} file access is limited to current workspace folders: {}",
+            effect,
+            workspaceFolders.join(", ")
+        )));
     }
 
     /// Executes an AI-originated tool through permission checks and a resolved executor.
@@ -862,7 +1017,7 @@ impl AIToolHandler {
                 ("parameters", parameterSummary.clone()),
             ],
         );
-        if !self.getToolExecutorOrActivate(&tool.name) {
+        if !self.getToolExecutorOrActivate(&tool.name).await {
             ChainLogger::warn(
                 TOOL_CHAIN,
                 "tool.stream.not_found",
@@ -871,7 +1026,7 @@ impl AIToolHandler {
             return None;
         }
 
-        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name) else {
+        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name).await else {
             ChainLogger::warn(
                 TOOL_CHAIN,
                 "tool.stream.not_registered",
@@ -904,7 +1059,7 @@ impl AIToolHandler {
                                             ("effect", format!("{:?}", accessSpec.effect)),
                                         ],
                                     );
-                                    executor.invokeAndStream(tool)
+                                    executor.invokeAndStreamAsync(tool).await
                                 }
                                 Err(errorResult) => vec![errorResult],
                             }
@@ -922,7 +1077,7 @@ impl AIToolHandler {
                             ("access", "direct".to_string()),
                         ],
                     );
-                    executor.invokeAndStream(tool)
+                    executor.invokeAndStreamAsync(tool).await
                 }
             }
         } else {
@@ -1021,7 +1176,7 @@ impl AIToolHandler {
 
     /// Resolves and directly executes a non-AI tool request through the registered tool chain.
     #[allow(non_snake_case)]
-    pub fn executeTool(&mut self, tool: AITool) -> ToolResult {
+    pub async fn executeTool(&mut self, tool: AITool) -> ToolResult {
         ChainLogger::info(
             TOOL_CHAIN,
             "tool.execute.request",
@@ -1031,15 +1186,15 @@ impl AIToolHandler {
             ],
         );
         self.notifyToolCallRequested(&tool);
-        let interception = self.checkToolInterception(&tool);
+        let interception = self.checkToolInterception(&tool).await;
         if let AIToolHookDecision::Block(_) = interception {
             let result = Self::toolInterceptionResult(&tool, interception);
             self.notifyToolExecutionResult(&tool, &result);
             self.notifyToolExecutionFinished(&tool);
             return result;
         }
-        self.getToolExecutorOrActivate(&tool.name);
-        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name) else {
+        self.getToolExecutorOrActivate(&tool.name).await;
+        let Some(mut executor) = self.takeToolExecutorForExecution(&tool.name).await else {
             let notFoundResult = ToolResult {
                 toolName: tool.name.clone(),
                 success: false,
@@ -1082,7 +1237,7 @@ impl AIToolHandler {
             "tool.execute.start",
             &[("tool", tool.name.clone())],
         );
-        let collected = executor.invokeAndStream(&tool);
+        let collected = executor.invokeAndStreamAsync(&tool).await;
         if collected.is_empty() {
             ChainLogger::error(
                 TOOL_CHAIN,
@@ -1142,7 +1297,7 @@ impl AIToolHandler {
 
     #[allow(non_snake_case)]
     /// Removes all registered executors and returns their ownership to the caller.
-    pub fn takeExecutors(&mut self) -> BTreeMap<String, Box<dyn ToolExecutor>> {
+    pub fn takeExecutors(&mut self) -> BTreeMap<String, RegisteredToolExecutor> {
         let mut guard = self.inner.lock().expect("AIToolHandler mutex poisoned");
         if !guard.defaultToolsRegistered {
             drop(guard);
@@ -1154,7 +1309,7 @@ impl AIToolHandler {
 
     #[allow(non_snake_case)]
     /// Restores a previously removed executor registry.
-    pub fn restoreExecutors(&mut self, executors: BTreeMap<String, Box<dyn ToolExecutor>>) {
+    pub fn restoreExecutors(&mut self, executors: BTreeMap<String, RegisteredToolExecutor>) {
         self.inner
             .lock()
             .expect("AIToolHandler mutex poisoned")
@@ -1180,46 +1335,132 @@ impl AIToolHandlerState {
 }
 
 impl JsExecutionHost for AIToolHandler {
-    /// Executes an SDK JavaScript tool request through the registered Operit tool chain.
-    fn execute_tool_call(&self, request: JsToolCallRequest) -> JsToolCallResult {
-        let tool = AITool {
-            name: request.qualified_tool_name(),
-            parameters: request
-                .parameters
-                .into_iter()
-                .map(|(name, value)| ToolParameter {
-                    name,
-                    value: match value {
-                        serde_json::Value::Null => String::new(),
-                        serde_json::Value::String(value) => value,
-                        value => value.to_string(),
-                    },
-                })
-                .collect(),
-        };
+    /// Returns executable built-in and package tools with their declared parameters.
+    fn get_tool_catalog(&self) -> Result<Value, String> {
         let mut handler = self.clone();
-        let result = handler.executeTool(tool);
-        let data = match result.result {
-            ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
-            ToolResultData::StringResultData(data) => {
-                JsToolCallResultData::Value(serde_json::Value::String(data.value))
+        handler.registerDefaultTools();
+        let language = self.package_language()?;
+        let useEnglish = language.to_ascii_lowercase().starts_with("en");
+        let hostEnvironment = self.getHostEnvironmentDescriptor();
+        let categories = self
+            .runtimeSupport()
+            .buildBuiltinAndInternalCategories(useEnglish, &hostEnvironment);
+        let mut tools = Vec::new();
+        for category in categories {
+            for tool in category.tools {
+                let parameters = tool
+                    .parametersStructured
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|parameter| {
+                        json!({
+                            "name": parameter.name,
+                            "type": parameter.r#type,
+                            "description": parameter.description,
+                            "required": parameter.required,
+                            "default": parameter.default,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                tools.push(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": parameters,
+                    "category": category.categoryName,
+                    "source": "builtin",
+                }));
             }
-            ToolResultData::BooleanResultData(data) => {
-                JsToolCallResultData::Value(serde_json::Value::Bool(data.value))
-            }
-            ToolResultData::IntResultData(data) => JsToolCallResultData::Value(
-                serde_json::Value::Number(serde_json::Number::from(data.value)),
-            ),
-            data => JsToolCallResultData::Value(
-                serde_json::from_str(&data.toJson())
-                    .expect("ToolResultData JSON conversion must succeed"),
-            ),
-        };
-        JsToolCallResult {
-            success: result.success,
-            data,
-            error: result.error,
         }
+
+        let packageManager = self.getOrCreatePackageManager();
+        let packageNames = packageManager
+            .lock()
+            .map_err(|_| "package manager mutex poisoned".to_string())?
+            .getAvailablePackages()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for packageName in packageNames {
+            let package = packageManager
+                .lock()
+                .map_err(|_| "package manager mutex poisoned".to_string())?
+                .getEffectivePackageTools(&packageName);
+            let Some(package) = package else {
+                continue;
+            };
+            for tool in package.tools.into_iter().filter(|tool| !tool.advice) {
+                let parameters = tool
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| {
+                        json!({
+                            "name": parameter.name,
+                            "type": parameter.parameter_type,
+                            "description": parameter.description.resolve(useEnglish),
+                            "required": parameter.required,
+                            "default": Value::Null,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                tools.push(json!({
+                    "name": format!("{}:{}", packageName, tool.name),
+                    "description": tool.description.resolve(useEnglish),
+                    "parameters": parameters,
+                    "category": package.category,
+                    "source": "package",
+                    "packageName": packageName,
+                }));
+            }
+        }
+        Ok(json!({ "tools": tools }))
+    }
+
+    /// Executes an SDK JavaScript tool request through the registered Operit tool chain.
+    fn execute_tool_call(
+        &self,
+        request: JsToolCallRequest,
+    ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsToolCallResult> {
+        let host = self.clone();
+        Box::pin(async move {
+            let tool = AITool {
+                name: request.qualified_tool_name(),
+                parameters: request
+                    .parameters
+                    .into_iter()
+                    .map(|(name, value)| ToolParameter {
+                        name,
+                        value: match value {
+                            serde_json::Value::Null => String::new(),
+                            serde_json::Value::String(value) => value,
+                            value => value.to_string(),
+                        },
+                    })
+                    .collect(),
+            };
+            let mut handler = host;
+            let result = handler.executeTool(tool).await;
+            let data = match result.result {
+                ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
+                ToolResultData::StringResultData(data) => {
+                    JsToolCallResultData::Value(serde_json::Value::String(data.value))
+                }
+                ToolResultData::BooleanResultData(data) => {
+                    JsToolCallResultData::Value(serde_json::Value::Bool(data.value))
+                }
+                ToolResultData::IntResultData(data) => JsToolCallResultData::Value(
+                    serde_json::Value::Number(serde_json::Number::from(data.value)),
+                ),
+                data => JsToolCallResultData::Value(
+                    serde_json::from_str(&data.toJson())
+                        .expect("ToolResultData JSON conversion must succeed"),
+                ),
+            };
+            JsToolCallResult {
+                success: result.success,
+                data,
+                error: result.error,
+            }
+        })
     }
 
     /// Returns the current host language.
@@ -1234,35 +1475,59 @@ impl JsExecutionHost for AIToolHandler {
             .readEnvironmentVariable(key)
     }
 
-    /// Returns the plugin configuration directory.
+    /// Writes one runtime environment variable.
+    fn write_environment_variable(&self, key: &str, value: &str) -> Result<(), String> {
+        self.runtimeDependencies()
+            .runtime_support()
+            .writeEnvironmentVariable(key, value)
+    }
+
+    /// Resolves unscoped native configuration access explicitly within this device.
     fn plugin_config_dir(&self, plugin_id: &str) -> Result<String, String> {
-        let configDir = OperitPaths::pluginConfigDir(plugin_id)?;
-        let configDirPath = configDir
-            .to_str()
-            .ok_or_else(|| "Plugin config directory is not valid UTF-8".to_string())?;
+        let configDir = operit_util::OperitPaths::pluginConfigDir(plugin_id)?;
+        let path = configDir.to_string_lossy().replace('\\', "/");
+        let absolute = RuntimeStorePaths::default().runtime_storage_path(&path);
         self.getContext()
             .fileSystemHost
-            .clone()
-            .ok_or_else(|| "FileSystemHost is required for plugin configuration".to_string())?
-            .makeDirectory(configDirPath, true)
-            .map_err(|error| error.to_string())?;
-        let runtimeRoot = RuntimeStorePaths::default().runtime_dir().to_path_buf();
-        let relativePath = configDir
-            .strip_prefix(runtimeRoot)
-            .map_err(|_| "Plugin configuration directory is outside runtime storage".to_string())?;
-        let relativePath = relativePath
-            .to_str()
-            .ok_or_else(|| "Plugin configuration directory is not valid UTF-8".to_string())?;
-        PathMapper::joinVfsPath("/app/data", relativePath)
+            .as_ref()
+            .ok_or("FileSystemHost is required for plugin configuration")?
+            .makeDirectory(&absolute.to_string_lossy(), true)
+            .map_err(|e| e.to_string())?;
+        let relative = path
+            .strip_prefix("runtime/")
+            .ok_or("Configuration is outside runtime storage")?;
+        PathMapper::joinVfsPath("/app/data", relative)
+    }
+
+    /// Resolves the executing package owner while keeping arbitrary configuration aliases supported.
+    fn scoped_plugin_config_dir(&self, owner_id: &str, plugin_id: &str) -> Result<String, String> {
+        // Host callbacks must not acquire the package manager lock held by script callers.
+        let store = operit_store::ExtensionStore::ExtensionStore::default();
+        let owner = store.packageOwner(owner_id)?;
+        self.createPackageConfigDirectory(&owner.id, plugin_id, &owner.scope)
+    }
+
+    /// Creates registration configuration from its selected scope without querying runtime state.
+    fn registration_plugin_config_dir(
+        &self,
+        owner_id: &str,
+        plugin_id: &str,
+        scope: ToolPkgConfigScope,
+    ) -> Result<String, String> {
+        self.createPackageConfigDirectory(owner_id, plugin_id, scope.as_str())
     }
 
     /// Reads one ToolPkg text resource.
-    fn read_toolpkg_text_resource(&self, target: &str, path: &str) -> Result<String, String> {
-        self.getOrCreatePackageManager()
+    fn read_toolpkg_text_resource(
+        &self,
+        target: &str,
+        path: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .getOrCreatePackageManager()
             .lock()
             .expect("package manager mutex poisoned")
-            .readToolPkgTextResource(target, path, true)
-            .ok_or_else(|| format!("ToolPkg text resource not found: {target}/{path}"))
+            .readToolPkgTextResource(target, path, true))
     }
 
     /// Materializes one ToolPkg binary resource.
@@ -1287,19 +1552,22 @@ impl JsExecutionHost for AIToolHandler {
     /// Dispatches one Compose DSL controller command.
     fn handle_compose_webview_controller_command(
         &self,
-        payload_json: &str,
-    ) -> Result<String, String> {
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         self.getContext()
             .composeDslWebViewHost
             .as_ref()
             .ok_or_else(|| "ComposeDslWebViewHost is not registered".to_string())?
-            .handleControllerCommand(payload_json)
+            .handleControllerCommand(payload)
             .map_err(|error| error.to_string())
     }
 
-    /// Decodes and forwards one Compose DSL file-picker request to the registered host owner.
-    fn open_compose_file_picker(&self, payload_json: &str) -> Result<String, String> {
-        let request = operit_host_api::ComposeDslFilePickerRequest::parse(payload_json)
+    /// Validates and forwards one structured file-picker request to the registered host owner.
+    fn open_compose_file_picker(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let request = operit_host_api::ComposeDslFilePickerRequest::fromValue(payload.clone())
             .map_err(|error| error.to_string())?;
         self.getContext()
             .composeDslWebViewHost
@@ -1444,13 +1712,43 @@ pub struct FnToolExecutor {
     pub effect: ToolEffect,
 }
 
+/// Executes a proxy whose nested package invocation returns an asynchronous result.
+pub struct AsyncFnToolExecutor {
+    pub invoke: Arc<
+        dyn Fn(AITool) -> operit_plugin_sdk::javascript::JsExecutionCompletion<ToolResult>
+            + Send
+            + Sync,
+    >,
+    pub validate: Arc<dyn Fn(&AITool) -> ToolValidationResult + Send + Sync>,
+    pub effect: ToolEffect,
+}
+
+impl AsyncToolExecutor for AsyncFnToolExecutor {
+    /// Validates the proxy request before beginning execution.
+    fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
+        (self.validate)(tool)
+    }
+    /// Declares the proxy's access effect.
+    fn accessSpec(&self, _tool: &AITool) -> Result<ToolAccessSpec, String> {
+        Ok(ToolAccessSpec {
+            effect: self.effect,
+            boundary: ToolBoundary::None,
+        })
+    }
+    /// Awaits the nested invocation on its registered asynchronous path.
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        let invocation = (self.invoke)(tool.clone());
+        Box::pin(async move { vec![invocation.await] })
+    }
+}
+
 /// Enforces the registered name and successful result contract for one built-in executor.
 struct ContractCheckedBuiltinToolExecutor {
     name: BuiltinToolName,
-    executor: Box<dyn ToolExecutor>,
+    executor: RegisteredToolExecutor,
 }
 
-impl ToolExecutor for ContractCheckedBuiltinToolExecutor {
+impl AsyncToolExecutor for ContractCheckedBuiltinToolExecutor {
     /// Validates parameters only for the exact built-in name bound during registration.
     fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
         assert_eq!(
@@ -1472,33 +1770,35 @@ impl ToolExecutor for ContractCheckedBuiltinToolExecutor {
     }
 
     /// Verifies every successful result emitted by the wrapped built-in executor.
-    fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult> {
-        assert_eq!(
-            tool.name,
-            self.name.as_str(),
-            "Built-in executor received a different tool name"
-        );
-        let results = self.executor.invokeAndStream(tool);
-        for result in &results {
-            if self.name != BuiltinToolName::PackageProxy {
-                assert_eq!(
-                    result.toolName,
-                    self.name.as_str(),
-                    "Built-in executor emitted a result for a different tool name"
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(
+                tool.name,
+                self.name.as_str(),
+                "Built-in executor received a different tool name"
+            );
+            let results = self.executor.invokeAndStreamAsync(tool).await;
+            for result in &results {
+                if self.name != BuiltinToolName::PackageProxy {
+                    assert_eq!(
+                        result.toolName,
+                        self.name.as_str(),
+                        "Built-in executor emitted a result for a different tool name"
+                    );
+                }
+                assert!(
+                    !result.success || self.name.accepts_runtime_result(&result.result),
+                    "Built-in executor emitted an incompatible successful result: {}",
+                    self.name
+                );
+                assert!(
+                    result.success || result.error.is_some(),
+                    "Built-in executor emitted a failed result without an error: {}",
+                    self.name
                 );
             }
-            assert!(
-                !result.success || self.name.accepts_runtime_result(&result.result),
-                "Built-in executor emitted an incompatible successful result: {}",
-                self.name
-            );
-            assert!(
-                result.success || result.error.is_some(),
-                "Built-in executor emitted a failed result without an error: {}",
-                self.name
-            );
-        }
-        results
+            results
+        })
     }
 }
 
@@ -1549,23 +1849,47 @@ mod tests {
             &AiPermissionMode::Full,
             &pathTool("/mnt/android/sdcard"),
             &filePathAccessSpec(ToolEffect::READ),
+            None,
         );
 
         assert_eq!(result, Ok(()));
     }
 
-    /// Confirms WorkspaceWrite still needs the runtime workspace context.
+    /// Confirms workspace-scoped modes allow external file reads without a runtime workspace.
     #[test]
-    fn workspaceWriteRequiresRuntimeWorkspaceForFilePaths() {
-        let result = AIToolHandler::checkWorkspaceBoundary(
+    fn workspaceScopedModesAllowExternalFileReadsWithoutRuntimeWorkspace() {
+        let readOnlyResult = AIToolHandler::checkWorkspaceBoundary(
+            &AiPermissionMode::ReadOnly,
+            &pathTool("/mnt/android/sdcard"),
+            &filePathAccessSpec(ToolEffect::READ),
+            None,
+        );
+        let workspaceWriteResult = AIToolHandler::checkWorkspaceBoundary(
             &AiPermissionMode::WorkspaceWrite,
             &pathTool("/mnt/android/sdcard"),
             &filePathAccessSpec(ToolEffect::READ),
+            None,
+        );
+
+        assert_eq!(readOnlyResult, Ok(()));
+        assert_eq!(workspaceWriteResult, Ok(()));
+    }
+
+    /// Confirms WorkspaceWrite still requires a runtime workspace for file writes.
+    #[test]
+    fn workspaceWriteRequiresRuntimeWorkspaceForFileWrites() {
+        let result = AIToolHandler::checkWorkspaceBoundary(
+            &AiPermissionMode::WorkspaceWrite,
+            &pathTool("/mnt/android/sdcard"),
+            &filePathAccessSpec(ToolEffect::WRITE),
+            None,
         );
 
         assert_eq!(
             result,
-            Err("File tool execution requires tool runtime context".to_string())
+            Err(WorkspaceBoundaryError::RequiresApproval(
+                "File tool execution requires tool runtime context".to_string()
+            ))
         );
     }
 }

@@ -3,13 +3,14 @@ use std::collections::BTreeMap;
 use operit_plugin_sdk::javascript::{JsExecutionHost, JsToolCallRequest, JsToolCallResultData};
 use operit_plugin_sdk::js_sdk::chat::*;
 use operit_plugin_sdk::js_sdk::files::*;
+use operit_plugin_sdk::js_sdk::edge::*;
 use operit_plugin_sdk::js_sdk::memory::*;
 use operit_plugin_sdk::js_sdk::network::*;
 use operit_plugin_sdk::js_sdk::results::*;
 use operit_plugin_sdk::js_sdk::software_settings::SoftwareSettingsHost;
 use operit_plugin_sdk::js_sdk::system::*;
 use operit_plugin_sdk::js_sdk::tool_types::BuiltinToolName;
-use operit_plugin_sdk::js_sdk::{JsFuture, JsHostError};
+use operit_plugin_sdk::js_sdk::{JsAny, JsFuture, JsHostError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -199,7 +200,7 @@ where
     });
     let host = host.clone();
     Box::pin(async move {
-        let response = JsExecutionHost::execute_tool_call(&host, request?);
+        let response = JsExecutionHost::execute_tool_call(&host, request?).await;
         if !response.success {
             return Err(JsHostError::new(
                 response
@@ -269,7 +270,7 @@ fn invoke_terminal_streaming(
     let mut host = host.clone();
     Box::pin(async move {
         host.notifyToolCallRequested(&tool);
-        let interception = host.checkToolInterception(&tool);
+        let interception = host.checkToolInterception(&tool).await;
         if let operit_tools::tools::AIToolHook::AIToolHookDecision::Block(_) = interception {
             let result = AIToolHandler::toolInterceptionResult(&tool, interception);
             host.notifyToolExecutionResult(&tool, &result);

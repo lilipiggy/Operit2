@@ -15,8 +15,10 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         var moduleRefFunctionCounter = 0;
         var capture = {
             marketOrigin: null,
+            publicApis: [],
             toolboxUiModules: [],
             uiRoutes: [],
+            chatComposerSlots: [],
             navigationEntries: [],
             desktopWidgets: [],
             appLifecycleHooks: [],
@@ -26,6 +28,8 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             chatInputHooks: [],
             chatViewHooks: [],
             chatMessageHooks: [],
+            chatMessageMenuItems: [],
+            chatRuntimeHooks: [],
             hostEventHooks: [],
             toolLifecycleHooks: [],
             promptInputHooks: [],
@@ -36,7 +40,9 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             promptFinalizeHooks: [],
             promptEstimateFinalizeHooks: [],
             summaryGenerateHooks: [],
-            aiProviders: []
+            coreCommands: [],
+            aiProviders: [],
+            manifestExtensions: []
         };
         root.__operitToolPkgRegistrationCapture = capture;
 
@@ -237,6 +243,43 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             return normalized;
         }
 
+        function normalizeDialogScreenField(definition, label) {
+            if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
+                throw new Error(label + ' expects an object');
+            }
+            var normalized = copyObject(definition, 'screen');
+            var screen = definition.screen;
+            var path = '';
+            if (typeof screen === 'string') {
+                path = screen.trim().replace(/\\/g, '/');
+            } else if (typeof screen === 'function' && typeof screen.__operit_toolpkg_module_path === 'string') {
+                path = screen.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
+            } else if (
+                screen &&
+                typeof screen === 'object' &&
+                typeof screen.default === 'function' &&
+                typeof screen.default.__operit_toolpkg_module_path === 'string'
+            ) {
+                path = screen.default.__operit_toolpkg_module_path.trim().replace(/\\/g, '/');
+            }
+            if (!path) {
+                throw new Error(label + ' requires a serializable screen reference');
+            }
+            normalized.screen = path;
+            return normalized;
+        }
+
+        function normalizeChatMessageMenuItemDefinition(definition, label) {
+            var normalized = normalizeFunctionField(definition, 'function', label);
+            if (definition.dialog !== undefined && definition.dialog !== null) {
+                if (typeof definition.dialog !== 'object' || Array.isArray(definition.dialog)) {
+                    throw new Error(label + '.dialog expects an object');
+                }
+                normalized.dialog = normalizeDialogScreenField(definition.dialog, label + '.dialog');
+            }
+            return normalized;
+        }
+
         function normalizeSpec(spec) {
             if (typeof spec === 'string') {
                 var parsed = JSON.parse(spec);
@@ -327,6 +370,8 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             return '';
         }
 
+        /** Materializes a resource through the required structured host Promise. */
+
         function readToolPkgResource(key, outputFileName, internal) {
             if (registrationOnly) {
                 throw new Error('ToolPkg.readResource is unavailable during ToolPkg registration');
@@ -339,43 +384,48 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             if (!target) {
                 return Promise.reject(new Error('package/toolpkg runtime target is empty'));
             }
-            if (
-                typeof NativeInterface === 'undefined' ||
-                !NativeInterface ||
-                typeof NativeInterface.readToolPkgResource !== 'function'
-            ) {
-                return Promise.reject(new Error('NativeInterface.readToolPkgResource is unavailable'));
-            }
-            var path = NativeInterface.readToolPkgResource(
-                target,
-                resourceKey,
+            return __operitInvokeHostAsync(__operitNativeReadToolPkgResource, [
+                target, resourceKey,
                 outputFileName == null ? '' : String(outputFileName).trim(),
-                internal === true ? 'true' : ''
-            );
-            if (typeof path === 'string' && path.trim()) {
-                return Promise.resolve(path);
-            }
-            return Promise.reject(new Error('resource not found: ' + resourceKey));
+                internal === true
+            ]);
         }
+
+        /** Materializes a targeted package resource without parsing result text. */
+
+        function readToolPkgResourceFromPackage(packageNameOrSubpackageId, key, outputFileName, internal) {
+            if (registrationOnly) {
+                throw new Error('ToolPkg.readResourceFromPackage is unavailable during ToolPkg registration');
+            }
+            var target = String(packageNameOrSubpackageId || '').trim();
+            var resourceKey = String(key || '').trim();
+            if (!target) {
+                return Promise.reject(new Error('ToolPkg resource target is required'));
+            }
+            if (!resourceKey) {
+                return Promise.reject(new Error('resource key is required'));
+            }
+            return __operitInvokeHostAsync(__operitNativeReadToolPkgResource, [
+                target, resourceKey,
+                outputFileName == null ? '' : String(outputFileName).trim(),
+                internal === true
+            ]);
+        }
+
+        /** Reads and validates the direct absolute VFS configuration path. */
 
         function getToolPkgConfigDir(pluginId) {
             var explicitId = String(pluginId || '').trim();
-            var target = explicitId || resolveCurrentToolPkgTarget();
+            var owner = resolveCurrentToolPkgTarget();
+            var target = explicitId || owner;
             if (!target) {
                 throw new Error('package/toolpkg runtime target is empty');
             }
-            if (
-                typeof NativeInterface === 'undefined' ||
-                !NativeInterface ||
-                typeof NativeInterface.getPluginConfigDir !== 'function'
-            ) {
-                throw new Error('NativeInterface.getPluginConfigDir is unavailable');
-            }
-            var path = NativeInterface.getPluginConfigDir(target);
-            if (typeof path === 'string' && path.trim()) {
+            var path = __operitNativeGetScopedPluginConfigDir(owner, target);
+            if (typeof path === 'string' && path.startsWith('/')) {
                 return path;
             }
-            throw new Error('plugin config dir is unavailable for ' + target);
+            throw new Error('Plugin configuration directory must be an absolute VFS path');
         }
 
         function normalizeToolPkgWasmValueType(valueType) {
@@ -427,6 +477,8 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             return normalizedArgs;
         }
 
+        /** Calls a WASM export using structured scalar arguments and an owned host Promise. */
+
         function callToolPkgWasm(moduleId, exportName, args) {
             if (registrationOnly) {
                 throw new Error('ToolPkg.wasm.call is unavailable during ToolPkg registration');
@@ -449,54 +501,50 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             if (!target) {
                 return Promise.reject(new Error('package/toolpkg runtime target is empty'));
             }
-            if (
-                typeof NativeInterface === 'undefined' ||
-                !NativeInterface ||
-                typeof NativeInterface.callToolPkgWasm !== 'function'
-            ) {
-                return Promise.reject(new Error('NativeInterface.callToolPkgWasm is unavailable'));
-            }
-            var resultJson;
-            try {
-                resultJson = NativeInterface.callToolPkgWasm(
-                    target,
-                    normalizedModuleId,
-                    normalizedExportName,
-                    JSON.stringify(normalizedArgs)
-                );
-            } catch (error) {
-                return Promise.reject(error);
-            }
-            var parsed;
-            try {
-                parsed = JSON.parse(String(resultJson || 'null'));
-            } catch (error) {
-                return Promise.reject(
-                    new Error('ToolPkg.wasm returned invalid JSON: ' + String(error && error.message ? error.message : error))
-                );
-            }
-            if (parsed && parsed.success === true) {
-                return Promise.resolve(
-                    Object.prototype.hasOwnProperty.call(parsed, 'value') ? parsed.value : null
-                );
-            }
-            return Promise.reject(
-                new Error(
-                    parsed && typeof parsed.message === 'string' && parsed.message.trim().length > 0
-                        ? parsed.message.trim()
-                        : 'ToolPkg.wasm call failed'
-                )
-            );
+            return __operitInvokeHostAsync(__operitNativeCallToolPkgWasm,
+                [target, normalizedModuleId, normalizedExportName, normalizedArgs]);
         }
 
-        var api = {
+        function requireToolPkgApiRuntime() {
+            var runtime = root.__operitToolPkgApi;
+            if (!runtime || typeof runtime !== 'object') {
+                throw new Error('__operitToolPkgApi is unavailable');
+            }
+            if (typeof runtime.namespace !== 'function' || typeof runtime.method !== 'function') {
+                throw new Error('__operitToolPkgApi is invalid');
+            }
+            return runtime;
+        }
+
+        var toolPkgApi = requireToolPkgApiRuntime();
+        var api = toolPkgApi.namespace('ToolPkg', {
             _m: captureMarketOrigin,
+            // Captures only explicitly published methods using durable exported function references.
+            registerApi: function(definition) {
+                if (!definition || typeof definition.name !== 'string' || !definition.name.trim()) {
+                    throw new Error('registerApi requires a non-empty name');
+                }
+                var normalized = normalizeFunctionField(definition, 'function', 'registerApi');
+                normalized.id = definition.name.trim();
+                delete normalized.name;
+                capture.publicApis.push(normalizeSpec(normalized));
+            },
+            callDependency: toolPkgApi.callDependency,
             registerToolboxUiModule: registerScreen('toolboxUiModules', 'registerToolPkgToolboxUiModule'),
             registerUiRoute: registerScreen('uiRoutes', 'registerToolPkgUiRoute'),
+            registerChatComposerSlot: registerScreen('chatComposerSlots', 'registerToolPkgChatComposerSlot'),
+            /// Encodes navigation callbacks using the nested runtime action contract.
             registerNavigationEntry: function(definition) {
-                var normalized = definition && typeof definition.action === 'function'
-                    ? normalizeFunctionField(definition, 'action', 'registerToolPkgNavigationEntry')
-                    : copyObject(definition, '');
+                var normalized = copyObject(definition, '');
+                if (definition && typeof definition.action === 'function') {
+                    var ref = resolveDurableFunctionRef(
+                        definition.action, definition, 'registerToolPkgNavigationEntry'
+                    );
+                    normalized.action = { function: ref.name };
+                    if (ref.source) {
+                        normalized.action.functionSource = ref.source;
+                    }
+                }
                 capture.navigationEntries.push(normalizeSpec(normalized));
             },
             registerDesktopWidget: append('desktopWidgets'),
@@ -507,6 +555,24 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             registerChatInputHook: registerFunction('chatInputHooks', 'registerChatInputHook'),
             registerChatViewHook: registerFunction('chatViewHooks', 'registerChatViewHook'),
             registerChatMessageHook: registerFunction('chatMessageHooks', 'registerChatMessageHook'),
+            registerChatMessageMenuItem: toolPkgApi.method()
+                .between('1.0.1', '2.0.0')
+                .since('2.0.0')
+                // Adapts both API families to the shared registration payload.
+                .implement(function(definition) {
+                    capture.chatMessageMenuItems.push(
+                        normalizeSpec(
+                            normalizeChatMessageMenuItemDefinition(
+                                definition,
+                                'registerChatMessageMenuItem'
+                            )
+                        )
+                    );
+                }),
+            registerChatRuntimeHook: toolPkgApi.method()
+                .between('1.0.1', '2.0.0')
+                .since('2.0.0')
+                .implement(registerFunction('chatRuntimeHooks', 'registerChatRuntimeHook')),
             registerHostEventHook: registerFunction('hostEventHooks', 'registerHostEventHook'),
             registerToolLifecycleHook: registerFunction('toolLifecycleHooks', 'registerToolLifecycleHook'),
             registerPromptInputHook: registerFunction('promptInputHooks', 'registerPromptInputHook'),
@@ -517,18 +583,22 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
             registerPromptFinalizeHook: registerFunction('promptFinalizeHooks', 'registerPromptFinalizeHook'),
             registerPromptEstimateFinalizeHook: registerFunction('promptEstimateFinalizeHooks', 'registerPromptEstimateFinalizeHook'),
             registerSummaryGenerateHook: registerFunction('summaryGenerateHooks', 'registerSummaryGenerateHook'),
+            registerCoreCommand: registerFunction('coreCommands', 'registerCoreCommand'),
             readResource: readToolPkgResource,
+            readResourceFromPackage: readToolPkgResourceFromPackage,
             getConfigDir: getToolPkgConfigDir,
             wasm: {
                 call: callToolPkgWasm
             },
             registerAiProvider: function(definition) {
                 capture.aiProviders.push(normalizeSpec(normalizeAiProviderDefinition(definition, 'registerAiProvider')));
-            }
-        };
+            },
+            registerManifestExtension: registerFunction('manifestExtensions', 'registerManifestExtension')
+        });
 
         root.registerToolPkgToolboxUiModule = api.registerToolboxUiModule;
         root.registerToolPkgUiRoute = api.registerUiRoute;
+        root.registerToolPkgChatComposerSlot = api.registerChatComposerSlot;
         root.registerToolPkgNavigationEntry = api.registerNavigationEntry;
         root.registerToolPkgDesktopWidget = api.registerDesktopWidget;
         root.registerToolPkgAppLifecycleHook = api.registerAppLifecycleHook;
@@ -538,6 +608,8 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         root.registerToolPkgChatInputHook = api.registerChatInputHook;
         root.registerToolPkgChatViewHook = api.registerChatViewHook;
         root.registerToolPkgChatMessageHook = api.registerChatMessageHook;
+        root.registerToolPkgChatMessageMenuItem = api.registerChatMessageMenuItem;
+        root.registerToolPkgChatRuntimeHook = api.registerChatRuntimeHook;
         root.registerToolPkgHostEventHook = api.registerHostEventHook;
         root.registerToolPkgToolLifecycleHook = api.registerToolLifecycleHook;
         root.registerToolPkgPromptInputHook = api.registerPromptInputHook;
@@ -548,7 +620,9 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         root.registerToolPkgPromptFinalizeHook = api.registerPromptFinalizeHook;
         root.registerToolPkgPromptEstimateFinalizeHook = api.registerPromptEstimateFinalizeHook;
         root.registerToolPkgSummaryGenerateHook = api.registerSummaryGenerateHook;
+        root.registerToolPkgCoreCommand = api.registerCoreCommand;
         root.registerToolPkgAiProvider = api.registerAiProvider;
+        root.registerToolPkgManifestExtension = api.registerManifestExtension;
 
         root.registerAppLifecycleHook = api.registerAppLifecycleHook;
         root.registerMessageProcessingPlugin = api.registerMessageProcessingPlugin;
@@ -557,6 +631,8 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         root.registerChatInputHook = api.registerChatInputHook;
         root.registerChatViewHook = api.registerChatViewHook;
         root.registerChatMessageHook = api.registerChatMessageHook;
+        root.registerChatMessageMenuItem = api.registerChatMessageMenuItem;
+        root.registerChatRuntimeHook = api.registerChatRuntimeHook;
         root.registerHostEventHook = api.registerHostEventHook;
         root.registerToolLifecycleHook = api.registerToolLifecycleHook;
         root.registerPromptInputHook = api.registerPromptInputHook;
@@ -567,6 +643,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
         root.registerPromptFinalizeHook = api.registerPromptFinalizeHook;
         root.registerPromptEstimateFinalizeHook = api.registerPromptEstimateFinalizeHook;
         root.registerSummaryGenerateHook = api.registerSummaryGenerateHook;
+        root.registerCoreCommand = api.registerCoreCommand;
 
         installGlobal('ToolPkg', api);
     })();
@@ -577,6 +654,7 @@ pub fn buildToolPkgRegistrationBridgeScript(restrictHostCapabilities: bool) -> S
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::buildToolPkgRegistrationBridgeScript;
+    use crate::toolpkg::ToolPkgApiRuntimeScript::buildToolPkgApiRuntimeScript;
     use rquickjs::{Context, Runtime};
 
     /// Verifies runtime marketplace markers can be evaluated repeatedly without capture side effects.
@@ -586,6 +664,18 @@ mod tests {
         let context = Context::full(&runtime).expect("QuickJS context should start");
 
         context.with(|context| {
+            context
+                .eval::<(), _>(
+                    r#"
+                    globalThis.__operitExpose = function(name, value) {
+                        globalThis[name] = value;
+                    };
+                    "#,
+                )
+                .expect("runtime expose should evaluate");
+            context
+                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .expect("toolpkg api runtime should evaluate");
             context
                 .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
                 .expect("runtime bridge should evaluate");
@@ -599,6 +689,64 @@ mod tests {
                 .expect("runtime capture should be readable");
 
             assert_eq!(capturedOrigin, "null");
+        });
+    }
+
+    /// Verifies Core command registrations retain their metadata and durable callback reference.
+    #[test]
+    fn captures_core_command_registration() {
+        let runtime = Runtime::new().expect("QuickJS runtime should start");
+        let context = Context::full(&runtime).expect("QuickJS context should start");
+
+        context.with(|context| {
+            context
+                .eval::<(), _>(
+                    r#"
+                    globalThis.__operitExpose = function(name, value) {
+                        globalThis[name] = value;
+                    };
+                    "#,
+                )
+                .expect("runtime expose should evaluate");
+            context
+                .eval::<(), _>(buildToolPkgApiRuntimeScript())
+                .expect("toolpkg api runtime should evaluate");
+            context
+                .eval::<(), _>(buildToolPkgRegistrationBridgeScript(false))
+                .expect("runtime bridge should evaluate");
+            context
+                .eval::<(), _>(
+                    r#"
+                    function runHello(event) {
+                        return { stdout: event.eventPayload.commandName };
+                    }
+                    globalThis.__operitGetActiveModuleExports = function() {
+                        return { runHello: runHello };
+                    };
+                    ToolPkg.registerCoreCommand({
+                        id: 'hello_command',
+                        name: 'hello',
+                        title: { en: 'Hello' },
+                        description: { en: 'Greets the user' },
+                        usage: '/hello <name>',
+                        function: runHello
+                    });
+                    "#,
+                )
+                .expect("Core command registration should evaluate");
+            let command_name = context
+                .eval::<String, _>(
+                    "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).name",
+                )
+                .expect("captured command should be readable");
+            let function_name = context
+                .eval::<String, _>(
+                    "JSON.parse(globalThis.__operitToolPkgRegistrationCapture.coreCommands[0]).function",
+                )
+                .expect("captured function should be readable");
+
+            assert_eq!(command_name, "hello");
+            assert_eq!(function_name, "runHello");
         });
     }
 }

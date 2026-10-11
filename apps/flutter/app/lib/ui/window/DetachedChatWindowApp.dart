@@ -3,10 +3,10 @@
 import 'package:flutter/material.dart';
 
 import '../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../core/logging/ClientLogger.dart';
 import '../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../features/chat/screens/AIChatScreen.dart';
-import '../main/MainLayoutController.dart';
-import '../main/TopBarController.dart';
+import '../features/chat/viewmodel/ChatViewModel.dart';
 import '../theme/OperitTheme.dart';
 import 'OperitWindowArguments.dart';
 
@@ -21,11 +21,10 @@ class DetachedChatWindowApp extends StatefulWidget {
 
 class _DetachedChatWindowAppState extends State<DetachedChatWindowApp> {
   late final GeneratedChatRuntimeHolderMainCoreProxy _chatCore =
-      const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge())
-          .chatRuntimeHolderMain;
-  late final TopBarController _topBarController = TopBarController();
-  late final MainLayoutController _mainLayoutController =
-      MainLayoutController();
+      const GeneratedCoreProxyClients(
+        ProxyCoreRuntimeBridge(),
+      ).chatRuntimeHolderMainForSlot(widget.arguments.slotId);
+  late final ChatViewModel _chatViewModel = ChatViewModel(chat: _chatCore);
   bool _ready = false;
   Object? _error;
 
@@ -37,21 +36,33 @@ class _DetachedChatWindowAppState extends State<DetachedChatWindowApp> {
 
   @override
   void dispose() {
-    _topBarController.dispose();
-    _mainLayoutController.dispose();
     super.dispose();
   }
 
   Future<void> _bindChat() async {
+    ClientLogger.i(
+      'bind detached chat start slotId=${widget.arguments.slotId} chatId=${widget.arguments.chatId}',
+      tag: 'DetachedChatWindow',
+    );
     try {
       await _chatCore.switchChatLocal(chatId: widget.arguments.chatId);
       if (!mounted) {
         return;
       }
+      ClientLogger.i(
+        'bind detached chat done slotId=${widget.arguments.slotId} chatId=${widget.arguments.chatId}',
+        tag: 'DetachedChatWindow',
+      );
       setState(() {
         _ready = true;
       });
-    } catch (error) {
+    } catch (error, stackTrace) {
+      ClientLogger.e(
+        'bind detached chat failed slotId=${widget.arguments.slotId} chatId=${widget.arguments.chatId}',
+        tag: 'DetachedChatWindow',
+        error: error,
+        stackTrace: stackTrace,
+      );
       if (!mounted) {
         return;
       }
@@ -64,30 +75,22 @@ class _DetachedChatWindowAppState extends State<DetachedChatWindowApp> {
   @override
   Widget build(BuildContext context) {
     return OperitTheme(
+      initialThemePreferenceSnapshot: widget.arguments.themePreferenceSnapshot,
+      initialThemeIsReady: true,
       hostInteractionHostsEnabled: false,
-      child: MainLayoutScope(
-        controller: _mainLayoutController,
-        child: TopBarScope(
-          controller: _topBarController,
-          child: AnimatedBuilder(
-            animation: Listenable.merge(<Listenable>[
-              _topBarController,
-              _mainLayoutController,
-            ]),
-            builder: (context, _) {
-              return _mainLayoutController.decorate(
-                context,
-                Scaffold(
-                  appBar: AppBar(
-                    title: Text(widget.arguments.title),
-                    actions: _topBarController.actions?.call(context),
-                  ),
-                  body: _body(),
-                ),
-              );
-            },
-          ),
+      unconfiguredChildEnabled: true,
+      child: Scaffold(
+        // Desktop windows do not need to reserve space for an on-screen
+        // keyboard; large macOS view insets would otherwise collapse chat to
+        // the app-bar height while the editor owns focus.
+        resizeToAvoidBottomInset: false,
+        appBar: AppBar(
+          leading: const SizedBox.shrink(),
+          leadingWidth: 48,
+          titleSpacing: 8,
+          title: Text(widget.arguments.title),
         ),
+        body: SizedBox.expand(child: _body()),
       ),
     );
   }
@@ -100,6 +103,6 @@ class _DetachedChatWindowAppState extends State<DetachedChatWindowApp> {
     if (!_ready) {
       return const Center(child: CircularProgressIndicator());
     }
-    return const AIChatScreen();
+    return AIChatEmbed(viewModel: _chatViewModel);
   }
 }

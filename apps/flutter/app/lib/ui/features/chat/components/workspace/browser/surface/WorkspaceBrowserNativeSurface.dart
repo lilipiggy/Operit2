@@ -1,5 +1,6 @@
 // ignore_for_file: file_names
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:operit2/core/host/browser/RuntimeBrowserOwner.dart';
 import 'package:operit2/core/host/browser/RuntimeBrowserOwnerSurfaceHost.dart';
@@ -25,6 +26,10 @@ class _WorkspaceBrowserNativeSurfaceState
   @override
   void initState() {
     super.initState();
+    if (_usesStableMacOSMount) {
+      _ready = true;
+      return;
+    }
     _claimSession();
   }
 
@@ -33,6 +38,9 @@ class _WorkspaceBrowserNativeSurfaceState
   void didUpdateWidget(covariant WorkspaceBrowserNativeSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.sessionId == widget.sessionId) {
+      return;
+    }
+    if (_usesStableMacOSMount) {
       return;
     }
     _releaseSession(oldWidget.sessionId);
@@ -46,7 +54,9 @@ class _WorkspaceBrowserNativeSurfaceState
   @override
   void dispose() {
     _claimGeneration += 1;
-    _releaseSession(widget.sessionId);
+    if (!_usesStableMacOSMount) {
+      _releaseSession(widget.sessionId);
+    }
     super.dispose();
   }
 
@@ -100,4 +110,10 @@ class _WorkspaceBrowserNativeSurfaceState
       RuntimeBrowserOwner.instance.detachWorkspaceSurfaceSession(sessionId);
     });
   }
+
+  /// AppKit platform views cannot be moved between Flutter hosts without a
+  /// transient blank frame. Mount the WKWebView only at its final workspace
+  /// location on macOS; the owner surface host leaves it unmounted beforehand.
+  bool get _usesStableMacOSMount =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 }

@@ -19,9 +19,9 @@ import image from '@ohos.multimedia.image';
 import audio from '@ohos.multimedia.audio';
 import media from '@ohos.multimedia.media';
 import notificationManager from '@ohos.notificationManager';
+import pasteboard from '@ohos.pasteboard';
 import connection from '@ohos.net.connection';
 import promptAction from '@ohos.promptAction';
-import taskpool from '@ohos.taskpool';
 import util from '@ohos.util';
 import window from '@ohos.window';
 import MethodCall from '@ohos/flutter_ohos/src/main/ets/plugin/common/MethodCall';
@@ -73,6 +73,11 @@ interface SystemOperationResponse {
 
 interface SystemCaptureScreenshotResponse {
   path: string;
+}
+
+interface ClipboardImagePayload {
+  mimeType: string;
+  bytes: ArrayBuffer;
 }
 
 interface JsonPayload {
@@ -242,26 +247,9 @@ interface RuntimeNativeModule {
   runtimeBootstrapRead(defaultRuntimeRoot: string): string;
   /** Writes the client bootstrap record before the native Runtime is created. */
   runtimeBootstrapWrite(defaultRuntimeRoot: string, content: string): string;
+  /** Creates a retained direct Dart connection to the host runtime. */
+  connectCoreFfi(handle: bigint): string;
   destroy(handle: bigint): void;
-  call(handle: bigint, request: ArrayBuffer): ArrayBuffer;
-  pushOpen(handle: bigint, request: ArrayBuffer): ArrayBuffer;
-  pushItem(handle: bigint, item: ArrayBuffer): ArrayBuffer;
-  pushClose(handle: bigint, pushId: string): ArrayBuffer;
-  watchSnapshot(handle: bigint, request: ArrayBuffer): ArrayBuffer;
-  watchStream(handle: bigint, request: ArrayBuffer): ArrayBuffer;
-  nextWatchChannelEvent(handle: bigint): ArrayBuffer;
-  closeWatchStream(handle: bigint, subscriptionId: string): ArrayBuffer;
-  startWebAccessServer(
-    handle: bigint,
-    bindAddress: string,
-    token: string,
-    shutdownToken: string,
-    webRoot: string,
-    deviceInfo: string,
-    enableWebAccess: string,
-    enableDiscovery: string
-  ): string;
-  stopWebAccessServer(handle: bigint): string;
   emitRuntimeEvent(handle: bigint, eventJson: string): string;
 }
 
@@ -271,20 +259,6 @@ interface RuntimeEventDeliveryResponse {
 }
 
 const nativeBridge = runtimeNative as RuntimeNativeModule;
-
-/// Reads the next runtime watch event on an ArkTS taskpool worker.
-@Concurrent
-function readWatchChannelEvent(handle: bigint): ArrayBuffer {
-  const bridge = runtimeNative as RuntimeNativeModule;
-  return bridge.nextWatchChannelEvent(handle);
-}
-
-/// Dispatches one CoreProxy call on an ArkTS taskpool worker.
-@Concurrent
-function dispatchRuntimeCoreCall(handle: bigint, request: ArrayBuffer): ArrayBuffer {
-  const bridge = runtimeNative as RuntimeNativeModule;
-  return bridge.call(handle, request);
-}
 
 export class OperitRuntimeChannel {
   private static activeRuntimeChannel: OperitRuntimeChannel | null = null;
@@ -296,7 +270,6 @@ export class OperitRuntimeChannel {
   private runtimeRoot: string = '';
   private workspaceRoot: string = '';
   private windowStage: window.WindowStage | null = null;
-  private watchPumpRunning: boolean = false;
   private musicPlayer: media.AVPlayer | null = null;
   private musicState: string = 'stopped';
   private musicSource: string | null = null;
@@ -424,45 +397,29 @@ export class OperitRuntimeChannel {
           this.ensureRuntimeHandle();
           result.success(null);
           return;
-        case 'call': {
-          const handle = this.ensureRuntimeHandle();
-          const request = this.requiredArrayBuffer(call, call.method);
-          taskpool.execute(dispatchRuntimeCoreCall, handle, request)
-            .then((response: Object): void => {
-              result.success(response as ArrayBuffer);
+        case 'restartApplication':
+          this.restartApplication()
+            .then((): void => {
+              result.success(null);
             })
             .catch((error: Object): void => {
-              result.error('RUNTIME_BRIDGE_ERROR', `${error}`, null);
+              result.error('APPLICATION_TERMINATION_ERROR', `${error}`, null);
             });
           return;
-        }
-        case 'pushOpen':
-          result.success(nativeBridge.pushOpen(this.ensureRuntimeHandle(), this.requiredArrayBuffer(call, call.method)));
-          return;
-        case 'pushItem':
-          result.success(nativeBridge.pushItem(this.ensureRuntimeHandle(), this.requiredArrayBuffer(call, call.method)));
-          return;
-        case 'pushClose':
-          result.success(nativeBridge.pushClose(this.ensureRuntimeHandle(), this.requiredStringArg(call, 'pushClose')));
-          return;
-        case 'watchSnapshot':
-          result.success(nativeBridge.watchSnapshot(this.ensureRuntimeHandle(), this.requiredArrayBuffer(call, call.method)));
-          return;
-        case 'watchStream':
-          result.success(nativeBridge.watchStream(this.ensureRuntimeHandle(), this.requiredArrayBuffer(call, call.method)));
-          this.ensureWatchPump();
-          return;
-        case 'closeWatchStream':
-          result.success(nativeBridge.closeWatchStream(this.ensureRuntimeHandle(), this.requiredStringArg(call, 'closeWatchStream')));
-          return;
-        case 'startWebAccessServer':
-          result.success(this.startWebAccessServer(call));
-          return;
-        case 'stopWebAccessServer':
-          result.success(nativeBridge.stopWebAccessServer(this.ensureRuntimeHandle()));
+        case 'connectCoreFfi':
+          result.success(nativeBridge.connectCoreFfi(this.ensureRuntimeHandle()));
           return;
         case 'ownerSystemLanguageCode':
           result.success(this.ownerSystemLanguageCode());
+          return;
+        case 'readClipboardImages':
+          this.readClipboardImages()
+            .then((response: Array<ClipboardImagePayload>) => {
+              result.success(response);
+            })
+            .catch((error: Object) => {
+              result.error('CLIPBOARD_IMAGE_READ_ERROR', `${error}`, null);
+            });
           return;
         case 'ownerSystemCaptureScreenshot':
           this.ownerSystemCaptureScreenshot()
@@ -582,12 +539,17 @@ export class OperitRuntimeChannel {
 
   /// Releases the native runtime bridge handle.
   destroy(): void {
-    this.watchPumpRunning = false;
     this.releaseHostEventMonitoring();
     if (this.runtimeHandle !== BigInt(0)) {
       nativeBridge.destroy(this.runtimeHandle);
       this.runtimeHandle = BigInt(0);
     }
+  }
+
+  /// Releases runtime resources and terminates the OpenHarmony ability.
+  private async restartApplication(): Promise<void> {
+    this.destroy();
+    await this.context.terminateSelf();
   }
 
   /// Returns default OpenHarmony runtime storage paths.
@@ -1001,49 +963,46 @@ export class OperitRuntimeChannel {
     }
   }
 
-  /// Starts the watch-channel event pump.
-  private ensureWatchPump(): void {
-    if (this.watchPumpRunning) {
-      return;
-    }
-    this.watchPumpRunning = true;
-    this.pumpWatchChannel();
-  }
-
-  /// Pumps watch-channel events from Rust into Dart.
-  private pumpWatchChannel(): void {
-    taskpool.execute(readWatchChannelEvent, this.ensureRuntimeHandle())
-      .then((frame: Object) => {
-        if (!this.watchPumpRunning) {
-          return;
-        }
-        this.channel.invokeMethod('watchChannelEvent', frame as ArrayBuffer);
-        this.pumpWatchChannel();
-      })
-      .catch(() => {
-        this.watchPumpRunning = false;
-      });
-  }
-
-  /// Starts the Web Access server through the Rust bridge.
-  private startWebAccessServer(call: MethodCall): string {
-    return nativeBridge.startWebAccessServer(
-      this.ensureRuntimeHandle(),
-      this.mapString(call, 'bindAddress'),
-      this.mapString(call, 'token'),
-      this.mapString(call, 'shutdownToken'),
-      this.mapString(call, 'webRoot'),
-      this.mapString(call, 'deviceInfo'),
-      this.mapString(call, 'enableWebAccess'),
-      this.mapString(call, 'enableDiscovery')
-    );
-  }
 
   /// Returns the current OpenHarmony system language code.
   private ownerSystemLanguageCode(): JsonStringPayload {
     return {
       languageCode: i18n.System.getSystemLocale()
     };
+  }
+
+  /// Reads PixelMap records from the OpenHarmony pasteboard as PNG payloads.
+  private async readClipboardImages(): Promise<Array<ClipboardImagePayload>> {
+    const data = await pasteboard.getSystemPasteboard().getData();
+    const images = new Array<ClipboardImagePayload>();
+    const recordCount = data.getRecordCount();
+    for (let index = 0; index < recordCount; index += 1) {
+      const record = data.getRecord(index);
+      if (record.mimeType !== pasteboard.MIMETYPE_PIXELMAP) {
+        continue;
+      }
+      images.push({
+        mimeType: 'image/png',
+        bytes: await this.packPasteboardPixelMap(record)
+      });
+    }
+    return images;
+  }
+
+  /// Packs one OpenHarmony pasteboard PixelMap record into PNG bytes.
+  private async packPasteboardPixelMap(record: pasteboard.PasteDataRecord): Promise<ArrayBuffer> {
+    const pixelMap = record.pixelMap;
+    const packer = image.createImagePacker();
+    try {
+      return await packer.packing(pixelMap, {
+        format: 'image/png',
+        quality: 100,
+        bufferSize: 20 * 1024 * 1024
+      });
+    } finally {
+      await packer.release();
+      await pixelMap.release();
+    }
   }
 
   /// Captures the active OpenHarmony window into a PNG file.
@@ -2428,15 +2387,6 @@ export class OperitRuntimeChannel {
       success: false,
       error: `${error}`
     };
-  }
-
-  /// Reads one required ArrayBuffer argument.
-  private requiredArrayBuffer(call: MethodCall, method: string): ArrayBuffer {
-    const value: Object | null = call.args as Object | null;
-    if (!(value instanceof ArrayBuffer)) {
-      throw new Error(`${method} expects MessagePack bytes`);
-    }
-    return value;
   }
 
   /// Reads one required string argument.

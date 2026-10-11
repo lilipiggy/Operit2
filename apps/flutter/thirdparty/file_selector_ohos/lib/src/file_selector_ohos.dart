@@ -6,15 +6,39 @@
 
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 
 import 'file_selector_api.g.dart';
+import 'uri_xfile.dart';
 
 /// An implementation of [FileSelectorPlatform] for OpenHarmony.
 class FileSelectorOhos extends FileSelectorPlatform {
   FileSelectorOhos({@visibleForTesting FileSelectorApi? api})
-    : _api = api ?? FileSelectorApi();
+      : _api = api ?? FileSelectorApi();
 
   final FileSelectorApi _api;
+  static const MethodChannel _saveChannel = MethodChannel(
+    'dev.flutter.packages.file_selector_ohos/save',
+  );
+
+  /// Copies a host-backed snapshot into the selected document without reading its bytes in Dart.
+  @override
+  Future<FileSaveLocation?> saveFileReference({
+    required XFile file,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    final location = await getSaveLocation(
+        acceptedTypeGroups: acceptedTypeGroups, options: options);
+    if (location == null) {
+      return null;
+    }
+    await _saveChannel.invokeMethod<void>('copyFileFromPath', <String, Object?>{
+      'sourcePath': file.path,
+      'destinationUri': location.path,
+    });
+    return location;
+  }
 
   /// Registers this class as the implementation of the file_selector platform interface.
   static void registerWith() {
@@ -74,14 +98,11 @@ class FileSelectorOhos extends FileSelectorPlatform {
   }
 
   XFile _xFileFromFileResponse(FileResponse file) {
-    return XFile.fromData(
-      file.bytes,
-      // Note: The name parameter is not used by XFile. The XFile.name returns
-      // the extracted file name from XFile.path.
+    return UriXFile(
+      file.path,
       name: file.name,
       length: file.size,
       mimeType: file.mimeType,
-      path: file.path,
     );
   }
 

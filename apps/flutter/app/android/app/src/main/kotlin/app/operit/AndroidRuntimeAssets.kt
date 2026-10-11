@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import android.system.Os
+import android.util.Log
 import java.io.File
 
 data class AndroidRuntimePaths(
@@ -22,8 +23,9 @@ data class AndroidRuntimePaths(
 )
 
 object AndroidRuntimeAssets {
-    private val packagedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    private val packagedAbis = setOf("arm64-v8a")
     private const val perUserRange = 100000
+    private const val TAG = "OperitRuntimeAssets"
 
     @Synchronized
     fun prepare(
@@ -31,6 +33,7 @@ object AndroidRuntimeAssets {
         runtimeRoot: File,
         workspaceRoot: File,
     ): AndroidRuntimePaths {
+        val startedAtMillis = System.currentTimeMillis()
         val abi = selectPackagedAbi()
         val runtimeDir = File(context.filesDir, "android-runtime/$abi")
         val rootfsDir = File(runtimeDir, "rootfs")
@@ -46,7 +49,6 @@ object AndroidRuntimeAssets {
         val nativeLoader = File(nativeLibraryDir, "liboperit_loader.so")
         val loader = File(runtimeDir, "loader")
         val rootfsArchive = File(runtimeDir, "rootfs.tar.gz")
-        val rootfsShaFile = File(runtimeDir, "rootfs.tar.gz.bin.sha256")
 
         require(nativeBusybox.isFile) { "Android runtime busybox is missing: ${nativeBusybox.absolutePath}" }
         require(nativeBash.isFile) { "Android runtime bash is missing: ${nativeBash.absolutePath}" }
@@ -57,10 +59,11 @@ object AndroidRuntimeAssets {
         createExecutableLink(nativeProot, proot)
         createExecutableLink(nativeLoader, loader)
 
-        copyAsset(context, "android-runtime/$abi/rootfs.tar.gz.bin", rootfsArchive)
-        copyAsset(context, "android-runtime/$abi/rootfs.tar.gz.bin.sha256", rootfsShaFile)
+        val packagedSha = readAssetText(
+            context,
+            "android-runtime/$abi/rootfs.tar.gz.bin.sha256",
+        ).trim().substringBefore(' ')
 
-        val packagedSha = rootfsShaFile.readText().trim().substringBefore(' ')
         val installedShaFile = File(runtimeDir, "rootfs.installed.sha256")
         val installedSha = when {
             installedShaFile.isFile -> installedShaFile.readText().trim()
@@ -68,13 +71,19 @@ object AndroidRuntimeAssets {
         }
 
         if (!rootfsDir.isDirectory || installedSha != packagedSha) {
+            Log.i(TAG, "runtime rootfs install start")
+            copyAsset(context, "android-runtime/$abi/rootfs.tar.gz.bin", rootfsArchive)
+            Log.i(TAG, "runtime rootfs copy done elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
             rootfsDir.deleteRecursively()
             rootfsDir.mkdirs()
             runBusybox(
                 busybox,
                 listOf("tar", "-xzf", rootfsArchive.absolutePath, "-C", rootfsDir.absolutePath),
             )
+            Log.i(TAG, "runtime rootfs extract done elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
             installedShaFile.writeText(packagedSha)
+        } else {
+            Log.i(TAG, "runtime rootfs already installed elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
         }
 
         ensureRootfsAbsolutePath(rootfsDir, context.filesDir.absolutePath)
@@ -99,6 +108,7 @@ object AndroidRuntimeAssets {
 
         val tmpDir = File(runtimeDir, "tmp")
         tmpDir.mkdirs()
+        Log.i(TAG, "runtime assets prepare done elapsedMs=" + (System.currentTimeMillis() - startedAtMillis))
 
         Os.setenv("OPERIT_ANDROID_RUNTIME_DIR", runtimeDir.absolutePath, true)
         Os.setenv("OPERIT_ANDROID_NATIVE_LIBRARY_DIR", nativeLibraryDir.absolutePath, true)
@@ -136,6 +146,16 @@ object AndroidRuntimeAssets {
         return abi
     }
 
+    /// Reads one packaged text asset without duplicating its binary to app storage.
+    private fun readAssetText(context: Context, assetPath: String): String {
+        return context.assets.open(assetPath).use { input ->
+            input.bufferedReader().use { reader ->
+                reader.readText()
+            }
+        }
+    }
+
+    /// Copies one packaged asset to the app-private destination.
     private fun copyAsset(context: Context, assetPath: String, target: File) {
         target.parentFile?.mkdirs()
         context.assets.open(assetPath).use { input ->

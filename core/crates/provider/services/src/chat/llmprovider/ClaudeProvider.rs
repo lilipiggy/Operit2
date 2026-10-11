@@ -5,12 +5,16 @@ use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
 
 use super::OpenAIProvider::{StreamingJsonXmlConverter, StreamingJsonXmlEvent};
+use super::OpenAIResponsesProvider::strip_responses_protocol_markup;
 use super::StructuredToolCallBridge::StructuredToolCallBridge;
+use super::StreamingResponseLines::{decodeStreamingTail, takeNextStreamingLine};
+use super::ThinkingConfiguration::ThinkingConfigurationApplier;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, retry_error_text, retry_message, AIService, AiServiceError,
     SendMessageRequest, TokenCounts,
 };
 use crate::chat::llmprovider::LlmRetryPolicy::delay_retry_ms;
+use crate::chat::llmprovider::MediaLinkParser::MediaLinkParser;
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::HostRuntimeTaskSchedulerHost;
 use operit_model::PromptTurn::{PromptTurn, PromptTurnKind};
@@ -20,6 +24,7 @@ use operit_util::stream::RevisableTextStream::{
 };
 use operit_util::stream::Stream::FnStream;
 use operit_util::ChatMarkupRegex::ChatMarkupRegex;
+use operit_util::TokenCacheManager::TokenCacheManager;
 
 #[derive(Clone)]
 pub struct ClaudeProvider {
@@ -29,6 +34,7 @@ pub struct ClaudeProvider {
     pub provider_type: String,
     pub enable_tool_call: bool,
     pub custom_headers: Vec<(String, String)>,
+    enable_claude_1h_prompt_cache: bool,
     state: Arc<Mutex<ClaudeProviderState>>,
 }
 
@@ -38,6 +44,7 @@ struct ClaudeProviderState {
     cachedInputTokenCount: i64,
     outputTokenCount: i64,
     cancelled: bool,
+    tokenCacheManager: TokenCacheManager,
 }
 
 impl ClaudeProvider {
@@ -56,8 +63,15 @@ impl ClaudeProvider {
             provider_type,
             enable_tool_call,
             custom_headers,
+            enable_claude_1h_prompt_cache: false,
             state: Arc::new(Mutex::new(ClaudeProviderState::default())),
         }
+    }
+
+    /// Matches Kotlin enableClaude1hPromptCache; existing callers keep the default TTL.
+    pub fn with_claude_1h_prompt_cache(mut self, enabled: bool) -> Self {
+        self.enable_claude_1h_prompt_cache = enabled;
+        self
     }
 
     fn set_cancelled(&self, cancelled: bool) {
@@ -79,9 +93,15 @@ impl ClaudeProvider {
             .state
             .lock()
             .expect("ClaudeProvider state mutex poisoned");
-        state.inputTokenCount = token_counts.input;
-        state.cachedInputTokenCount = token_counts.cached_input;
-        state.outputTokenCount = token_counts.output;
+        state
+            .tokenCacheManager
+            .update_actual_tokens(token_counts.input, token_counts.cached_input);
+        state
+            .tokenCacheManager
+            .set_output_tokens(token_counts.output);
+        state.inputTokenCount = state.tokenCacheManager.total_input_token_count();
+        state.cachedInputTokenCount = state.tokenCacheManager.cached_input_token_count();
+        state.outputTokenCount = state.tokenCacheManager.output_token_count();
     }
 
     async fn waitUntilCancelled(self) {
@@ -147,7 +167,7 @@ impl ClaudeProvider {
         &self,
         request: &SendMessageRequest,
     ) -> Result<Value, AiServiceError> {
-        let (system, messages) = self.build_messages_and_count_tokens(&request.chat_history)?;
+        let (system, messages) = self.build_serialized_history(&request.chat_history)?;
         let mut object = Map::new();
         object.insert("model".to_string(), json!(self.model_name));
         object.insert("messages".to_string(), Value::Array(messages));
@@ -164,13 +184,45 @@ impl ClaudeProvider {
                 self.build_tool_definitions_for_claude(&request.available_tools)?,
             );
         }
-        self.add_parameters(&mut object, &request.model_parameters);
-        self.apply_thinking_format(&mut object, request);
-        self.apply_stable_cache_breakpoints(&mut object);
-        Ok(Value::Object(object))
+        let mut request_object = Value::Object(object);
+        ThinkingConfigurationApplier::apply(
+            &mut request_object,
+            &self.provider_type,
+            &self.model_name,
+            &self.api_endpoint,
+            request.enable_thinking,
+            request.thinking_quality_level,
+            &request.thinking_configurations,
+            &request.thinking_option_id,
+        )?;
+        let object = request_object
+            .as_object_mut()
+            .expect("thinking request remains an object");
+        self.add_parameters(object, &request.model_parameters);
+        self.apply_stable_cache_breakpoints(object);
+        self.calculate_and_store_input_tokens(object, true);
+        Ok(request_object)
     }
 
     pub fn build_messages_and_count_tokens(
+        &self,
+        chat_history: &[PromptTurn],
+    ) -> Result<(Value, Vec<Value>), AiServiceError> {
+        let mut object = self.build_cache_request_parts(chat_history, &[])?;
+        self.calculate_and_store_input_tokens(&object, true);
+        let system = object.remove("system").unwrap_or(Value::Null);
+        let messages = object
+            .remove("messages")
+            .and_then(|value| match value {
+                Value::Array(messages) => Some(messages),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok((system, messages))
+    }
+
+    /// Serializes the history before adding any cache policy or counting tokens.
+    fn build_serialized_history(
         &self,
         chat_history: &[PromptTurn],
     ) -> Result<(Value, Vec<Value>), AiServiceError> {
@@ -185,7 +237,7 @@ impl ClaudeProvider {
         for turn in provider_ready_history {
             match turn.kind {
                 PromptTurnKind::SYSTEM | PromptTurnKind::SUMMARY => {
-                    system_parts.push(turn.content.clone())
+                    system_parts.push(strip_responses_protocol_markup(&turn.content))
                 }
                 PromptTurnKind::USER => messages.push(
                     json!({"role": "user", "content": self.build_content_array(&turn.content)}),
@@ -212,26 +264,125 @@ impl ClaudeProvider {
                 }
             }
         }
-        let system = if system_parts.is_empty() {
+        let system_prompt = system_parts.join("\n\n");
+        let system = if system_prompt.trim().is_empty() {
             Value::Null
         } else {
-            Value::Array(
-                system_parts
-                    .into_iter()
-                    .map(|text| {
-                        json!({
-                            "type": "text",
-                            "text": text,
-                            "cache_control": {"type": "ephemeral"}
-                        })
-                    })
-                    .collect(),
-            )
+            json!([{"type": "text", "text": system_prompt}])
         };
         Ok((system, messages))
     }
 
-    pub fn apply_stable_cache_breakpoints(&self, _request_object: &mut Map<String, Value>) {}
+    fn cache_control_object(&self) -> Value {
+        if self.enable_claude_1h_prompt_cache {
+            json!({"type": "ephemeral", "ttl": "1h"})
+        } else {
+            json!({"type": "ephemeral"})
+        }
+    }
+
+    /// Adds the same three stable breakpoints as Kotlin, without replacing caller policies.
+    pub fn apply_stable_cache_breakpoints(&self, request_object: &mut Map<String, Value>) {
+        for field in ["tools", "system"] {
+            if let Some(block) = request_object
+                .get_mut(field)
+                .and_then(Value::as_array_mut)
+                .and_then(|blocks| blocks.last_mut())
+                .and_then(Value::as_object_mut)
+            {
+                block
+                    .entry("cache_control")
+                    .or_insert_with(|| self.cache_control_object());
+            }
+        }
+        if let Some(messages) = request_object
+            .get_mut("messages")
+            .and_then(Value::as_array_mut)
+        {
+            for message in messages.iter_mut().rev() {
+                let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                if let Some(block) = content.iter_mut().rev().find_map(Value::as_object_mut) {
+                    block
+                        .entry("cache_control")
+                        .or_insert_with(|| self.cache_control_object());
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Uses identical serialized content for send-time estimates and read-only preflight.
+    fn build_cache_request_parts(
+        &self,
+        history: &[PromptTurn],
+        tools: &[ToolPrompt],
+    ) -> Result<Map<String, Value>, AiServiceError> {
+        let (system, messages) = self.build_serialized_history(history)?;
+        let mut object = Map::new();
+        if !system.is_null() {
+            object.insert("system".to_string(), system);
+        }
+        object.insert("messages".to_string(), Value::Array(messages));
+        if self.enable_tool_call && !tools.is_empty() {
+            object.insert(
+                "tools".to_string(),
+                self.build_tool_definitions_for_claude(tools)?,
+            );
+        }
+        self.apply_stable_cache_breakpoints(&mut object);
+        Ok(object)
+    }
+
+    fn calculate_and_store_input_tokens(
+        &self,
+        object: &Map<String, Value>,
+        update_state: bool,
+    ) -> i64 {
+        let mut history = Vec::new();
+        if let Some(system) = object
+            .get("system")
+            .filter(|value| value.as_array().is_some_and(|array| !array.is_empty()))
+        {
+            history.push(("system".to_string(), stable_json_value(system)));
+        }
+        if let Some(messages) = object.get("messages").and_then(Value::as_array) {
+            for message in messages {
+                let Some(role) = message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .filter(|role| !role.is_empty())
+                else {
+                    continue;
+                };
+                let content = message
+                    .get("content")
+                    .filter(|value| value.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                history.push((role.to_string(), stable_json_value(&content)));
+            }
+        }
+        let tools = object
+            .get("tools")
+            .filter(|value| value.as_array().is_some_and(|array| !array.is_empty()))
+            .map(stable_json_value);
+        let mut state = self
+            .state
+            .lock()
+            .expect("ClaudeProvider state mutex poisoned");
+        let count = state.tokenCacheManager.calculate_input_tokens(
+            &history,
+            tools.as_deref(),
+            update_state,
+        );
+        if update_state {
+            state.inputTokenCount = state.tokenCacheManager.total_input_token_count();
+            state.cachedInputTokenCount = state.tokenCacheManager.cached_input_token_count();
+        }
+        count
+    }
 
     fn build_tool_definitions_for_claude(
         &self,
@@ -252,8 +403,32 @@ impl ClaudeProvider {
         Ok(Value::Array(tools))
     }
 
+    /// Builds Claude content blocks from text and registered image links.
     fn build_content_array(&self, text: &str) -> Value {
-        json!([{"type": "text", "text": text}])
+        if !MediaLinkParser::has_image_links(text) {
+            return json!([{"type": "text", "text": text}]);
+        }
+
+        let image_links = MediaLinkParser::extract_image_links(text);
+        let text_without_links = MediaLinkParser::remove_image_links(text).trim().to_string();
+        let mut content_blocks = Vec::new();
+        for link in image_links {
+            content_blocks.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": link.mime_type,
+                    "data": link.base64_data,
+                },
+            }));
+        }
+        if !text_without_links.is_empty() {
+            content_blocks.push(json!({"type": "text", "text": text_without_links}));
+        }
+        if content_blocks.is_empty() {
+            content_blocks.push(json!({"type": "text", "text": "[Empty]"}));
+        }
+        Value::Array(content_blocks)
     }
 
     fn build_assistant_content_blocks(
@@ -433,34 +608,131 @@ impl ClaudeProvider {
         Ok(headers)
     }
 
+    /// Streaming usage is a partial update: omitted fields retain prior values,
+    /// while explicitly reported zeroes replace them (KT ProviderUsageNormalizer).
+    fn apply_streaming_usage(&mut self, usage: &Value, accumulated: &mut Map<String, Value>) {
+        self.apply_streaming_usage_with_format(usage, accumulated, false);
+    }
+
+    fn apply_streaming_usage_with_format(
+        &mut self,
+        usage: &Value,
+        accumulated: &mut Map<String, Value>,
+        open_ai_compatible: bool,
+    ) {
+        if let Some(fields) = usage.as_object() {
+            accumulated.extend(fields.clone());
+            self.apply_usage_with_format(
+                Some(&Value::Object(accumulated.clone())),
+                open_ai_compatible,
+            );
+        }
+    }
+
     fn apply_usage(&mut self, usage: Option<&Value>) -> TokenCounts {
+        self.apply_usage_with_format(usage, false)
+    }
+
+    fn apply_usage_with_format(
+        &mut self,
+        usage: Option<&Value>,
+        open_ai_compatible: bool,
+    ) -> TokenCounts {
+        let has_usage = usage.is_some_and(|value| {
+            [
+                "input_tokens",
+                "prompt_tokens",
+                "cache_read_input_tokens",
+                "cached_tokens",
+                "cache_creation_input_tokens",
+                "cache_creation",
+                "output_tokens",
+                "completion_tokens",
+            ]
+            .iter()
+            .any(|field| value.get(*field).is_some())
+        });
+        if !has_usage {
+            let state = self
+                .state
+                .lock()
+                .expect("ClaudeProvider state mutex poisoned");
+            return TokenCounts {
+                input: state
+                    .inputTokenCount
+                    .saturating_sub(state.cachedInputTokenCount),
+                cached_input: state.cachedInputTokenCount,
+                output: state.outputTokenCount,
+            };
+        }
         let cached_input = usage
             .and_then(|value| {
                 value
                     .get("cache_read_input_tokens")
+                    .or_else(|| value.pointer("/prompt_tokens_details/cached_tokens"))
                     .or_else(|| value.pointer("/input_tokens_details/cached_tokens"))
                     .or_else(|| value.get("cached_tokens"))
             })
             .and_then(Value::as_i64)
             .unwrap_or(0)
-            .max(0) as i64;
+            .max(0);
         let cache_creation = usage
-            .and_then(|value| value.get("cache_creation_input_tokens"))
-            .and_then(Value::as_i64)
+            .and_then(|value| {
+                value
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_i64)
+                    .or_else(|| {
+                        value
+                            .get("cache_creation")
+                            .and_then(Value::as_object)
+                            .map(|fields| {
+                                fields
+                                    .values()
+                                    .filter_map(Value::as_i64)
+                                    .fold(0i64, i64::saturating_add)
+                            })
+                    })
+            })
             .unwrap_or(0)
-            .max(0) as i64;
+            .max(0);
+        // Anthropic input_tokens excludes cache reads/creation; OpenAI's
+        // prompt_tokens includes cached tokens. Match KT's two usage parsers.
         let input_base = usage
-            .and_then(|value| value.get("input_tokens"))
+            .and_then(|value| {
+                if open_ai_compatible {
+                    return value
+                        .get("prompt_tokens")
+                        .or_else(|| value.get("input_tokens"))
+                        .and_then(Value::as_i64)
+                        .map(|total| total.saturating_sub(cached_input));
+                }
+                value
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .or_else(|| {
+                        value
+                            .get("prompt_tokens")
+                            .and_then(Value::as_i64)
+                            .map(|total| total.saturating_sub(cached_input))
+                    })
+            })
+            .unwrap_or(0)
+            .max(0);
+        let output = usage
+            .and_then(|value| {
+                value
+                    .get("output_tokens")
+                    .or_else(|| value.get("completion_tokens"))
+            })
             .and_then(Value::as_i64)
             .unwrap_or(0)
-            .max(0) as i64;
-        let input = input_base + cache_creation;
-        let output = usage
-            .and_then(|value| value.get("output_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i64;
+            .max(0);
         let token_counts = TokenCounts {
-            input,
+            input: input_base.saturating_add(if open_ai_compatible {
+                0
+            } else {
+                cache_creation
+            }),
             cached_input,
             output,
         };
@@ -494,11 +766,14 @@ impl AIService for ClaudeProvider {
         format!("{}:{}", self.provider_type, self.model_name)
     }
     fn reset_token_counts(&mut self) {
-        self.set_token_counts(TokenCounts {
-            input: 0,
-            cached_input: 0,
-            output: 0,
-        });
+        let mut state = self
+            .state
+            .lock()
+            .expect("ClaudeProvider state mutex poisoned");
+        state.tokenCacheManager.reset_token_counts();
+        state.inputTokenCount = 0;
+        state.cachedInputTokenCount = 0;
+        state.outputTokenCount = 0;
     }
     fn cancel_streaming(&mut self) {
         self.set_cancelled(true);
@@ -559,12 +834,8 @@ impl AIService for ClaudeProvider {
         chat_history: &[PromptTurn],
         available_tools: &[ToolPrompt],
     ) -> Result<i64, AiServiceError> {
-        let history_chars: usize = chat_history.iter().map(|turn| turn.content.len()).sum();
-        let tool_chars: usize = available_tools
-            .iter()
-            .map(|tool| tool.name.len() + tool.description.len())
-            .sum();
-        Ok(((history_chars + tool_chars + 3) / 4) as i64)
+        let object = self.build_cache_request_parts(chat_history, available_tools)?;
+        Ok(self.calculate_and_store_input_tokens(&object, false))
     }
 }
 
@@ -710,7 +981,11 @@ impl ClaudeProvider {
             }
 
             let json_response = self.readResponseJson(response).await?;
-            let token_counts = self.apply_usage(json_response.get("usage"));
+            let token_counts = if json_response.get("choices").is_some() {
+                self.apply_usage_with_format(json_response.get("usage"), true)
+            } else {
+                self.apply_usage(json_response.get("usage"))
+            };
             let mut chunks = Vec::new();
             if let Some(content) = json_response.get("content").and_then(Value::as_array) {
                 for part in content {
@@ -736,17 +1011,14 @@ impl ClaudeProvider {
         }
     }
 
+    /// Parses response lines after their complete UTF-8 bytes have arrived.
     async fn process_streaming_response(
         &mut self,
         response: reqwest::Response,
     ) -> Result<Box<dyn RevisableTextStreamLike>, AiServiceError> {
         let mut chunks = Vec::new();
-        let mut token_counts = TokenCounts {
-            input: 0,
-            cached_input: 0,
-            output: 0,
-        };
-        let mut pending_line = String::new();
+        let mut accumulated_usage = Map::new();
+        let mut pending_bytes = Vec::new();
         let mut bytes_stream = response.bytes_stream();
         let mut current_tool_parser: Option<StreamingJsonXmlConverter> = None;
         let mut current_tool_tag_name: Option<String> = None;
@@ -761,14 +1033,12 @@ impl ClaudeProvider {
             }
             let bytes =
                 item.map_err(|error| AiServiceError::ConnectionFailed(error.to_string()))?;
-            pending_line.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(newline_index) = pending_line.find('\n') {
-                let line = pending_line[..newline_index].trim().to_string();
-                pending_line = pending_line[newline_index + 1..].to_string();
+            pending_bytes.extend_from_slice(&bytes);
+            while let Some(line) = takeNextStreamingLine(&mut pending_bytes)? {
                 self.process_streaming_line(
                     &line,
                     &mut chunks,
-                    &mut token_counts,
+                    &mut accumulated_usage,
                     &mut current_tool_parser,
                     &mut current_tool_tag_name,
                     &mut is_in_tool_call,
@@ -778,12 +1048,12 @@ impl ClaudeProvider {
                 )?;
             }
         }
-        let pending = pending_line.trim().to_string();
+        let pending = decodeStreamingTail(&mut pending_bytes)?;
         if !pending.is_empty() {
             self.process_streaming_line(
                 &pending,
                 &mut chunks,
-                &mut token_counts,
+                &mut accumulated_usage,
                 &mut current_tool_parser,
                 &mut current_tool_tag_name,
                 &mut is_in_tool_call,
@@ -800,7 +1070,10 @@ impl ClaudeProvider {
                 if !text.is_empty() {
                     chunks.push(text);
                 }
-                token_counts = self.apply_usage(json_response.get("usage"));
+                self.apply_usage_with_format(
+                    json_response.get("usage"),
+                    json_response.get("choices").is_some(),
+                );
             }
         }
         if is_in_tool_call {
@@ -814,7 +1087,6 @@ impl ClaudeProvider {
         if is_in_thinking_block {
             chunks.push("</think>\n".to_string());
         }
-        self.set_token_counts(token_counts);
         Ok(response_stream_from_chunks(chunks))
     }
 
@@ -823,7 +1095,7 @@ impl ClaudeProvider {
         &mut self,
         line: &str,
         chunks: &mut Vec<String>,
-        token_counts: &mut TokenCounts,
+        accumulated_usage: &mut Map<String, Value>,
         current_tool_parser: &mut Option<StreamingJsonXmlConverter>,
         current_tool_tag_name: &mut Option<String>,
         is_in_tool_call: &mut bool,
@@ -849,6 +1121,9 @@ impl ClaudeProvider {
             .and_then(Value::as_str)
             .unwrap_or("");
         if event_type.is_empty() {
+            if let Some(usage) = json_response.get("usage") {
+                self.apply_streaming_usage_with_format(usage, accumulated_usage, true);
+            }
             if let Some(content) = json_response
                 .pointer("/choices/0/delta/content")
                 .and_then(Value::as_str)
@@ -863,7 +1138,7 @@ impl ClaudeProvider {
         match event_type {
             "message_start" => {
                 if let Some(usage) = json_response.pointer("/message/usage") {
-                    *token_counts = self.apply_usage(Some(usage));
+                    self.apply_streaming_usage(usage, accumulated_usage);
                 }
             }
             "content_block_start" => {
@@ -957,7 +1232,7 @@ impl ClaudeProvider {
             }
             "message_delta" => {
                 if let Some(usage) = json_response.get("usage") {
-                    *token_counts = self.apply_usage(Some(usage));
+                    self.apply_streaming_usage(usage, accumulated_usage);
                 }
             }
             "message_stop" => {}
@@ -1248,3 +1523,41 @@ fn xml_unescape(text: &str) -> String {
         .replace("&apos;", "'")
         .replace("&amp;", "&")
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/ClaudeProviderTests.rs"]
+mod tests;
+
+/// Canonicalizes object keys while preserving array/content block order.
+fn stable_json_value(value: &Value) -> String {
+    match value {
+        Value::Object(object) => {
+            let mut keys: Vec<_> = object.keys().collect();
+            keys.sort();
+            let fields: Vec<_> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("JSON key"),
+                        stable_json_value(&object[key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", fields.join(","))
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(stable_json_value)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/ClaudeProviderCacheTests.rs"]
+mod cache_tests;

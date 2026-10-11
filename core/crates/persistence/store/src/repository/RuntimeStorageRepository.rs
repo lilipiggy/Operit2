@@ -5,7 +5,8 @@ use base64::Engine;
 
 use operit_util::OperitPaths;
 use operit_util::RuntimeStorageLayout::{
-    runtimeStorageOwnership, RuntimeStorageOwnership, RUNTIME_SYNC_DIR_PATH,
+    runtimeStorageOwnership, RuntimeStorageOwnership, RUNTIME_APPLICATION_ZOOM_PATH,
+    RUNTIME_SYNC_DIR_PATH,
 };
 
 pub struct RuntimeStorageRepository;
@@ -101,6 +102,12 @@ impl RuntimeStorageRepository {
     }
 
     #[allow(non_snake_case)]
+    /// Returns the CoreNode-local interface zoom path, excluded from Space sync.
+    pub fn applicationZoomPath(&self) -> String {
+        RUNTIME_APPLICATION_ZOOM_PATH.to_string()
+    }
+
+    #[allow(non_snake_case)]
     /// Returns the runtime storage path for browser bookmark data.
     pub fn webSessionBrowserBookmarksPath(&self) -> String {
         OperitPaths::RUNTIME_WEBSESSION_BROWSER_BOOKMARKS_PATH.to_string()
@@ -131,6 +138,12 @@ impl RuntimeStorageRepository {
     }
 
     #[allow(non_snake_case)]
+    /// Returns the runtime storage directory for external plugin packages.
+    pub fn externalPackagesDirPath(&self) -> String {
+        OperitPaths::EXTENSIONS_PACKAGES_DIR_PATH.to_string()
+    }
+
+    #[allow(non_snake_case)]
     /// Returns the runtime storage directory path for imported theme assets.
     pub fn themeAssetsDirPath(&self) -> String {
         OperitPaths::RUNTIME_THEME_ASSETS_DIR_PATH.to_string()
@@ -158,12 +171,6 @@ impl RuntimeStorageRepository {
     /// Returns the runtime storage directory for Compose DSL selected files.
     pub fn composeDslWebViewFilesDirPath(&self) -> String {
         OperitPaths::RUNTIME_COMPOSE_DSL_WEBVIEW_FILES_DIR_PATH.to_string()
-    }
-
-    #[allow(non_snake_case)]
-    /// Returns the runtime storage directory for materialized Link Access web assets.
-    pub fn linkAccessWebAssetsDirPath(&self) -> String {
-        OperitPaths::RUNTIME_LINK_ACCESS_WEB_ASSETS_DIR_PATH.to_string()
     }
 
     #[allow(non_snake_case)]

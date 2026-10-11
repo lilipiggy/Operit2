@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -19,13 +20,14 @@ use crate::chat::enhance::ConversationService::{
 };
 use crate::chat::enhance::MultiServiceManager::{MultiServiceManager, SharedAIServiceHandle};
 use crate::chat::hooks::PromptHookRegistry::{PromptHookContext, PromptHookRegistry};
-use crate::chat::library::MemoryLibrary::{promptTurnsToMemoryPairs, MemoryLibrary};
+use crate::chat::library::MemoryLibrary::MemoryLibrary;
 use crate::chat::llmprovider::AIService::{
     response_stream_from_chunks, AiServiceError, SendMessageRequest, SharedAiResponseStream,
     TokenCounts,
 };
 use crate::runtime_support::{ProviderRuntimeContext, ProviderRuntimeSupport};
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
+use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_link::CoreValue;
 use operit_model::CharacterCard::CharacterCardMemoryBindingMode;
 use operit_model::FunctionType::FunctionType;
@@ -38,7 +40,8 @@ use operit_model::ToolPrompt::{ToolParameterSchema, ToolPrompt};
 use operit_store::repository::UsageStatisticsStore::{UsageRequestSource, UsageStatisticsStore};
 use operit_store::repository::UserMarkdownRepository::UserMarkdownRepository;
 use operit_store::RuntimeStorageHost::defaultRuntimeStorageHost;
-use operit_tools::runtime_support::ToolRuntimeSupport;
+use operit_tools::files::PathMapper::{PathMapper, ResolvedVfsPath};
+use operit_tools::runtime_support::{CoreRouteResumeContext, ToolRuntimeSupport};
 use operit_tools::tools::climode::CliToolModeSupport::{
     CliToolModeSupport, ToolExposureMode as ResolvedToolExposureMode,
 };
@@ -79,12 +82,14 @@ pub struct EnhancedAIService {
     pub shared_state: Arc<Mutex<EnhancedAISharedState>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EnhancedAISharedState {
     pub per_request_token_counts: Option<(i64, i64)>,
     pub request_window_estimate: Option<i64>,
     pub active_execution_contexts: BTreeMap<i32, MessageExecutionContext>,
     pub next_execution_context_id: i32,
+    /// Invalidates sends that are still waiting to register their response task.
+    pub execution_generation: u64,
     pub tool_execution_jobs: BTreeMap<String, ToolExecutionJobMirror>,
     pub accumulated_input_token_count: i64,
     pub accumulated_output_token_count: i64,
@@ -96,8 +101,73 @@ pub struct EnhancedAISharedState {
     pub current_complete_callback_registered: bool,
     pub last_reply_content: Option<String>,
     pub last_provider_model: Option<String>,
+    pub last_turn_model_identity: Option<TurnModelIdentity>,
     pub last_turn_token_snapshot: Option<TurnTokenSnapshot>,
     pub pendingRouteChange: Option<RouteChangeIntent>,
+}
+
+/// Display metadata captured from the resolved model configuration for one turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnModelIdentity {
+    pub providerName: String,
+    pub modelName: String,
+}
+
+impl EnhancedAISharedState {
+    /// Registers the execution before its worker can be queued or cancelled.
+    fn createExecutionContext(
+        &mut self,
+        expectedGeneration: u64,
+        options: &SendMessageOptions,
+    ) -> Result<MessageExecutionContext, AiServiceError> {
+        if self.execution_generation != expectedGeneration
+            || options
+                .cancellationToken
+                .as_ref()
+                .is_some_and(MessageCancellationToken::isCancelled)
+        {
+            return Err(AiServiceError::RequestCancelled);
+        }
+        self.next_execution_context_id = self
+            .next_execution_context_id
+            .checked_add(1)
+            .expect("execution context id must not overflow");
+        let mut context = MessageExecutionContext::new(
+            self.next_execution_context_id,
+            options.chatHistory.clone(),
+            options.workspacePath.clone(),
+            options.workspaceFolders.clone(),
+            options.groupParticipantNamesText.clone(),
+            options.proxySenderName.clone(),
+            MutableSharedStreamMirror::new(usize::MAX),
+        );
+        context.cancellationToken = options.cancellationToken.clone();
+        self.active_execution_contexts
+            .insert(context.executionId, context.clone());
+        Ok(context)
+    }
+
+    /// Atomically invalidates running executions and sends not yet registered.
+    fn invalidateExecutionContexts(&mut self) {
+        self.execution_generation = self
+            .execution_generation
+            .checked_add(1)
+            .expect("execution generation must not overflow");
+        for context in self.active_execution_contexts.values_mut() {
+            context.isConversationActive = false;
+        }
+    }
+
+    /// Publishes the selected model before the background response task starts.
+    fn beginTurn(&mut self, config: &ResolvedModelConfig, providerModel: String) {
+        self.last_provider_model = Some(providerModel);
+        self.last_turn_model_identity = Some(TurnModelIdentity {
+            providerName: config.providerName.clone(),
+            modelName: config.modelId.clone(),
+        });
+        self.last_reply_content = None;
+        self.last_turn_token_snapshot = None;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,13 +187,29 @@ pub trait SendMessageCallbacks: Send + Sync {
     fn onInputProcessingStateChanged(&self, _state: InputProcessingState) {}
 }
 
+/// Monotonic per-send cancellation gate, including work not yet registered or started.
+#[derive(Clone, Debug, Default)]
+pub struct MessageCancellationToken(Arc<AtomicBool>);
+
+impl MessageCancellationToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn isCancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 pub struct SendMessageOptions {
+    pub cancellationToken: Option<MessageCancellationToken>,
     pub message: String,
     pub maxTokens: i32,
     pub tokenUsageThreshold: f64,
     pub chatId: Option<String>,
     pub chatHistory: Vec<PromptTurn>,
     pub workspacePath: Option<String>,
+    pub workspaceFolders: Vec<String>,
     pub functionType: FunctionType,
     pub promptFunctionType: PromptFunctionType,
     pub enableThinking: bool,
@@ -155,12 +241,14 @@ pub struct ResumeRequest {
 impl SendMessageOptions {
     pub fn new() -> Self {
         Self {
+            cancellationToken: None,
             message: String::new(),
             maxTokens: 0,
             tokenUsageThreshold: 0.0,
             chatId: None,
             chatHistory: Vec::new(),
             workspacePath: None,
+            workspaceFolders: Vec::new(),
             functionType: FunctionType::CHAT,
             promptFunctionType: PromptFunctionType::CHAT,
             enableThinking: false,
@@ -189,11 +277,13 @@ impl SendMessageOptions {
 #[derive(Clone, Debug)]
 pub struct MessageExecutionContext {
     pub executionId: i32,
+    pub cancellationToken: Option<MessageCancellationToken>,
     pub streamBuffer: String,
     pub roundManager: ConversationRoundManagerMirror,
     pub isConversationActive: bool,
     pub conversationHistory: Vec<PromptTurn>,
     pub workspacePath: Option<String>,
+    pub workspaceFolders: Vec<String>,
     pub groupParticipantNamesText: Option<String>,
     pub proxySenderName: Option<String>,
     pub eventChannel: MutableSharedStreamMirror<TextStreamEventMirror>,
@@ -204,17 +294,20 @@ impl MessageExecutionContext {
         executionId: i32,
         conversationHistory: Vec<PromptTurn>,
         workspacePath: Option<String>,
+        workspaceFolders: Vec<String>,
         groupParticipantNamesText: Option<String>,
         proxySenderName: Option<String>,
         eventChannel: MutableSharedStreamMirror<TextStreamEventMirror>,
     ) -> Self {
         Self {
             executionId,
+            cancellationToken: None,
             streamBuffer: String::new(),
             roundManager: ConversationRoundManagerMirror::new(),
             isConversationActive: true,
             conversationHistory,
             workspacePath,
+            workspaceFolders,
             groupParticipantNamesText,
             proxySenderName,
             eventChannel,
@@ -372,39 +465,45 @@ impl ConversationRoundManagerMirror {
 pub struct RuntimePromptHistoryHooks;
 
 impl PromptHistoryHookDispatcher for RuntimePromptHistoryHooks {
-    fn dispatch_prompt_history_hooks(&self, context: HistoryHookContext) -> HistoryHookContext {
-        let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
-            stage: context.stage.clone(),
-            chat_id: context.chat_id.clone(),
-            function_type: None,
-            prompt_function_type: Some(context.prompt_function_type.clone()),
-            use_english: context.use_english,
-            raw_input: None,
-            processed_input: Some(context.processed_input.clone()),
-            chat_history: context.chat_history.clone(),
-            prepared_history: context.prepared_history.clone(),
-            system_prompt: None,
-            tool_prompt: None,
-            model_parameters: Vec::new(),
-            available_tools: Vec::new(),
-            metadata: btree_to_value_map(&context.metadata),
-            on_hook_timeout: None,
-        });
+    fn dispatch_prompt_history_hooks(
+        &self,
+        context: HistoryHookContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HistoryHookContext> + Send + '_>> {
+        Box::pin(async move {
+            let dispatched = PromptHookRegistry::dispatchPromptHistoryHooks(PromptHookContext {
+                stage: context.stage.clone(),
+                chat_id: context.chat_id.clone(),
+                function_type: None,
+                prompt_function_type: Some(context.prompt_function_type.clone()),
+                use_english: context.use_english,
+                raw_input: None,
+                processed_input: Some(context.processed_input.clone()),
+                chat_history: context.chat_history.clone(),
+                prepared_history: context.prepared_history.clone(),
+                system_prompt: None,
+                tool_prompt: None,
+                model_parameters: Vec::new(),
+                available_tools: Vec::new(),
+                metadata: btree_to_value_map(&context.metadata),
+                on_hook_timeout: None,
+            })
+            .await;
 
-        HistoryHookContext {
-            stage: dispatched.stage,
-            chat_id: dispatched.chat_id,
-            prompt_function_type: dispatched
-                .prompt_function_type
-                .expect("PromptHistoryHook must preserve prompt_function_type"),
-            processed_input: dispatched
-                .processed_input
-                .expect("PromptHistoryHook must preserve processed_input"),
-            chat_history: dispatched.chat_history,
-            prepared_history: dispatched.prepared_history,
-            use_english: dispatched.use_english,
-            metadata: value_to_btree_map(dispatched.metadata),
-        }
+            HistoryHookContext {
+                stage: dispatched.stage,
+                chat_id: dispatched.chat_id,
+                prompt_function_type: dispatched
+                    .prompt_function_type
+                    .expect("PromptHistoryHook must preserve prompt_function_type"),
+                processed_input: dispatched
+                    .processed_input
+                    .expect("PromptHistoryHook must preserve processed_input"),
+                chat_history: dispatched.chat_history,
+                prepared_history: dispatched.prepared_history,
+                use_english: dispatched.use_english,
+                metadata: value_to_btree_map(dispatched.metadata),
+            }
+        })
     }
 }
 
@@ -414,86 +513,114 @@ pub struct RuntimeSystemPromptComposer {
 }
 
 impl SystemPromptComposer for RuntimeSystemPromptComposer {
-    fn get_system_prompt_with_custom_prompts(
-        &self,
-        request: &PrepareConversationHistoryRequest,
+    fn get_system_prompt_with_custom_prompts<'a>(
+        &'a self,
+        request: &'a PrepareConversationHistoryRequest,
         use_english: bool,
-    ) -> String {
-        let custom_system_prompt_template = match &request.custom_system_prompt_template {
-            Some(value) => value.clone(),
-            None => String::new(),
-        };
-        let group_participant_names_text = match &request.group_participant_names_text {
-            Some(value) => value.clone(),
-            None => String::new(),
-        };
-        let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
-        let package_manager = self.tool_handler.getOrCreatePackageManager();
-        let package_manager_guard = package_manager
-            .lock()
-            .expect("package manager mutex poisoned");
-        let enabled_packages = package_manager_guard
-            .getEnabledPackageNames()
-            .into_iter()
-            .filter_map(|package_name| {
-                package_manager_guard
-                    .getEffectivePackageTools(&package_name)
-                    .filter(|_| !package_manager_guard.isToolPkgContainer(&package_name))
-                    .map(|tool_package| PackageInfo {
-                        name: package_name,
-                        description: tool_package.description.resolve(use_english),
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
+        Box::pin(async move {
+            let custom_system_prompt_template = match &request.custom_system_prompt_template {
+                Some(value) => value.clone(),
+                None => String::new(),
+            };
+            let group_participant_names_text = match &request.group_participant_names_text {
+                Some(value) => value.clone(),
+                None => String::new(),
+            };
+            let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
+            // Use the same host-owned roots as file tools, not a guessed storage location.
+            // Resolve afresh for every request so workspace switches cannot retain stale paths.
+            let context = self.tool_handler.getContext();
+            let workspace_path_mappings = context
+                .runtimeStorageHost
+                .as_ref()
+                .and_then(|storage| {
+                    Some(PathMapper::new(
+                        storage.runtimeRootDir()?,
+                        storage.workspaceRootDir()?,
+                        storage.clone(),
+                    ))
+                })
+                .map(|mapper| {
+                    resolve_workspace_path_mappings(
+                        &mapper,
+                        request.workspace_path.as_deref(),
+                        &request.workspace_folders,
+                    )
+                })
+                .unwrap_or_default();
+            let package_manager = self.tool_handler.getOrCreatePackageManager();
+            let (enabled_packages, mcp_servers) = {
+                let package_manager_guard = package_manager
+                    .lock()
+                    .expect("package manager mutex poisoned");
+                let enabled_packages = package_manager_guard
+                    .getEnabledPackageNames()
+                    .into_iter()
+                    .filter_map(|package_name| {
+                        package_manager_guard
+                            .getEffectivePackageTools(&package_name)
+                            .filter(|_| !package_manager_guard.isToolPkgContainer(&package_name))
+                            .map(|tool_package| PackageInfo {
+                                name: package_name,
+                                description: tool_package.description.resolve(use_english),
+                            })
                     })
-            })
-            .collect::<Vec<_>>();
-        let mcp_servers = package_manager_guard
-            .getAvailableServerPackages()
-            .into_iter()
-            .map(|(name, server_config)| PackageInfo {
-                name,
-                description: server_config.description,
-            })
-            .collect::<Vec<_>>();
-        drop(package_manager_guard);
-        let skill_packages = self
-            .provider_runtime_context
-            .support()
-            .aiVisibleSkillPackages()
-            .expect("provider runtime support must provide skill packages")
-            .into_iter()
-            .map(|package| PackageInfo {
-                name: package.name,
-                description: package.description,
-            })
-            .collect::<Vec<_>>();
-        SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
-            base: SystemPromptOptions {
-                chat_id: request.chat_id.clone(),
-                workspace_path: request.workspace_path.clone(),
-                use_english,
-                custom_system_prompt_template,
-                enable_tools: true,
-                has_image_recognition: request.has_image_recognition,
-                chat_model_has_direct_image: request.chat_model_has_direct_image,
-                has_audio_recognition: request.has_audio_recognition,
-                has_video_recognition: request.has_video_recognition,
-                chat_model_has_direct_audio: request.chat_model_has_direct_audio,
-                chat_model_has_direct_video: request.chat_model_has_direct_video,
-                use_tool_call_api: request.use_tool_call_api,
-                tool_exposure_mode: match request.tool_exposure_mode {
-                    ToolExposureMode::Full => SystemToolExposureMode::FULL,
-                    ToolExposureMode::Cli => SystemToolExposureMode::CLI,
+                    .collect::<Vec<_>>();
+                let mcp_servers = package_manager_guard
+                    .getAvailableServerPackages()
+                    .into_iter()
+                    .map(|(name, server_config)| PackageInfo {
+                        name,
+                        description: server_config.description,
+                    })
+                    .collect::<Vec<_>>();
+                (enabled_packages, mcp_servers)
+            };
+            let skill_packages = self
+                .provider_runtime_context
+                .support()
+                .aiVisibleSkillPackages()
+                .expect("provider runtime support must provide skill packages")
+                .into_iter()
+                .map(|package| PackageInfo {
+                    name: package.name,
+                    description: package.description,
+                })
+                .collect::<Vec<_>>();
+            SystemPromptConfig::getSystemPromptWithCustomPrompts(SystemPromptWithCustomOptions {
+                base: SystemPromptOptions {
+                    chat_id: request.chat_id.clone(),
+                    workspace_path: request.workspace_path.clone(),
+                    workspace_folders: request.workspace_folders.clone(),
+                    workspace_path_mappings,
+                    use_english,
+                    custom_system_prompt_template,
+                    enable_tools: true,
+                    has_image_recognition: request.has_image_recognition,
+                    chat_model_has_direct_image: request.chat_model_has_direct_image,
+                    has_audio_recognition: request.has_audio_recognition,
+                    has_video_recognition: request.has_video_recognition,
+                    chat_model_has_direct_audio: request.chat_model_has_direct_audio,
+                    chat_model_has_direct_video: request.chat_model_has_direct_video,
+                    use_tool_call_api: request.use_tool_call_api,
+                    tool_exposure_mode: match request.tool_exposure_mode {
+                        ToolExposureMode::Full => SystemToolExposureMode::FULL,
+                        ToolExposureMode::Cli => SystemToolExposureMode::CLI,
+                    },
+                    host_environment,
+                    enabled_packages,
+                    mcp_servers,
+                    skill_packages,
+                    hook_metadata: btree_to_value_map(&request.active_prompt_metadata),
+                    ..SystemPromptOptions::default()
                 },
-                host_environment,
-                enabled_packages,
-                mcp_servers,
-                skill_packages,
-                hook_metadata: btree_to_value_map(&request.active_prompt_metadata),
-                ..SystemPromptOptions::default()
-            },
-            custom_intro_prompt: request.intro_prompt.clone(),
-            enable_group_orchestration_hint: request.enable_group_orchestration_hint,
-            group_orchestration_role_name: request.ai_name.clone(),
-            group_participant_names_text,
+                custom_intro_prompt: request.intro_prompt.clone(),
+                enable_group_orchestration_hint: request.enable_group_orchestration_hint,
+                group_orchestration_role_name: request.ai_name.clone(),
+                group_participant_names_text,
+            })
+            .await
         })
     }
 }
@@ -522,25 +649,7 @@ impl EnhancedAIService {
             tool_processing_scope: ToolProcessingScopeMirror,
             package_manager: PackageManagerMirror,
             provider_runtime_context,
-            shared_state: Arc::new(Mutex::new(EnhancedAISharedState {
-                per_request_token_counts: None,
-                request_window_estimate: None,
-                active_execution_contexts: BTreeMap::new(),
-                next_execution_context_id: 0,
-                tool_execution_jobs: BTreeMap::new(),
-                accumulated_input_token_count: 0,
-                accumulated_output_token_count: 0,
-                accumulated_cached_input_token_count: 0,
-                current_request_input_token_count: 0,
-                current_request_output_token_count: 0,
-                current_request_cached_input_token_count: 0,
-                current_response_callback_registered: false,
-                current_complete_callback_registered: false,
-                last_reply_content: None,
-                last_provider_model: None,
-                last_turn_token_snapshot: None,
-                pendingRouteChange: None,
-            })),
+            shared_state: Arc::new(Mutex::new(EnhancedAISharedState::default())),
         }
     }
 
@@ -630,12 +739,16 @@ impl EnhancedAIService {
         Ok(windowSize)
     }
 
-    pub fn applyPromptFinalizeHooks(
+    pub async fn applyPromptFinalizeHooks<F, Fut>(
         &self,
         initialContext: PromptHookContext,
-        dispatchHooks: fn(PromptHookContext) -> PromptHookContext,
-    ) -> PromptHookContext {
-        dispatchHooks(initialContext)
+        dispatchHooks: F,
+    ) -> PromptHookContext
+    where
+        F: FnOnce(PromptHookContext) -> Fut,
+        Fut: std::future::Future<Output = PromptHookContext>,
+    {
+        dispatchHooks(initialContext).await
     }
 
     pub fn bypassPromptHooks(&self, context: PromptHookContext) -> PromptHookContext {
@@ -674,12 +787,14 @@ impl EnhancedAIService {
         )
     }
 
-    pub fn prepareConversationHistory(
+    /// Prepares provider-facing history with the complete workspace folder set.
+    pub async fn prepareConversationHistory(
         &mut self,
         chatHistory: Vec<PromptTurn>,
         processedInput: String,
         chatId: Option<String>,
         workspacePath: Option<String>,
+        workspaceFolders: Vec<String>,
         promptFunctionType: PromptFunctionType,
         customSystemPromptTemplate: Option<String>,
         roleCardId: Option<String>,
@@ -708,38 +823,42 @@ impl EnhancedAIService {
             tool_handler: self.tool_handler.clone(),
             provider_runtime_context: self.provider_runtime_context.clone(),
         };
-        self.conversation_service.prepare_conversation_history(
-            PrepareConversationHistoryRequest {
-                chat_history: chatHistory,
-                processed_input: processedInput,
-                chat_id: chatId,
-                workspace_path: workspacePath,
-                prompt_function_type: prompt_function_type_name(&promptFunctionType).to_string(),
-                custom_system_prompt_template: customSystemPromptTemplate,
-                role_card_id: roleCardId,
-                enable_group_orchestration_hint: enableGroupOrchestrationHint,
-                group_participant_names_text: groupParticipantNamesText,
-                proxy_sender_name: proxySenderName,
-                has_image_recognition: !isSubTask && runtime.hasImageRecognition,
-                has_audio_recognition: !isSubTask && runtime.hasAudioRecognition,
-                has_video_recognition: !isSubTask && runtime.hasVideoRecognition,
-                chat_model_has_direct_audio: chatModelHasDirectAudio,
-                chat_model_has_direct_video: chatModelHasDirectVideo,
-                use_tool_call_api: useToolCallApi,
-                chat_model_has_direct_image: chatModelHasDirectImage,
-                tool_exposure_mode: runtime.toolExposureMode.clone(),
-                active_prompt_metadata: runtime.activePromptMetadata.clone(),
-                user_preferences_text: runtime.userPreferencesText.clone(),
-                intro_prompt: runtime.introPrompt.clone(),
-                waifu_rules_text: runtime.waifuRulesText.clone(),
-                avatar_mood_rules_text: runtime.avatarMoodRulesText.clone(),
-                disable_user_preference_description: runtime.disableUserPreferenceDescription,
-                ai_name: runtime.aiName.clone(),
-            },
-            &history_hooks,
-            &system_prompt_composer,
-            runtime.useEnglish,
-        )
+        self.conversation_service
+            .prepare_conversation_history(
+                PrepareConversationHistoryRequest {
+                    chat_history: chatHistory,
+                    processed_input: processedInput,
+                    chat_id: chatId,
+                    workspace_path: workspacePath,
+                    workspace_folders: workspaceFolders,
+                    prompt_function_type: prompt_function_type_name(&promptFunctionType)
+                        .to_string(),
+                    custom_system_prompt_template: customSystemPromptTemplate,
+                    role_card_id: roleCardId,
+                    enable_group_orchestration_hint: enableGroupOrchestrationHint,
+                    group_participant_names_text: groupParticipantNamesText,
+                    proxy_sender_name: proxySenderName,
+                    has_image_recognition: !isSubTask && runtime.hasImageRecognition,
+                    has_audio_recognition: !isSubTask && runtime.hasAudioRecognition,
+                    has_video_recognition: !isSubTask && runtime.hasVideoRecognition,
+                    chat_model_has_direct_audio: chatModelHasDirectAudio,
+                    chat_model_has_direct_video: chatModelHasDirectVideo,
+                    use_tool_call_api: useToolCallApi,
+                    chat_model_has_direct_image: chatModelHasDirectImage,
+                    tool_exposure_mode: runtime.toolExposureMode.clone(),
+                    active_prompt_metadata: runtime.activePromptMetadata.clone(),
+                    user_preferences_text: runtime.userPreferencesText.clone(),
+                    intro_prompt: runtime.introPrompt.clone(),
+                    waifu_rules_text: runtime.waifuRulesText.clone(),
+                    avatar_mood_rules_text: runtime.avatarMoodRulesText.clone(),
+                    disable_user_preference_description: runtime.disableUserPreferenceDescription,
+                    ai_name: runtime.aiName.clone(),
+                },
+                &history_hooks,
+                &system_prompt_composer,
+                runtime.useEnglish,
+            )
+            .await
     }
 
     pub async fn generateSummary(
@@ -832,6 +951,7 @@ impl EnhancedAIService {
         available_tools
     }
 
+    /// Estimates the request window using the same workspace context as message sending.
     #[allow(clippy::too_many_arguments)]
     pub async fn estimateRequestWindowFromMemory(
         &mut self,
@@ -839,6 +959,7 @@ impl EnhancedAIService {
         chatHistory: Vec<PromptTurn>,
         chatId: Option<String>,
         workspacePath: Option<String>,
+        workspaceFolders: Vec<String>,
         promptFunctionType: PromptFunctionType,
         roleCardId: Option<String>,
         enableGroupOrchestrationHint: bool,
@@ -849,23 +970,26 @@ impl EnhancedAIService {
         publishEstimate: bool,
         mut runtime: SendMessageRuntime,
     ) -> Result<i64, AiServiceError> {
-        let preparedHistory = self.prepareConversationHistory(
-            chatHistory,
-            message.clone(),
-            chatId.clone(),
-            workspacePath,
-            promptFunctionType.clone(),
-            None,
-            roleCardId.clone(),
-            enableGroupOrchestrationHint,
-            groupParticipantNamesText,
-            proxySenderName,
-            false,
-            FunctionType::CHAT,
-            chatProviderIdOverride.clone(),
-            chatModelIdOverride.clone(),
-            &runtime,
-        );
+        let preparedHistory = self
+            .prepareConversationHistory(
+                chatHistory,
+                message.clone(),
+                chatId.clone(),
+                workspacePath,
+                workspaceFolders,
+                promptFunctionType.clone(),
+                None,
+                roleCardId.clone(),
+                enableGroupOrchestrationHint,
+                groupParticipantNamesText,
+                proxySenderName,
+                false,
+                FunctionType::CHAT,
+                chatProviderIdOverride.clone(),
+                chatModelIdOverride.clone(),
+                &runtime,
+            )
+            .await;
         let availableTools = self.getAvailableToolsForFunction(
             FunctionType::CHAT,
             chatId.clone(),
@@ -926,18 +1050,7 @@ impl EnhancedAIService {
 
     pub fn invalidateAllExecutionContexts(&mut self, reason: String) {
         AppLogger::d(TAG, &format!("准备失效全部执行上下文: reason={}", reason));
-        let ids = self
-            .shared_state()
-            .active_execution_contexts
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for id in ids {
-            if let Some(active) = self.shared_state().active_execution_contexts.get_mut(&id) {
-                active.isConversationActive = false;
-            }
-        }
-        let _ = reason;
+        self.shared_state().invalidateExecutionContexts();
     }
 
     fn isExecutionContextActiveInSharedState(
@@ -945,6 +1058,10 @@ impl EnhancedAIService {
         context: &MessageExecutionContext,
     ) -> bool {
         context.isConversationActive
+            && !context
+                .cancellationToken
+                .as_ref()
+                .is_some_and(MessageCancellationToken::isCancelled)
             && shared_state
                 .lock()
                 .expect("EnhancedAIService shared_state mutex poisoned")
@@ -994,6 +1111,13 @@ impl EnhancedAIService {
         &mut self,
         options: SendMessageOptions,
     ) -> Result<SharedAiResponseStream, AiServiceError> {
+        if options
+            .cancellationToken
+            .as_ref()
+            .is_some_and(MessageCancellationToken::isCancelled)
+        {
+            return Err(AiServiceError::RequestCancelled);
+        }
         let runtime = self.createSendMessageRuntime(&options)?;
         self.sendMessageWithRuntime(options, runtime).await
     }
@@ -1018,10 +1142,11 @@ impl EnhancedAIService {
         &self,
         chatId: String,
         targetNodeId: String,
+        resumeContext: CoreRouteResumeContext,
     ) -> Result<(), String> {
         self.tool_handler
             .runtimeSupport()
-            .requestCoreRouteChange(chatId, targetNodeId)
+            .requestCoreRouteChange(chatId, targetNodeId, resumeContext)
             .await
     }
 
@@ -1084,7 +1209,11 @@ impl EnhancedAIService {
             introPrompt,
             waifuRulesText: String::new(),
             avatarMoodRulesText: String::new(),
-            disableUserPreferenceDescription: false,
+            disableUserPreferenceDescription: self
+                .provider_runtime_context
+                .support()
+                .disableUserPreferenceDescription()
+                .map_err(AiServiceError::RequestFailed)?,
             aiName,
             hasImageRecognition: modelConfig.capabilities.directImage,
             hasAudioRecognition: modelConfig.capabilities.directAudio,
@@ -1111,7 +1240,22 @@ impl EnhancedAIService {
         options: SendMessageOptions,
         runtime: SendMessageRuntime,
     ) -> Result<SharedAiResponseStream, AiServiceError> {
-        AppLogger::i("CoreSend", "provider response task schedule start");
+        // Cancellation can occur while waiting for the provider handle. Do not
+        // register or launch a task from a generation that has already been cancelled.
+        let executionGeneration = self.shared_state().execution_generation;
+        let providerModel = runtime.aiService.lock().await.provider_model();
+        let execContext = {
+            let mut shared = self.shared_state();
+            let context = shared.createExecutionContext(executionGeneration, &options)?;
+            shared.beginTurn(&runtime.modelConfig, providerModel);
+            context
+        };
+        let schedulingContext = execContext.clone();
+        operit_util::AppLogger::AppLogger::v_with_level(
+            "CoreSend",
+            "provider response task schedule start",
+            operit_util::AppLogger::VERBOSE_LEVEL_5,
+        );
         let responseStream = SharedAiResponseStream::new_ordered(
             operit_util::stream::HotStream::mutable_shared_stream(usize::MAX),
             operit_util::stream::HotStream::mutable_shared_stream(usize::MAX),
@@ -1123,23 +1267,55 @@ impl EnhancedAIService {
                 "enhanced-ai-response",
                 Box::new(move || {
                     Box::pin(async move {
-                        AppLogger::i("CoreSend", "provider response task entered");
+                        operit_util::AppLogger::AppLogger::v_with_level(
+                            "CoreSend",
+                            "provider response task entered",
+                            operit_util::AppLogger::VERBOSE_LEVEL_5,
+                        );
+                        let cancellationToken = execContext.cancellationToken.clone();
                         let result = service
-                            .executeSendMessageWithRuntime(options, runtime, producerStream.clone())
+                            .executeSendMessageWithRuntime(
+                                options,
+                                runtime,
+                                producerStream.clone(),
+                                execContext,
+                            )
                             .await;
                         if let Err(error) = result {
-                            let message = error.to_string();
-                            producerStream.set_terminal_failure(message.clone());
-                            service
-                                .setInputProcessingState(InputProcessingState::Error { message });
+                            let cancelled = matches!(error, AiServiceError::RequestCancelled)
+                                || cancellationToken
+                                    .as_ref()
+                                    .is_some_and(MessageCancellationToken::isCancelled)
+                                || service.shared_state().execution_generation
+                                    != executionGeneration;
+                            // A late cancellation error belongs to the old task, not
+                            // the current chat state or a newly started response.
+                            if !cancelled {
+                                let message = error.to_string();
+                                producerStream.set_terminal_failure(message.clone());
+                                service.setInputProcessingState(InputProcessingState::Error {
+                                    message,
+                                });
+                            }
                         }
                         producerStream.close();
-                        AppLogger::i("CoreSend", "provider response task closed output streams");
+                        operit_util::AppLogger::AppLogger::v_with_level(
+                            "CoreSend",
+                            "provider response task closed output streams",
+                            operit_util::AppLogger::VERBOSE_LEVEL_5,
+                        );
                     })
                 }),
             )
-            .map_err(|error| AiServiceError::RequestFailed(error.to_string()))?;
-        AppLogger::i("CoreSend", "provider response task scheduled");
+            .map_err(|error| {
+                self.unregisterExecutionContext(&schedulingContext);
+                AiServiceError::RequestFailed(error.to_string())
+            })?;
+        operit_util::AppLogger::AppLogger::v_with_level(
+            "CoreSend",
+            "provider response task scheduled",
+            operit_util::AppLogger::VERBOSE_LEVEL_5,
+        );
         Ok(responseStream)
     }
 
@@ -1148,13 +1324,19 @@ impl EnhancedAIService {
         options: SendMessageOptions,
         mut runtime: SendMessageRuntime,
         responseStream: SharedAiResponseStream,
+        mut execContext: MessageExecutionContext,
     ) -> Result<(), AiServiceError> {
+        // The context is registered before scheduling, so cancellation also covers
+        // workers that have not started yet. They must not publish state or run hooks.
+        if !self.isExecutionContextActive(&execContext) {
+            self.unregisterExecutionContext(&execContext);
+            return Ok(());
+        }
         let message = options.message.clone();
         let chatId = options.chatId.clone();
         let logChatId = chatId
             .clone()
             .unwrap_or_else(|| "__DEFAULT_CHAT__".to_string());
-        let chatHistory = options.chatHistory.clone();
         let workspacePath = options.workspacePath.clone();
         let functionType = options.functionType.clone();
         let promptFunctionType = options.promptFunctionType.clone();
@@ -1180,7 +1362,7 @@ impl EnhancedAIService {
         let onNonFatalError = options.onNonFatalError;
         let onTokenLimitExceeded = options.onTokenLimitExceeded;
         let onToolInvocation = options.onToolInvocation;
-        AppLogger::d(
+        AppLogger::i(
             TAG,
             &format!(
                 "sendMessage调用开始: 功能类型={}, 提示词类型={}",
@@ -1201,21 +1383,6 @@ impl EnhancedAIService {
         }
 
         let mut lifecycle = Vec::new();
-        let eventChannel = MutableSharedStreamMirror::<TextStreamEventMirror>::new(usize::MAX);
-        let executionId = {
-            let mut shared = self.shared_state();
-            shared.next_execution_context_id += 1;
-            shared.next_execution_context_id
-        };
-        let mut execContext = MessageExecutionContext::new(
-            executionId,
-            chatHistory,
-            workspacePath.clone(),
-            groupParticipantNamesText.clone(),
-            proxySenderName.clone(),
-            eventChannel,
-        );
-        self.registerExecutionContext(execContext.clone());
         if !isSubTask {
             lifecycle.push(SendMessageLifecycleStage::StartAiService);
             self.startAiService(characterName.clone(), avatarUri.clone());
@@ -1231,23 +1398,26 @@ impl EnhancedAIService {
         let runtimeSupport = self.provider_runtime_context.shared_support();
         let startTime = runtimeSupport.messageTimingNow();
         lifecycle.push(SendMessageLifecycleStage::PrepareConversationHistory);
-        let preparedHistory = self.prepareConversationHistory(
-            execContext.conversationHistory.clone(),
-            message.clone(),
-            chatId.clone(),
-            workspacePath.clone(),
-            promptFunctionType.clone(),
-            customSystemPromptTemplate.clone(),
-            roleCardId.clone(),
-            enableGroupOrchestrationHint,
-            groupParticipantNamesText.clone(),
-            proxySenderName.clone(),
-            isSubTask,
-            functionType.clone(),
-            chatProviderIdOverride.clone(),
-            chatModelIdOverride.clone(),
-            &runtime,
-        );
+        let preparedHistory = self
+            .prepareConversationHistory(
+                execContext.conversationHistory.clone(),
+                message.clone(),
+                chatId.clone(),
+                workspacePath.clone(),
+                options.workspaceFolders.clone(),
+                promptFunctionType.clone(),
+                customSystemPromptTemplate.clone(),
+                roleCardId.clone(),
+                enableGroupOrchestrationHint,
+                groupParticipantNamesText.clone(),
+                proxySenderName.clone(),
+                isSubTask,
+                functionType.clone(),
+                chatProviderIdOverride.clone(),
+                chatModelIdOverride.clone(),
+                &runtime,
+            )
+            .await;
         let tAfterPrepareHistory = runtimeSupport.messageTimingNow();
         AppLogger::d(
             TAG,
@@ -1340,46 +1510,50 @@ impl EnhancedAIService {
         );
         let mut finalProcessedInput = message.clone();
         let mut finalPreparedHistory = preparedHistory;
-        let beforeFinalizeContext = self.applyPromptFinalizeHooks(
-            PromptHookContext {
-                stage: "before_finalize_prompt".to_string(),
-                chat_id: chatId.clone(),
-                function_type: Some(function_type_name(&functionType).to_string()),
-                prompt_function_type: Some(
-                    prompt_function_type_name(&promptFunctionType).to_string(),
-                ),
-                raw_input: Some(message.clone()),
-                processed_input: Some(finalProcessedInput.clone()),
-                prepared_history: finalPreparedHistory.clone(),
-                model_parameters: serializePromptHookModelParameters(&modelParameters),
-                available_tools: serializePromptHookToolPrompts(&availableTools),
-                metadata: self.buildPromptFinalizeMetadata(
-                    chatId.clone(),
-                    roleCardId.clone(),
-                    workspacePath.clone(),
-                    enableThinking,
-                    stream,
-                    isSubTask,
-                ),
-                ..PromptHookContext::default()
-            },
-            PromptHookRegistry::dispatchPromptFinalizeHooks,
-        );
+        let beforeFinalizeContext = self
+            .applyPromptFinalizeHooks(
+                PromptHookContext {
+                    stage: "before_finalize_prompt".to_string(),
+                    chat_id: chatId.clone(),
+                    function_type: Some(function_type_name(&functionType).to_string()),
+                    prompt_function_type: Some(
+                        prompt_function_type_name(&promptFunctionType).to_string(),
+                    ),
+                    raw_input: Some(message.clone()),
+                    processed_input: Some(finalProcessedInput.clone()),
+                    prepared_history: finalPreparedHistory.clone(),
+                    model_parameters: serializePromptHookModelParameters(&modelParameters),
+                    available_tools: serializePromptHookToolPrompts(&availableTools),
+                    metadata: self.buildPromptFinalizeMetadata(
+                        chatId.clone(),
+                        roleCardId.clone(),
+                        workspacePath.clone(),
+                        enableThinking,
+                        stream,
+                        isSubTask,
+                    ),
+                    ..PromptHookContext::default()
+                },
+                PromptHookRegistry::dispatchPromptFinalizeHooks,
+            )
+            .await;
         lifecycle.push(SendMessageLifecycleStage::BeforeFinalizePromptHook);
         if let Some(processedInput) = beforeFinalizeContext.processed_input.clone() {
             finalProcessedInput = processedInput;
         }
         finalPreparedHistory = beforeFinalizeContext.prepared_history.clone();
 
-        let beforeSendContext = self.applyPromptFinalizeHooks(
-            PromptHookContext {
-                stage: "before_send_to_model".to_string(),
-                processed_input: Some(finalProcessedInput.clone()),
-                prepared_history: finalPreparedHistory.clone(),
-                ..beforeFinalizeContext
-            },
-            PromptHookRegistry::dispatchPromptFinalizeHooks,
-        );
+        let beforeSendContext = self
+            .applyPromptFinalizeHooks(
+                PromptHookContext {
+                    stage: "before_send_to_model".to_string(),
+                    processed_input: Some(finalProcessedInput.clone()),
+                    prepared_history: finalPreparedHistory.clone(),
+                    ..beforeFinalizeContext
+                },
+                PromptHookRegistry::dispatchPromptFinalizeHooks,
+            )
+            .await;
         lifecycle.push(SendMessageLifecycleStage::BeforeSendToModelHook);
         if let Some(processedInput) = beforeSendContext.processed_input.clone() {
             finalProcessedInput = processedInput;
@@ -1431,7 +1605,7 @@ impl EnhancedAIService {
             let service = serviceForFunction.lock().await;
             service.provider_model()
         };
-        AppLogger::d(
+        AppLogger::i(
             TAG,
             &format!(
                 "provider send_message begin chatId={} providerModel={}",
@@ -1461,6 +1635,13 @@ impl EnhancedAIService {
                     chat_history: requestHistory.clone(),
                     model_parameters: modelParameters.clone(),
                     enable_thinking: enableThinking,
+                    thinking_quality_level: self
+                        .provider_runtime_context
+                        .support()
+                        .thinkingQualityLevel()
+                        .map_err(AiServiceError::RequestFailed)?,
+                    thinking_configurations: runtime.modelConfig.thinkingConfigurations.clone(),
+                    thinking_option_id: runtime.modelConfig.thinkingOptionId.clone(),
                     stream,
                     available_tools: availableTools.clone(),
                     preserve_think_in_history: false,
@@ -1495,9 +1676,10 @@ impl EnhancedAIService {
         let mut lastLogTime = runtimeSupport.messageTimingNow().startedAtMs;
         let mut responseRevisions = TextStreamRevisionTracker::new("");
         let activeExecutionState = self.shared_state.clone();
-        AppLogger::i(
+        operit_util::AppLogger::AppLogger::v_with_level(
             "CoreSend",
             &format!("provider stream collect enter chatId={}", logChatId),
+            operit_util::AppLogger::VERBOSE_LEVEL_5,
         );
         provider_stream
             .collect_ordered(&mut |item| match item {
@@ -1587,7 +1769,7 @@ impl EnhancedAIService {
                 service.output_token_count(),
             )
         };
-        AppLogger::d(
+        AppLogger::i(
             TAG,
             &format!(
                 "provider send_message end chatId={} providerModel={} inputTokens={} outputTokens={} cachedInputTokens={} chunkCount={} totalChars={}",
@@ -1721,13 +1903,33 @@ impl EnhancedAIService {
         if enableMemoryAutoUpdate && !isSubTask {
             let memoryContent = execContext.roundManager.getDisplayContent();
             if !memoryContent.trim().is_empty() {
-                MemoryLibrary::saveMemoryAsync(
-                    promptTurnsToMemoryPairs(&requestHistory),
-                    memoryContent,
-                    runtime.aiService.clone(),
-                    memoryAutoUpdateCharacterCardId.clone(),
-                    self.provider_runtime_context.clone(),
-                );
+                let result = (|| -> Result<(), AiServiceError> {
+                    let roleCardId = memoryAutoUpdateCharacterCardId.clone().ok_or_else(|| {
+                        AiServiceError::RequestFailed(
+                            "memory auto update requires a role card".to_string(),
+                        )
+                    })?;
+                    let ownerKey = self
+                        .provider_runtime_context
+                        .support()
+                        .memoryOwnerKeyForCharacterCard(&roleCardId)
+                        .map_err(AiServiceError::RequestFailed)?;
+                    let chatId = chatId.ok_or_else(|| {
+                        AiServiceError::RequestFailed(
+                            "memory auto update requires a persisted chat".to_string(),
+                        )
+                    })?;
+                    MemoryLibrary::enqueueAutoSaveCandidate(ownerKey, chatId, currentTimeMillis())
+                        .map_err(AiServiceError::RequestFailed)?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let message = format!("自动保存长期记忆候选入队失败: {error}");
+                    AppLogger::e(TAG, &message);
+                    if let Some(callback) = onNonFatalError {
+                        callback(message);
+                    }
+                }
             }
         }
         AppLogger::d(
@@ -1990,6 +2192,13 @@ impl EnhancedAIService {
                     chat_history: currentChatHistory,
                     model_parameters: modelParameters,
                     enable_thinking: enableThinking,
+                    thinking_quality_level: self
+                        .provider_runtime_context
+                        .support()
+                        .thinkingQualityLevel()
+                        .map_err(AiServiceError::RequestFailed)?,
+                    thinking_configurations: runtime.modelConfig.thinkingConfigurations.clone(),
+                    thinking_option_id: runtime.modelConfig.thinkingOptionId.clone(),
                     stream,
                     available_tools: availableTools,
                     preserve_think_in_history: false,
@@ -2501,6 +2710,7 @@ impl EnhancedAIService {
                 chatId.clone(),
                 roleCardId.clone(),
                 context.workspacePath.clone(),
+                context.workspaceFolders.clone(),
                 toolExposureMode,
             )
             .await;
@@ -2746,6 +2956,12 @@ impl EnhancedAIService {
     #[allow(non_snake_case)]
     pub fn getLastProviderModel(&self) -> Option<String> {
         self.shared_state().last_provider_model.clone()
+    }
+
+    /// Returns the configured display names, not the protocol provider type id.
+    #[allow(non_snake_case)]
+    pub fn getLastTurnModelIdentity(&self) -> Option<TurnModelIdentity> {
+        self.shared_state().last_turn_model_identity.clone()
     }
 
     #[allow(non_snake_case)]
@@ -3146,7 +3362,7 @@ fn deserializePromptHookToolParameters(value: Option<&Value>) -> Vec<ToolParamet
     }
 }
 
-fn applyToolPromptComposeHooksToAvailableTools(
+async fn applyToolPromptComposeHooksToAvailableTools(
     availableTools: Vec<ToolPrompt>,
     chatId: Option<String>,
     functionType: FunctionType,
@@ -3164,7 +3380,8 @@ fn applyToolPromptComposeHooksToAvailableTools(
         use_english: Some(useEnglish),
         available_tools: serializePromptHookToolPrompts(&availableTools),
         ..PromptHookContext::default()
-    });
+    })
+    .await;
     deserializePromptHookToolPrompts(hookContext.available_tools)
 }
 
@@ -3210,4 +3427,307 @@ fn value_to_btree_map(source: HashMap<String, Value>) -> BTreeMap<String, String
             (key, value)
         })
         .collect()
+}
+
+/// Resolves the primary root and every mounted folder without searching for directories.
+fn resolve_workspace_path_mappings(
+    mapper: &PathMapper,
+    workspace_path: Option<&str>,
+    workspace_folders: &[String],
+) -> Vec<ResolvedVfsPath> {
+    let mut seen = BTreeSet::new();
+    workspace_path
+        .into_iter()
+        .chain(workspace_folders.iter().map(String::as_str))
+        .filter(|path| !path.trim().is_empty())
+        .filter_map(|path| mapper.resolve(path).ok())
+        // Browser storage keys (e.g. workspaces/chat-id) are not terminal paths.
+        .filter(|mapping| std::path::Path::new(&mapping.physicalPath).is_absolute())
+        .filter(|mapping| seen.insert(mapping.vfsPath.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod workspace_path_tests {
+    use super::resolve_workspace_path_mappings;
+    use operit_tools::files::PathMapper::PathMapper;
+
+    #[test]
+    fn resolves_primary_and_all_folders_from_configured_roots() {
+        let root = std::env::temp_dir().join("Operit My Projects");
+        let workspace_root = root.join("workspaces");
+        let mapper = PathMapper::builtinOnly(root.join("runtime"), workspace_root.clone());
+        let mappings = resolve_workspace_path_mappings(
+            &mapper,
+            Some("/app/workspaces/main"),
+            &[
+                "/app/workspaces/main/".into(),
+                "/app/workspaces/other".into(),
+                "".into(),
+                "/unknown/project".into(),
+            ],
+        );
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].vfsPath, "/app/workspaces/main");
+        assert_eq!(
+            mappings[0].physicalPath,
+            workspace_root
+                .join("main")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(
+            mappings[1].physicalPath,
+            workspace_root
+                .join("other")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+
+    #[test]
+    fn workspace_switch_resolves_new_path() {
+        let root = std::env::temp_dir().join("Operit workspace switch");
+        let mapper = PathMapper::builtinOnly(root.join("runtime"), root.join("workspaces"));
+        let first = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/first"), &[]);
+        let second = resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/second"), &[]);
+        assert_eq!(
+            first[0].physicalPath,
+            root.join("workspaces/first")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(
+            second[0].physicalPath,
+            root.join("workspaces/second")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolves_external_macos_workspace_alongside_default_workspace() {
+        let mapper = PathMapper::builtinOnly("/runtime".into(), "/workspaces".into());
+        let mappings = resolve_workspace_path_mappings(
+            &mapper,
+            Some("/app/workspaces/main"),
+            &["/mnt/macos/Users/test/External Project".into()],
+        );
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[1].physicalPath, "/Users/test/External Project");
+    }
+
+    #[test]
+    fn browser_storage_keys_are_not_advertised_as_terminal_paths() {
+        let mapper = PathMapper::builtinOnly("runtime".into(), "workspaces".into());
+        assert!(
+            resolve_workspace_path_mappings(&mapper, Some("/app/workspaces/main"), &[]).is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_identity_tests {
+    use super::{EnhancedAISharedState, TurnModelIdentity, TurnTokenSnapshot};
+    use operit_model::ModelConfigData::{ApiProviderType, ResolvedModelConfig};
+
+    fn model_config(provider_name: &str, model_id: &str) -> ResolvedModelConfig {
+        ResolvedModelConfig {
+            providerId: "custom-provider".into(),
+            providerName: provider_name.into(),
+            modelId: model_id.into(),
+            apiKey: String::new(),
+            apiEndpoint: "https://example.test/v1/responses".into(),
+            apiProviderType: ApiProviderType::OPENAI_CODEX,
+            apiProviderTypeId: "OPENAI_CODEX".into(),
+            useMultipleApiKeys: false,
+            apiKeyPool: Vec::new(),
+            currentKeyIndex: 0,
+            keyRotationMode: "ROUND_ROBIN".into(),
+            customHeaders: "{}".into(),
+            requestLimitPerMinute: 0,
+            maxConcurrentRequests: 0,
+            pricing: None,
+            context: Default::default(),
+            capabilities: Default::default(),
+            builtinTools: Vec::new(),
+            request: Default::default(),
+            parameters: Vec::new(),
+            thinkingConfigurations: "[]".into(),
+            thinkingOptionId: String::new(),
+            summary: Default::default(),
+            localRuntime: Default::default(),
+        }
+    }
+
+    #[test]
+    fn selected_model_names_are_available_before_response_task_runs() {
+        let config = model_config("我的 Codex 供应商", "gpt-6.1-sol");
+        let mut state = EnhancedAISharedState::default();
+        state.beginTurn(&config, config.providerModelLabel());
+        assert_eq!(
+            state.last_turn_model_identity,
+            Some(TurnModelIdentity {
+                providerName: "我的 Codex 供应商".into(),
+                modelName: "gpt-6.1-sol".into(),
+            })
+        );
+        assert_eq!(
+            state.last_provider_model.as_deref(),
+            Some("OPENAI_CODEX:gpt-6.1-sol")
+        );
+    }
+
+    #[test]
+    fn display_names_preserve_colons_and_model_path_separators() {
+        let config = model_config("代理: OpenAI", "org/model:latest");
+        let mut state = EnhancedAISharedState::default();
+        state.beginTurn(&config, "OPENAI_GENERIC:org/model:latest".into());
+        let identity = state.last_turn_model_identity.unwrap();
+        assert_eq!(identity.providerName, "代理: OpenAI");
+        assert_eq!(identity.modelName, "org/model:latest");
+    }
+
+    #[test]
+    fn switching_models_replaces_names_and_clears_previous_turn_results() {
+        let mut state = EnhancedAISharedState::default();
+        let first = model_config("供应商 A", "model-a");
+        state.beginTurn(&first, first.providerModelLabel());
+        let previous_identity = state.last_turn_model_identity.clone();
+        state.last_reply_content = Some("previous reply".into());
+        state.last_turn_token_snapshot = Some(TurnTokenSnapshot {
+            inputTokens: 100,
+            outputTokens: 50,
+            cachedInputTokens: 20,
+        });
+        let second = model_config("供应商 B", "model-b");
+        state.beginTurn(&second, second.providerModelLabel());
+        assert_eq!(
+            state
+                .last_turn_model_identity
+                .as_ref()
+                .unwrap()
+                .providerName,
+            "供应商 B"
+        );
+        assert_eq!(
+            state.last_turn_model_identity.as_ref().unwrap().modelName,
+            "model-b"
+        );
+        assert_eq!(previous_identity.unwrap().modelName, "model-a");
+        assert!(state.last_reply_content.is_none());
+        assert!(state.last_turn_token_snapshot.is_none());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::{
+        AiServiceError, EnhancedAIService, EnhancedAISharedState, MessageCancellationToken,
+        SendMessageOptions,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn queued_response_context_is_invalidated_before_worker_starts() {
+        let state = Arc::new(Mutex::new(EnhancedAISharedState::default()));
+        let context = state
+            .lock()
+            .unwrap()
+            .createExecutionContext(0, &SendMessageOptions::new())
+            .unwrap();
+        state.lock().unwrap().invalidateExecutionContexts();
+
+        // This is the worker's entry guard, before it publishes Processing or runs hooks.
+        assert!(!EnhancedAIService::isExecutionContextActiveInSharedState(
+            &state, &context
+        ));
+    }
+
+    #[test]
+    fn cancelled_generation_cannot_register_a_late_response_task() {
+        let mut state = EnhancedAISharedState::default();
+        let generation = state.execution_generation;
+        state.invalidateExecutionContexts();
+
+        let result = state.createExecutionContext(generation, &SendMessageOptions::new());
+        assert!(matches!(result, Err(AiServiceError::RequestCancelled)));
+        assert!(state.active_execution_contexts.is_empty());
+        assert_eq!(state.next_execution_context_id, 0);
+    }
+
+    #[test]
+    fn fresh_send_can_start_after_cancel_without_reactivating_old_execution() {
+        let mut state = EnhancedAISharedState::default();
+        let oldContext = state
+            .createExecutionContext(state.execution_generation, &SendMessageOptions::new())
+            .unwrap();
+        state.invalidateExecutionContexts();
+        let newContext = state
+            .createExecutionContext(state.execution_generation, &SendMessageOptions::new())
+            .unwrap();
+        let state = Arc::new(Mutex::new(state));
+
+        assert_ne!(oldContext.executionId, newContext.executionId);
+        assert!(!EnhancedAIService::isExecutionContextActiveInSharedState(
+            &state,
+            &oldContext
+        ));
+        assert!(EnhancedAIService::isExecutionContextActiveInSharedState(
+            &state,
+            &newContext
+        ));
+        state
+            .lock()
+            .unwrap()
+            .active_execution_contexts
+            .remove(&oldContext.executionId);
+        assert!(EnhancedAIService::isExecutionContextActiveInSharedState(
+            &state,
+            &newContext
+        ));
+    }
+
+    #[test]
+    fn cancelled_send_cannot_register_even_if_it_captures_the_latest_generation() {
+        let mut state = EnhancedAISharedState::default();
+        let token = MessageCancellationToken::default();
+        let options = SendMessageOptions {
+            cancellationToken: Some(token.clone()),
+            ..SendMessageOptions::new()
+        };
+        token.cancel();
+        state.invalidateExecutionContexts();
+
+        // Cancellation can win before sendMessageWithRuntime captures its generation.
+        let result = state.createExecutionContext(state.execution_generation, &options);
+        assert!(matches!(result, Err(AiServiceError::RequestCancelled)));
+        assert!(state.active_execution_contexts.is_empty());
+    }
+
+    #[test]
+    fn per_send_gate_stops_execution_before_provider_cancellation_completes() {
+        let mut state = EnhancedAISharedState::default();
+        let token = MessageCancellationToken::default();
+        let options = SendMessageOptions {
+            cancellationToken: Some(token.clone()),
+            ..SendMessageOptions::new()
+        };
+        let context = state
+            .createExecutionContext(state.execution_generation, &options)
+            .unwrap();
+        let state = Arc::new(Mutex::new(state));
+        token.cancel();
+
+        // Even before cancelConversation invalidates shared contexts or obtains
+        // the provider mutex, stream callbacks and tool rounds must stop.
+        assert!(
+            state.lock().unwrap().active_execution_contexts[&context.executionId]
+                .isConversationActive
+        );
+        assert!(!EnhancedAIService::isExecutionContextActiveInSharedState(
+            &state, &context
+        ));
+    }
 }

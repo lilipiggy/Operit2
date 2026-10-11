@@ -2,8 +2,7 @@
 
 namespace {
 
-FlMethodChannel* g_operit_crash_channel = nullptr;
-
+/// Presents a crash report for the requesting engine.
 void present_crash_screen(FlMethodCall* method_call) {
   FlValue* arguments = fl_method_call_get_args(method_call);
   if (arguments == nullptr || fl_value_get_type(arguments) != FL_VALUE_TYPE_MAP) {
@@ -29,6 +28,7 @@ void present_crash_screen(FlMethodCall* method_call) {
   fl_method_call_respond_success(method_call, nullptr, nullptr);
 }
 
+/// Dispatches crash presentation requests on the view-owned channel.
 void crash_method_call_cb(FlMethodChannel*, FlMethodCall* method_call,
                           gpointer) {
   if (g_strcmp0(fl_method_call_get_name(method_call), "present") != 0) {
@@ -40,17 +40,22 @@ void crash_method_call_cb(FlMethodChannel*, FlMethodCall* method_call,
 
 }  // namespace
 
+/// Disconnects a crash channel when its Flutter view is released.
+static void release_operit_crash_channel(gpointer data) {
+  auto* channel = FL_METHOD_CHANNEL(data);
+  fl_method_channel_set_method_call_handler(channel, nullptr, nullptr, nullptr);
+  g_object_unref(channel);
+}
+
+/// Attaches a separate crash channel to each Flutter engine.
 void register_operit_crash_channel(FlView* view) {
-  if (g_operit_crash_channel != nullptr) {
-    fl_method_channel_set_method_call_handler(g_operit_crash_channel, nullptr,
-                                              nullptr, nullptr);
-    g_clear_object(&g_operit_crash_channel);
-  }
   FlBinaryMessenger* messenger = fl_engine_get_binary_messenger(fl_view_get_engine(view));
   g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
-  g_operit_crash_channel = fl_method_channel_new(
+  FlMethodChannel* channel = fl_method_channel_new(
       messenger, "operit/crash", FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(g_operit_crash_channel,
+  fl_method_channel_set_method_call_handler(channel,
                                              crash_method_call_cb, nullptr,
                                              nullptr);
+  g_object_set_data_full(G_OBJECT(view), "operit-crash-channel", channel,
+                        release_operit_crash_channel);
 }

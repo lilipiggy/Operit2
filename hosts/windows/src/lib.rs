@@ -3,6 +3,8 @@ pub mod bridge;
 pub mod chromium_browser;
 #[path = "host_runtime_event.rs"]
 pub mod host_runtime_event;
+#[path = "plugin_sdk_ipc.rs"]
+pub mod plugin_sdk_ipc;
 pub mod registry;
 pub mod tools;
 
@@ -10,6 +12,7 @@ pub use host_runtime_event::WindowsHostRuntimeEventHost;
 pub use operit_host_native_common::NativeHostJavaScriptRuntimeHost as WindowsHostJavaScriptRuntimeHost;
 pub use operit_host_native_common::NativeHostRuntimeEventSchedulerHost as WindowsHostRuntimeEventSchedulerHost;
 pub use operit_host_native_common::NativeHostRuntimeTaskSchedulerHost as WindowsHostRuntimeTaskSchedulerHost;
+pub use plugin_sdk_ipc::WindowsPluginSdkIpcHost;
 pub use tools::audio::WindowsAudioPlaybackHost;
 pub use tools::bluetooth::WindowsBluetoothHost;
 pub use tools::browser::{WindowsBrowserAutomationHost, WindowsWebVisitHost};
@@ -49,6 +52,9 @@ pub fn createRuntimeHostManager(
     )
     .withHostSecretStore(hostSecretStore)
     .withWebSocketHost(Arc::new(WindowsHttpHost::new()))
+    .withHttpServerHost(Arc::new(operit_host_native_common::NativeHttpServerHost))
+    .withTcpHost(Arc::new(operit_host_native_common::NativeTcpHost))
+    .withSerialPortHost(Arc::new(operit_host_native_common::NativeSerialPortHost))
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withAudioPlaybackHost(Arc::new(WindowsAudioPlaybackHost::new()))
@@ -57,7 +63,9 @@ pub fn createRuntimeHostManager(
     .withTtsPlaybackHost(Arc::new(WindowsTtsPlaybackHost::new()))
     .withHostRuntimeEventHost(Arc::new(WindowsHostRuntimeEventHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(WindowsHostRuntimeEventSchedulerHost::new()))
+    .withPluginSdkIpcHost(Arc::new(WindowsPluginSdkIpcHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(WindowsHostJavaScriptRuntimeHost::new()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(WindowsHostRuntimeTaskSchedulerHost::new()))
 }
 use std::path::PathBuf;

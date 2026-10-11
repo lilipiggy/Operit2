@@ -178,7 +178,7 @@ class MatrixNode extends SlotableNode<EquationRowNode?> {
               .mapIndexed((index, result) => result == null
                   ? null
                   : CustomLayoutId(id: index, child: result.widget))
-              .whereNotNull()
+              .nonNulls
               .toList(growable: false),
         ),
       ),
@@ -346,7 +346,6 @@ class MatrixLayoutDelegate extends IntrinsicLayoutDelegate<int> {
         case MatrixColumnAlign.right:
           return colPos[col] + colWidths[col] - childWidths[index];
         case MatrixColumnAlign.center:
-        default:
           return colPos[col] + (colWidths[col] - childWidths[index]) / 2;
       }
     }, growable: false);

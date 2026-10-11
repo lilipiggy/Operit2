@@ -90,6 +90,7 @@ class RuntimeBrowserOwner extends ChangeNotifier {
   Object? _uiOwner;
   WorkspaceHtmlPreviewServer? _htmlPreviewServer;
   Future<void>? _loadFuture;
+  bool _loaded = false;
   final String _newTabTitle = 'New tab';
   int _selectedIndex = 0;
   int _openingTabCount = 0;
@@ -162,6 +163,7 @@ class RuntimeBrowserOwner extends ChangeNotifier {
     _uiDelegate = delegate;
   }
 
+  /// Configures workspace-backed file access for owner browser sessions.
   void configureWorkspaceAccess({
     required Future<Uint8List> Function(String path) onReadWorkspaceFileBytes,
     required Future<void> Function(String path, Uint8List bytes)
@@ -182,16 +184,27 @@ class RuntimeBrowserOwner extends ChangeNotifier {
     _uiDelegate = null;
   }
 
+  /// Loads persistent owner browser stores once per successful initialization.
   Future<void> ensureLoaded() {
+    if (_loaded) {
+      return Future<void>.value();
+    }
     final existing = _loadFuture;
     if (existing != null) {
       return existing;
     }
-    final next = stores.load();
+    final next = stores.load().then((_) {
+      _loaded = true;
+    });
     _loadFuture = next;
-    return next;
+    return next.whenComplete(() {
+      if (identical(_loadFuture, next)) {
+        _loadFuture = null;
+      }
+    });
   }
 
+  /// Opens the initial owner browser tab for explicit startup targets.
   Future<void> openInitialTab({
     String? initialUrl,
     String? initialUserAgent,
@@ -1237,6 +1250,7 @@ class RuntimeBrowserOwner extends ChangeNotifier {
       frameHeight: frame.height.round(),
     );
   }
+
 
   bool _isDownloadUrl(String url) {
     final lower = url.toLowerCase();

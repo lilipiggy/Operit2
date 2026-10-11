@@ -176,7 +176,9 @@ class _MarkdownTextState extends State<_MarkdownText>
     final lines = widget.text.split('\n');
     var index = 0;
     var textBlockIndex = 0;
+    var paragraphBreakIndex = 0;
     var typewriterOffset = 0;
+    var pendingParagraphBreak = false;
     final enableTypewriter = _enableTypewriter;
 
     _RevealSegment revealSegmentFor(int length) {
@@ -241,6 +243,7 @@ class _MarkdownTextState extends State<_MarkdownText>
           MarkdownImageRenderer(
             imageMarkdown: widget.text.trim(),
             textColor: widget.textColor,
+            onOpenLink: widget.onLinkClick,
           ),
         );
       case MarkdownNodeType.blockLatex:
@@ -303,7 +306,7 @@ class _MarkdownTextState extends State<_MarkdownText>
           textKey: '${widget.nodeKey}-text-0',
           text: widget.text,
           color: widget.textColor,
-          reveal: revealSegmentFor(widget.text.length),
+          reveal: revealSegmentFor(widget.text.characters.length),
           children: widget.children,
           isLastNode: widget.isLastNode,
           onLinkClick: widget.onLinkClick,
@@ -330,11 +333,27 @@ class _MarkdownTextState extends State<_MarkdownText>
           textKey: '${widget.nodeKey}-text-${textBlockIndex++}',
           text: paragraphLines.join('\n'),
           color: widget.textColor,
-          reveal: revealSegmentFor(paragraphLines.join('\n').length),
+          reveal: revealSegmentFor(paragraphLines.join('\n').characters.length),
           onLinkClick: widget.onLinkClick,
         ),
       );
       paragraphLines.clear();
+    }
+
+    /// Inserts a paragraph break only when later content makes it visible.
+    void flushPendingParagraphBreak() {
+      if (!pendingParagraphBreak) {
+        return;
+      }
+      widgets.add(
+        SizedBox(
+          key: ValueKey<String>(
+            'markdown-paragraph-break-${paragraphBreakIndex++}',
+          ),
+          height: _markdownParagraphBreakHeight,
+        ),
+      );
+      pendingParagraphBreak = false;
     }
 
     while (index < lines.length) {
@@ -346,6 +365,7 @@ class _MarkdownTextState extends State<_MarkdownText>
           codeLanguage = '';
         } else {
           flushParagraph();
+          flushPendingParagraphBreak();
           codeLanguage = trimmed.substring(3).trim();
         }
         inCode = !inCode;
@@ -353,6 +373,7 @@ class _MarkdownTextState extends State<_MarkdownText>
         codeLines.add(line);
       } else if (_isBlockLatexStart(trimmed)) {
         flushParagraph();
+        flushPendingParagraphBreak();
         final latexLines = <String>[trimmed];
         final start = trimmed.trimLeft();
         final singleLine = start.length > 2 && _isBlockLatexEnd(start, start);
@@ -372,6 +393,7 @@ class _MarkdownTextState extends State<_MarkdownText>
         );
       } else if (_isTableStart(lines, index)) {
         flushParagraph();
+        flushPendingParagraphBreak();
         final tableLines = <String>[];
         while (index < lines.length && lines[index].trim().contains('|')) {
           tableLines.add(lines[index]);
@@ -386,6 +408,7 @@ class _MarkdownTextState extends State<_MarkdownText>
         );
       } else if (trimmed.trimLeft().startsWith('>')) {
         flushParagraph();
+        flushPendingParagraphBreak();
         final quoteLines = <String>[];
         while (index < lines.length &&
             lines[index].trimLeft().startsWith('>')) {
@@ -404,24 +427,26 @@ class _MarkdownTextState extends State<_MarkdownText>
         );
       } else if (isCompleteImageMarkdown(trimmed.trim())) {
         flushParagraph();
+        flushPendingParagraphBreak();
         widgets.add(
           MarkdownImageRenderer(
             imageMarkdown: trimmed.trim(),
             textColor: widget.textColor,
+            onOpenLink: widget.onLinkClick,
           ),
         );
       } else if (_isHorizontalRule(trimmed)) {
         flushParagraph();
+        flushPendingParagraphBreak();
         widgets.add(const MarkdownHorizontalRule());
       } else if (trimmed.isEmpty) {
         flushParagraph();
-        if (widgets.isNotEmpty) {
-          widgets.add(const SizedBox(height: _markdownParagraphBreakHeight));
-        }
+        pendingParagraphBreak = widgets.isNotEmpty;
       } else if (_headingLevel(trimmed) > 0 ||
           _isBulletLine(trimmed) ||
           _isOrderedLine(trimmed)) {
         flushParagraph();
+        flushPendingParagraphBreak();
         widgets.add(
           _MarkdownLine(
             textKey: '${widget.nodeKey}-text-${textBlockIndex++}',
@@ -432,6 +457,7 @@ class _MarkdownTextState extends State<_MarkdownText>
           ),
         );
       } else {
+        flushPendingParagraphBreak();
         paragraphLines.add(trimmed);
       }
       index++;
@@ -700,6 +726,11 @@ List<MarkdownNodeStable> _childrenWithFirstContent(
     stableKey: first.stableKey,
     children: first.children,
     headerLevel: first.headerLevel,
+    xmlTagName: first.xmlTagName,
+    xmlAttributes: first.xmlAttributes,
+    xmlBody: first.xmlBody,
+    xmlChildren: first.xmlChildren,
+    xmlIsClosed: first.xmlIsClosed,
   );
   return updated;
 }
@@ -744,7 +775,7 @@ class _MarkdownParagraph extends StatelessWidget {
   }
 }
 
-class _TypewriterMarkdownRichText extends StatelessWidget {
+class _TypewriterMarkdownRichText extends StatefulWidget {
   const _TypewriterMarkdownRichText({
     super.key,
     required this.text,
@@ -765,42 +796,76 @@ class _TypewriterMarkdownRichText extends StatelessWidget {
   final void Function(String url)? onLinkClick;
 
   @override
+  State<_TypewriterMarkdownRichText> createState() =>
+      _TypewriterMarkdownRichTextState();
+}
+
+class _TypewriterMarkdownRichTextState
+    extends State<_TypewriterMarkdownRichText> {
+  final MarkdownLinkGestureOwner _gestures = MarkdownLinkGestureOwner();
+
+  @override
+  void dispose() {
+    _gestures.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final span = buildMarkdownInlineSpannableFromText(
-      context: context,
-      text: text,
-      textColor: color,
-      baseStyle: style,
-      onLinkClick: onLinkClick,
+    _gestures.beginFrame();
+    late final InlineSpan richSpan;
+    try {
+      richSpan = widget.children.isNotEmpty
+          ? buildMarkdownInlineSpannableFromMarkdownNodes(
+              context: context,
+              children: widget.children,
+              textColor: widget.color,
+              baseStyle: widget.style,
+              onLinkClick: widget.onLinkClick,
+              gestures: _gestures,
+            )
+          : buildMarkdownInlineSpannableFromText(
+              context: context,
+              text: widget.text,
+              textColor: widget.color,
+              baseStyle: widget.style,
+              onLinkClick: widget.onLinkClick,
+              gestures: _gestures,
+            );
+    } finally {
+      _gestures.endFrame();
+    }
+    final revealSpan = _revealedTypewriterSpan(
+      source: richSpan,
+      revealLength: widget.revealLength,
+      showCursor: widget.showCursor,
+      baseStyle: widget.style,
     );
-    final richSpan = children.isNotEmpty
-        ? buildMarkdownInlineSpannableFromMarkdownNodes(
-            context: context,
-            children: children,
-            textColor: color,
-            baseStyle: style,
-            onLinkClick: onLinkClick,
-          )
-        : span;
     final pressShield = MessagePressShield.maybeOf(context);
+
+    /// Wraps interactive spans so message dragging does not steal link taps.
     Widget wrapWithInteractiveShield(Widget child, double maxWidth) {
-      if (pressShield == null || !_containsInteractiveSpan(richSpan)) {
+      if (pressShield == null || !_containsInteractiveSpan(revealSpan)) {
         return child;
       }
       return Listener(
         behavior: HitTestBehavior.translucent,
         onPointerDown: (event) {
           final painter = TextPainter(
-            text: richSpan,
+            text: revealSpan,
             textDirection: Directionality.of(context),
             textScaler: MediaQuery.textScalerOf(context),
           )..layout(maxWidth: maxWidth);
-          if (_isInteractiveSpanHit(
-            span: richSpan,
-            painter: painter,
-            position: event.localPosition,
-          )) {
-            pressShield.shieldPointer(event.pointer);
+          try {
+            if (_isInteractiveSpanHit(
+              span: revealSpan,
+              painter: painter,
+              position: event.localPosition,
+            )) {
+              pressShield.shieldPointer(event.pointer);
+            }
+          } finally {
+            painter.dispose();
           }
         },
         onPointerUp: (event) => pressShield.unshieldPointer(event.pointer),
@@ -809,62 +874,11 @@ class _TypewriterMarkdownRichText extends StatelessWidget {
       );
     }
 
-    if (revealLength >= text.length && !showCursor) {
-      return LayoutBuilder(
-        builder: (context, constraints) => wrapWithInteractiveShield(
-          Text.rich(richSpan, style: style),
-          constraints.maxWidth,
-        ),
-      );
-    }
-    if (_containsWidgetSpan(richSpan)) {
-      return LayoutBuilder(
-        builder: (context, constraints) => wrapWithInteractiveShield(
-          Text.rich(richSpan, style: style),
-          constraints.maxWidth,
-        ),
-      );
-    }
     return LayoutBuilder(
-      builder: (context, constraints) {
-        final textDirection = Directionality.of(context);
-        final painter = TextPainter(
-          text: richSpan,
-          textDirection: textDirection,
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout(maxWidth: constraints.maxWidth);
-        final cursorPosition = showCursor
-            ? _cursorPositionForReveal(painter, revealLength)
-            : null;
-        return wrapWithInteractiveShield(
-          SizedBox(
-            width: constraints.maxWidth,
-            height: painter.height,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: <Widget>[
-                CustomPaint(
-                  size: Size(constraints.maxWidth, painter.height),
-                  painter: _RevealTextPainter(
-                    span: richSpan,
-                    textDirection: textDirection,
-                    textScaler: MediaQuery.textScalerOf(context),
-                    maxWidth: constraints.maxWidth,
-                    revealLength: revealLength,
-                  ),
-                ),
-                if (cursorPosition != null)
-                  Positioned(
-                    left: cursorPosition.dx,
-                    top: cursorPosition.dy,
-                    child: const StreamingCursor(),
-                  ),
-              ],
-            ),
-          ),
-          constraints.maxWidth,
-        );
-      },
+      builder: (context, constraints) => wrapWithInteractiveShield(
+        Text.rich(revealSpan, style: widget.style),
+        constraints.maxWidth,
+      ),
     );
   }
 }
@@ -876,52 +890,222 @@ class _RevealSegment {
   final bool showCursor;
 }
 
-Offset _cursorPositionForReveal(TextPainter painter, double revealLength) {
-  final textLength = painter.plainText.length;
-  if (textLength == 0) {
-    return Offset.zero;
-  }
-  final target = revealLength.clamp(0, textLength).toDouble();
-  final baseLen = target.floor().clamp(0, textLength).toInt();
-  final partial = (target - baseLen).clamp(0, 1).toDouble();
+/// Tracks reveal progress while reconstructing one RichText span tree.
+class _InlineRevealState {
+  _InlineRevealState({required this.revealLength, required this.showCursor});
 
-  if (baseLen < textLength) {
-    final boxes = painter.getBoxesForSelection(
-      TextSelection(baseOffset: baseLen, extentOffset: baseLen + 1),
-    );
-    if (boxes.isNotEmpty) {
-      final rect = boxes.first.toRect();
-      final top = rect.top + ((rect.height - 16) / 2).clamp(0, rect.height);
-      return Offset(rect.left + rect.width * partial, top);
-    }
-  }
+  final double revealLength;
+  final bool showCursor;
+  var consumedLength = 0;
+  var cursorInserted = false;
+}
 
-  final offset = (baseLen - 1).clamp(0, textLength - 1).toInt();
-  final boxes = painter.getBoxesForSelection(
-    TextSelection(baseOffset: offset, extentOffset: offset + 1),
+/// Builds a RichText span tree that preserves layout while revealing content.
+TextSpan _revealedTypewriterSpan({
+  required InlineSpan source,
+  required double revealLength,
+  required bool showCursor,
+  required TextStyle? baseStyle,
+}) {
+  final plainTextLength = source.toPlainText().characters.length;
+  final state = _InlineRevealState(
+    revealLength: revealLength.clamp(0, plainTextLength).toDouble(),
+    showCursor: showCursor,
   );
-  if (boxes.isEmpty) {
-    return Offset.zero;
-  }
-  final rect = boxes.last.toRect();
-  final top = rect.top + ((rect.height - 16) / 2).clamp(0, rect.height);
-  return Offset(rect.right, top);
+  final spans = <InlineSpan>[];
+  _appendRevealedInlineSpan(
+    spans: spans,
+    source: source,
+    state: state,
+    inheritedStyle: baseStyle,
+  );
+  _appendRevealCursor(spans, state);
+  return TextSpan(children: spans);
 }
 
-bool _containsWidgetSpan(InlineSpan span) {
-  if (span is WidgetSpan) {
-    return true;
-  }
-  if (span is TextSpan) {
-    final children = span.children;
-    if (children == null) {
-      return false;
+/// Appends one revealed inline span while preserving source ordering.
+void _appendRevealedInlineSpan({
+  required List<InlineSpan> spans,
+  required InlineSpan source,
+  required _InlineRevealState state,
+  required TextStyle? inheritedStyle,
+  GestureRecognizer? inheritedRecognizer,
+}) {
+  if (source is TextSpan) {
+    final effectiveStyle = _mergeTextStyles(inheritedStyle, source.style);
+    final effectiveRecognizer = source.recognizer ?? inheritedRecognizer;
+    final text = source.text;
+    if (text != null && text.isNotEmpty) {
+      _appendRevealedText(
+        spans: spans,
+        text: text,
+        style: effectiveStyle,
+        recognizer: effectiveRecognizer,
+        state: state,
+      );
     }
-    return children.any(_containsWidgetSpan);
+    final children = source.children;
+    if (children != null) {
+      for (final child in children) {
+        _appendRevealedInlineSpan(
+          spans: spans,
+          source: child,
+          state: state,
+          inheritedStyle: effectiveStyle,
+          inheritedRecognizer: effectiveRecognizer,
+        );
+      }
+    }
+    return;
   }
-  return false;
+  if (source is WidgetSpan) {
+    _appendRevealedWidgetSpan(spans: spans, source: source, state: state);
+    return;
+  }
+  spans.add(source);
 }
 
+/// Appends revealed, partial, and hidden text spans for one source string.
+void _appendRevealedText({
+  required List<InlineSpan> spans,
+  required String text,
+  required TextStyle? style,
+  required GestureRecognizer? recognizer,
+  required _InlineRevealState state,
+}) {
+  final segmentStart = state.consumedLength;
+  final textCharacters = text.characters;
+  final textLength = textCharacters.length;
+  final segmentEnd = segmentStart + textLength;
+  final revealLength = state.revealLength;
+  if (revealLength >= segmentEnd) {
+    spans.add(TextSpan(text: text, style: style, recognizer: recognizer));
+    state.consumedLength = segmentEnd;
+    _appendRevealCursor(spans, state);
+    return;
+  }
+  if (revealLength <= segmentStart) {
+    _appendRevealCursor(spans, state);
+    spans.add(TextSpan(text: text, style: _hiddenTextStyle(style)));
+    state.consumedLength = segmentEnd;
+    return;
+  }
+
+  final visibleLength = (revealLength.floor() - segmentStart)
+      .clamp(0, textLength)
+      .toInt();
+  final partialAmount = (revealLength - revealLength.floor())
+      .clamp(0, 1)
+      .toDouble();
+  if (visibleLength > 0) {
+    spans.add(
+      TextSpan(
+        text: textCharacters.take(visibleLength).toString(),
+        style: style,
+        recognizer: recognizer,
+      ),
+    );
+  }
+  var hiddenStart = visibleLength;
+  if (partialAmount > 0 && visibleLength < textLength) {
+    spans.add(
+      TextSpan(
+        text: textCharacters.skip(visibleLength).take(1).toString(),
+        style: _partialTextStyle(style, partialAmount),
+      ),
+    );
+    hiddenStart = visibleLength + 1;
+  }
+  state.consumedLength = segmentStart + hiddenStart;
+  _appendRevealCursor(spans, state);
+  if (hiddenStart < textLength) {
+    spans.add(
+      TextSpan(
+        text: textCharacters.skip(hiddenStart).toString(),
+        style: _hiddenTextStyle(style),
+      ),
+    );
+  }
+  state.consumedLength = segmentEnd;
+}
+
+/// Appends one WidgetSpan with reveal opacity while preserving its placeholder.
+void _appendRevealedWidgetSpan({
+  required List<InlineSpan> spans,
+  required WidgetSpan source,
+  required _InlineRevealState state,
+}) {
+  final segmentStart = state.consumedLength;
+  final revealAmount = (state.revealLength - segmentStart)
+      .clamp(0, 1)
+      .toDouble();
+  _appendRevealCursor(spans, state);
+  spans.add(
+    WidgetSpan(
+      alignment: source.alignment,
+      baseline: source.baseline,
+      style: source.style,
+      child: Opacity(opacity: revealAmount, child: source.child),
+    ),
+  );
+  state.consumedLength = segmentStart + 1;
+  _appendRevealCursor(spans, state);
+}
+
+/// Appends the streaming cursor at the current reveal boundary.
+void _appendRevealCursor(List<InlineSpan> spans, _InlineRevealState state) {
+  if (!state.showCursor ||
+      state.cursorInserted ||
+      state.revealLength > state.consumedLength) {
+    return;
+  }
+  state.cursorInserted = true;
+  spans.add(_streamingCursorSpan());
+}
+
+/// Builds an inline cursor with finite layout constraints.
+WidgetSpan _streamingCursorSpan() {
+  return const WidgetSpan(
+    alignment: PlaceholderAlignment.middle,
+    child: SizedBox(width: 7, height: 16, child: StreamingCursor()),
+  );
+}
+
+/// Merges nested TextSpan styles for reveal-specific spans.
+TextStyle? _mergeTextStyles(TextStyle? inheritedStyle, TextStyle? style) {
+  if (inheritedStyle == null) {
+    return style;
+  }
+  if (style == null) {
+    return inheritedStyle;
+  }
+  return inheritedStyle.merge(style);
+}
+
+/// Returns a style that keeps layout metrics while hiding glyph paint.
+TextStyle? _hiddenTextStyle(TextStyle? style) {
+  return _textStyleWithRevealOpacity(style, 0);
+}
+
+/// Returns a style that paints a partially revealed glyph.
+TextStyle? _partialTextStyle(TextStyle? style, double amount) {
+  return _textStyleWithRevealOpacity(style, amount);
+}
+
+/// Returns a style with adjusted text visibility and preserved metrics.
+TextStyle? _textStyleWithRevealOpacity(TextStyle? style, double amount) {
+  final opacity = amount.clamp(0, 1).toDouble();
+  final source = style ?? const TextStyle();
+  final color = source.color ?? Colors.transparent;
+  return source.copyWith(
+    color: color.withValues(alpha: opacity),
+    backgroundColor: opacity == 0 ? Colors.transparent : source.backgroundColor,
+    decorationColor: opacity == 0 ? Colors.transparent : source.decorationColor,
+    shadows: opacity == 0 ? const <Shadow>[] : source.shadows,
+  );
+}
+
+/// Reports whether a span tree has an active gesture recognizer.
 bool _containsInteractiveSpan(InlineSpan span) {
   if (span is TextSpan) {
     if (span.recognizer != null) {
@@ -939,6 +1123,7 @@ bool _containsInteractiveSpan(InlineSpan span) {
   return false;
 }
 
+/// Reports whether a pointer position lands on an interactive text span.
 bool _isInteractiveSpanHit({
   required InlineSpan span,
   required TextPainter painter,
@@ -952,101 +1137,6 @@ bool _isInteractiveSpanHit({
     TextPosition(offset: glyph.graphemeClusterCodeUnitRange.start),
   );
   return hitSpan is TextSpan && hitSpan.recognizer != null;
-}
-
-class _RevealTextPainter extends CustomPainter {
-  const _RevealTextPainter({
-    required this.span,
-    required this.textDirection,
-    required this.textScaler,
-    required this.maxWidth,
-    required this.revealLength,
-  });
-
-  final InlineSpan span;
-  final TextDirection textDirection;
-  final TextScaler textScaler;
-  final double maxWidth;
-  final double revealLength;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final painter = TextPainter(
-      text: span,
-      textDirection: textDirection,
-      textScaler: textScaler,
-    )..layout(maxWidth: maxWidth);
-    final textLength = painter.plainText.length;
-    if (textLength == 0) {
-      return;
-    }
-    final target = revealLength.clamp(0, textLength).toDouble();
-    final baseLen = target.floor().clamp(0, textLength).toInt();
-    final partial = (target - baseLen).clamp(0, 1).toDouble();
-
-    _paintSelectionRange(canvas, painter, 0, baseLen);
-    if (baseLen < textLength && partial > 0) {
-      _paintPartialCharacter(canvas, painter, baseLen, partial);
-    }
-  }
-
-  void _paintSelectionRange(
-    Canvas canvas,
-    TextPainter painter,
-    int start,
-    int end,
-  ) {
-    if (end <= start) {
-      return;
-    }
-    final boxes = painter.getBoxesForSelection(
-      TextSelection(baseOffset: start, extentOffset: end),
-    );
-    for (final box in boxes) {
-      final rect = box.toRect();
-      canvas.save();
-      canvas.clipRect(rect);
-      painter.paint(canvas, Offset.zero);
-      canvas.restore();
-    }
-  }
-
-  void _paintPartialCharacter(
-    Canvas canvas,
-    TextPainter painter,
-    int offset,
-    double partial,
-  ) {
-    final boxes = painter.getBoxesForSelection(
-      TextSelection(baseOffset: offset, extentOffset: offset + 1),
-    );
-    for (final box in boxes) {
-      final rect = box.toRect();
-      final left = rect.left;
-      final right = rect.left + rect.width * partial;
-      if (right <= left) {
-        continue;
-      }
-      canvas.save();
-      canvas.clipRect(Rect.fromLTRB(left, rect.top, right, rect.bottom));
-      canvas.saveLayer(
-        Rect.fromLTRB(left, rect.top, right, rect.bottom),
-        Paint()..color = Color.fromRGBO(255, 255, 255, partial),
-      );
-      painter.paint(canvas, Offset.zero);
-      canvas.restore();
-      canvas.restore();
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _RevealTextPainter oldDelegate) {
-    return oldDelegate.span != span ||
-        oldDelegate.textDirection != textDirection ||
-        oldDelegate.textScaler != textScaler ||
-        oldDelegate.maxWidth != maxWidth ||
-        oldDelegate.revealLength != revealLength;
-  }
 }
 
 class StreamingCursor extends StatefulWidget {

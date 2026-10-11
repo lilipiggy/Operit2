@@ -1,3 +1,5 @@
+// ignore_for_file: deprecated_member_use
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -237,7 +239,7 @@ class SelectableMath extends StatelessWidget {
     }
 
     final textScaleFactor =
-        this.textScaleFactor ?? MediaQuery.textScaleFactorOf(context);
+        this.textScaleFactor ?? MediaQuery.textScalerOf(context).scale(1.0);
 
     final options = this.options ??
         MathOptions(

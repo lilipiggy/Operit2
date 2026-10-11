@@ -7,8 +7,10 @@ class PackageManagerSnapshot {
     required this.availablePackages,
     required this.enabledPackageNames,
     required this.pluginContainers,
+    required this.pluginContainerOrder,
     required this.enabledPluginContainerNames,
-    required this.bundledExternalPackageCandidates,
+    required this.bundledExternalCandidates,
+    required this.pluginLoadIssues,
   });
 
   factory PackageManagerSnapshot.empty() {
@@ -16,35 +18,43 @@ class PackageManagerSnapshot {
       availablePackages: <String, core_proxy.ToolPackage>{},
       enabledPackageNames: <String>{},
       pluginContainers: <core_proxy.ToolPkgContainerRuntime>[],
+      pluginContainerOrder: <String>[],
       enabledPluginContainerNames: <String>{},
-      bundledExternalPackageCandidates:
-          <core_proxy.BundledExternalPackageCandidate>[],
+      bundledExternalCandidates: <core_proxy.BundledExternalPackageCandidate>[],
+      pluginLoadIssues: <core_proxy.ToolPkgLoadIssue>[],
     );
   }
 
   final Map<String, core_proxy.ToolPackage> availablePackages;
   final Set<String> enabledPackageNames;
   final List<core_proxy.ToolPkgContainerRuntime> pluginContainers;
+  final List<String> pluginContainerOrder;
   final Set<String> enabledPluginContainerNames;
   final List<core_proxy.BundledExternalPackageCandidate>
-  bundledExternalPackageCandidates;
+  bundledExternalCandidates;
+  final List<core_proxy.ToolPkgLoadIssue> pluginLoadIssues;
 
   bool get isEmpty =>
       availablePackages.isEmpty &&
       pluginContainers.isEmpty &&
-      bundledExternalPackageCandidates.isEmpty;
+      bundledExternalCandidates.isEmpty &&
+      pluginLoadIssues.isEmpty;
 
   PackageManagerSnapshot copyWith({
     Set<String>? enabledPackageNames,
     Set<String>? enabledPluginContainerNames,
+    List<String>? pluginContainerOrder,
+    List<core_proxy.ToolPkgLoadIssue>? pluginLoadIssues,
   }) {
     return PackageManagerSnapshot(
       availablePackages: availablePackages,
       enabledPackageNames: enabledPackageNames ?? this.enabledPackageNames,
       pluginContainers: pluginContainers,
+      pluginContainerOrder: pluginContainerOrder ?? this.pluginContainerOrder,
       enabledPluginContainerNames:
           enabledPluginContainerNames ?? this.enabledPluginContainerNames,
-      bundledExternalPackageCandidates: bundledExternalPackageCandidates,
+      bundledExternalCandidates: bundledExternalCandidates,
+      pluginLoadIssues: pluginLoadIssues ?? this.pluginLoadIssues,
     );
   }
 }

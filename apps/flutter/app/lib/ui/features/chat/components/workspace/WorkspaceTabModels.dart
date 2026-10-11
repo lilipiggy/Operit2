@@ -2,16 +2,17 @@
 
 import 'package:flutter/material.dart';
 import 'package:operit2/core/web_visit/WebVisitModels.dart';
+import 'file_preview/WorkspaceTextDocument.dart';
 
 enum WorkspaceTabKind {
   home,
-  setup,
   workspacePicker,
   files,
   terminal,
   browser,
   webVisit,
   filePreview,
+  plugin,
 }
 
 enum WorkspaceFilePreviewKind {
@@ -29,6 +30,7 @@ enum WorkspaceFilePreviewKind {
 }
 
 class WorkspaceTab {
+  /// Creates a workspace tab with optional persistent text editing state.
   const WorkspaceTab({
     required this.kind,
     required this.title,
@@ -36,7 +38,7 @@ class WorkspaceTab {
     this.closable = true,
     this.filePath,
     this.absolutePath,
-    this.fileContent,
+    this.textDocument,
     this.previewKind,
     this.url,
     this.userAgent,
@@ -46,6 +48,10 @@ class WorkspaceTab {
     this.terminalSessionId,
     this.terminalType,
     this.terminalWorkingDir,
+    this.pluginEntryId,
+    this.pluginPackageName,
+    this.pluginUiModuleId,
+    this.identityToken = '',
   });
 
   final WorkspaceTabKind kind;
@@ -54,7 +60,7 @@ class WorkspaceTab {
   final bool closable;
   final String? filePath;
   final String? absolutePath;
-  final String? fileContent;
+  final WorkspaceTextDocument? textDocument;
   final WorkspaceFilePreviewKind? previewKind;
   final String? url;
   final String? userAgent;
@@ -64,6 +70,19 @@ class WorkspaceTab {
   final String? terminalSessionId;
   final String? terminalType;
   final String? terminalWorkingDir;
+  final String? pluginEntryId;
+  final String? pluginPackageName;
+  final String? pluginUiModuleId;
+  final String identityToken;
+}
+
+/// Carries a regular workspace tab through an internal pane drag operation.
+@immutable
+class WorkspaceTabDragPayload {
+  /// Creates a payload for one tab that can move between workspace panes.
+  const WorkspaceTabDragPayload({required this.tab});
+
+  final WorkspaceTab tab;
 }
 
 WorkspaceFilePreviewKind workspacePreviewKindForPath(String path) {

@@ -11,8 +11,8 @@ use operit_plugin_sdk::toolpkg::ToolPkgHooks::{
     decodeToolPkgHookResult, ToolPkgAiProviderRegistration,
 };
 use operit_providers::runtime_support::{
-    ProviderCharacterPromptContext, ProviderFunctionModelBinding, ProviderMessageTiming,
-    ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
+    ProviderCharacterPromptContext, ProviderFunctionModelBinding, ProviderMemoryAutoSaveMessage,
+    ProviderMessageTiming, ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
     ProviderRuntimeSupportFuture, ProviderToolPkgAiProviderRegistration,
 };
 use operit_tools::tools::skill_runtime::SkillRepository::SkillRepository;
@@ -23,7 +23,12 @@ use crate::data::preferences::CharacterCardManager::CharacterCardManager;
 use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
 use crate::data::preferences::MemorySearchSettingsPreferences::MemorySearchSettingsPreferences;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
+use crate::data::preferences::SharedMemoryStoreManager::SharedMemoryStoreManager;
 use crate::plugins::toolpkg::ToolPkgAiProviderRegistry::ToolPkgAiProviderRegistry;
+use operit_model::CharacterCard::CharacterCardMemoryBindingMode;
+use operit_store::repository::ChatHistoryManager::ChatHistoryManager;
+use operit_store::RuntimeStorePaths::RuntimeStorePaths;
+use operit_util::OperitPaths::{characterMemoryOwnerKey, sharedMemoryOwnerKey};
 
 /// Creates runtime-backed services required by provider crates.
 pub struct ProviderRuntimeSupportService;
@@ -77,6 +82,100 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
         MemorySearchSettingsPreferences::new(ownerKey)
             .load()
             .map_err(|error| error.to_string())
+    }
+
+    fn disableUserPreferenceDescription(&self) -> Result<bool, String> {
+        Ok(crate::data::preferences::ApiPreferences::ApiPreferences::getInstance()
+            .disableUserPreferenceDescriptionFlow().first().map_err(|e|e.to_string())?)
+    }
+
+    /// Resolves the owner key selected by one character card.
+    fn memoryOwnerKeyForCharacterCard(&self, roleCardId: &str) -> Result<String, String> {
+        let card = CharacterCardManager::getInstance()
+            .getCharacterCard(roleCardId)
+            .map_err(|error| error.to_string())?;
+        if CharacterCardMemoryBindingMode::normalize(Some(&card.memoryBindingMode))
+            == CharacterCardMemoryBindingMode::SHARED
+        {
+            let sharedId = card
+                .sharedMemoryId
+                .as_deref()
+                .ok_or_else(|| "shared memory binding requires sharedMemoryId".to_string())?;
+            sharedMemoryOwnerKey(sharedId)
+        } else {
+            characterMemoryOwnerKey(&card.id)
+        }
+    }
+
+    /// Lists character and shared memory owners visible to the runtime.
+    fn memoryAutoSaveOwnerKeys(&self) -> Result<Vec<String>, String> {
+        let mut ownerKeys = Vec::new();
+        for card in CharacterCardManager::getInstance()
+            .getAllCharacterCards()
+            .map_err(|error| error.to_string())?
+        {
+            ownerKeys.push(self.memoryOwnerKeyForCharacterCard(&card.id)?);
+        }
+        for store in SharedMemoryStoreManager::getInstance().getAllSharedMemoryStores()? {
+            ownerKeys.push(sharedMemoryOwnerKey(&store.id)?);
+        }
+        ownerKeys.sort();
+        ownerKeys.dedup();
+        Ok(ownerKeys)
+    }
+
+    /// Loads hydrated messages before one trigger timestamp for provider background work.
+    fn memoryAutoSaveMessagesBefore(
+        &self,
+        chatId: &str,
+        maxTimestampInclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryAutoSaveMessage>, String> {
+        let manager = ChatHistoryManager::getInstance(RuntimeStorePaths::default())
+            .map_err(|error| error.to_string())?;
+        manager
+            .loadChatMessagesDescUpTo(chatId.to_string(), maxTimestampInclusive, limit as i32)
+            .map_err(|error| error.to_string())
+            .map(|messages| {
+                messages
+                    .into_iter()
+                    .map(|message| {
+                        let content = message.displayText();
+                        ProviderMemoryAutoSaveMessage {
+                            timestamp: message.timestamp,
+                            sender: message.sender,
+                            content,
+                        }
+                    })
+                    .collect()
+            })
+    }
+
+    /// Loads hydrated messages for explicitly selected timestamps.
+    fn memoryAutoSaveMessagesByTimestamps(
+        &self,
+        chatId: &str,
+        timestamps: &[i64],
+    ) -> Result<Vec<ProviderMemoryAutoSaveMessage>, String> {
+        let manager = ChatHistoryManager::getInstance(RuntimeStorePaths::default())
+            .map_err(|error| error.to_string())?;
+        manager
+            .loadChatMessages(chatId)
+            .map_err(|error| error.to_string())
+            .map(|messages| {
+                messages
+                    .into_iter()
+                    .filter(|message| timestamps.contains(&message.timestamp))
+                    .map(|message| {
+                        let content = message.displayText();
+                        ProviderMemoryAutoSaveMessage {
+                            timestamp: message.timestamp,
+                            sender: message.sender,
+                            content,
+                        }
+                    })
+                    .collect()
+            })
     }
 
     /// Resolves character prompt data for a selected role card.
@@ -146,6 +245,24 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
             .map_err(|error| error.to_string())
     }
 
+    /// Returns the saved ChatGPT Codex session.
+    fn loadCodexTokens(
+        &self,
+    ) -> Result<operit_providers::chat::llmprovider::CodexOAuth::CodexOAuthTokens, String> {
+        crate::data::preferences::CodexAuthPreferences::CodexAuthPreferences::getInstance()
+            .load()?
+            .ok_or_else(|| "Codex authorization is required".to_string())
+    }
+
+    /// Persists a refreshed ChatGPT Codex session.
+    fn saveCodexTokens(
+        &self,
+        tokens: operit_providers::chat::llmprovider::CodexOAuth::CodexOAuthTokens,
+    ) -> Result<(), String> {
+        crate::data::preferences::CodexAuthPreferences::CodexAuthPreferences::getInstance()
+            .save(&tokens)
+    }
+
     /// Returns a provider profile by id.
     fn providerProfile(
         &self,
@@ -180,7 +297,8 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
         runtimeContextKey: Option<String>,
         executionKind: Option<String>,
         onIntermediateResult: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Result<Option<String>, String> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>>
+    {
         let package_manager = self.tool_handler.getOrCreatePackageManager();
         let manager = package_manager
             .lock()

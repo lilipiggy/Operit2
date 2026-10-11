@@ -2279,16 +2279,6 @@ export interface ComposeModifierOp {
 }
 
 /**
- * Serializable sequence of modifier operations attached to a Compose node.
- */
-export interface ComposeModifierValue {
-  /**
-   * Operations applied in chain order by the host renderer.
-   */
-  __modifierOps: ComposeModifierOp[];
-}
-
-/**
  * Stores a dynamically dispatched Compose modifier implementation.
  */
 export type ComposeModifierProxy = ComposeModifierProxyApi;
@@ -2569,10 +2559,6 @@ export interface ComposeModifierProxyApi {
    * Matches the final size of the containing box without affecting its measurement.
    */
   matchParentSize(): ComposeModifierProxy;
-  /**
-   * Serializes the accumulated modifier operations for transport to the host.
-   */
-  toJSON(): ComposeModifierValue;
 }
 
 /**
@@ -2616,7 +2602,7 @@ export interface ComposeCommonProps {
   /**
    * Ordered modifier operations applied to layout, drawing, and input.
    */
-  modifier?: ComposeModifierValue;
+  modifier?: ComposeModifierProxy;
   /**
    * Sibling draw order, with larger values rendered above smaller ones.
    */
@@ -2745,6 +2731,32 @@ export interface RowProps extends ComposeCommonProps {
    * Optional click action for the row as one interactive target.
    */
   onClick?: () => RowPropsOnClickOutput;
+}
+
+/**
+ * Properties for laying out child nodes horizontally across multiple lines.
+ */
+export interface FlowRowProps extends ComposeCommonProps {
+  /**
+   * Child nodes placed from start to end and continued on a new line when needed.
+   */
+  content?: ComposeChildren;
+  /**
+   * Distribution of children across each horizontal line.
+   */
+  horizontalArrangement?: ComposeArrangement;
+  /**
+   * Distribution of completed lines within the flow row height.
+   */
+  verticalArrangement?: ComposeArrangement;
+  /**
+   * Vertical alignment of children within each horizontal line.
+   */
+  itemVerticalAlignment?: ComposeAlignment;
+  /**
+   * Gap inserted between completed horizontal lines.
+   */
+  runSpacing?: number;
 }
 
 /**
@@ -3001,6 +3013,42 @@ export interface ButtonProps extends ComposeCommonProps {
    * Outline used for button background, border, and clipping.
    */
   shape?: ComposeShape;
+  /**
+   * Foreground color used by the shared Material button renderer.
+   */
+  contentColor?: ComposeColor;
+}
+
+/**
+ * Host popup menu with a labeled anchor and indexed selection callback.
+ */
+export interface DropdownMenuProps extends ComposeCommonProps {
+  /**
+   * Label displayed above the selected value.
+   */
+  label: string;
+  /**
+   * Currently selected text displayed inside the anchor.
+   */
+  text: string;
+  /**
+   * Whether the popup accepts interaction.
+   */
+  enabled?: boolean;
+  /**
+   * Action receiving the selected zero-based item index.
+   */
+  onClick: (arg0: number) => void;
+}
+
+/**
+ * Material floating action with a named icon and standard button properties.
+ */
+export interface FloatingActionButtonProps extends ButtonProps {
+  /**
+   * Material icon displayed inside the floating button.
+   */
+  icon: string;
 }
 
 /**
@@ -3432,9 +3480,201 @@ export type ComposeChildren = ComposeNode | ComposeNode[] | null | undefined;
 export type ComposeNodeFactory<TProps = Record<string, unknown>> = (arg0?: TProps, arg1?: ComposeChildren) => ComposeNode;
 
 /**
+ * Completion returned by dialog actions.
+ */
+export type ComposeDialogActionOutput = void | Promise<void>;
+
+/**
+ * Dialog text supplied as a literal or a node slot.
+ */
+export type ComposeDialogText = string | ComposeChildren;
+
+/**
+ * Modal dismissal and window layout policies.
+ */
+export interface DialogProperties {
+  /**
+   * Allows dismissal requests from the back button.
+   */
+  dismissOnBackPress?: boolean;
+  /**
+   * Allows dismissal requests from the modal barrier.
+   */
+  dismissOnClickOutside?: boolean;
+  /**
+   * Applies the platform's preferred dialog width.
+   */
+  usePlatformDefaultWidth?: boolean;
+  /**
+   * Insets dialog content around system UI.
+   */
+  decorFitsSystemWindows?: boolean;
+}
+
+/**
+ * Properties for a custom modal dialog.
+ */
+export interface DialogProps extends ComposeCommonProps {
+  /**
+   * Custom modal content.
+   */
+  content?: ComposeChildren;
+  /**
+   * Receives back-button and outside-click dismissal requests.
+   */
+  onDismissRequest?: () => ComposeDialogActionOutput;
+  /**
+   * Closes the modal after a dismissal request; defaults to true.
+   */
+  closeOnDismissRequest?: boolean;
+  /**
+   * Modal background color.
+   */
+  containerColor?: ComposeColor;
+  /**
+   * Modal foreground color.
+   */
+  contentColor?: ComposeColor;
+  /**
+   * Modal elevation.
+   */
+  tonalElevation?: number;
+  /**
+   * Modal surface shape.
+   */
+  shape?: ComposeShape;
+  /**
+   * Modal window policies.
+   */
+  properties?: DialogProperties;
+}
+
+/**
+ * Properties for a modal confirmation dialog.
+ */
+export interface AlertDialogProps extends ComposeCommonProps {
+  /**
+   * Dialog heading as text or child nodes.
+   */
+  title?: ComposeDialogText;
+  /**
+   * Dialog body as text or child nodes.
+   */
+  text?: ComposeDialogText;
+  /**
+   * Markdown body content.
+   */
+  markdown?: string;
+  /**
+   * Custom body content.
+   */
+  content?: ComposeChildren;
+  /**
+   * Leading dialog icon.
+   */
+  icon?: ComposeChildren;
+  /**
+   * Custom confirmation control.
+   */
+  confirmButton?: ComposeChildren;
+  /**
+   * Custom dismissal control.
+   */
+  dismissButton?: ComposeChildren;
+  /**
+   * Confirmation button label.
+   */
+  confirmText?: string;
+  /**
+   * Dismissal button label.
+   */
+  dismissText?: string;
+  /**
+   * Receives confirmation button actions.
+   */
+  onConfirm?: () => ComposeDialogActionOutput;
+  /**
+   * Receives dismissal button actions.
+   */
+  onDismiss?: () => ComposeDialogActionOutput;
+  /**
+   * Receives back-button and outside-click dismissal requests.
+   */
+  onDismissRequest?: () => ComposeDialogActionOutput;
+  /**
+   * Closes after confirmation; defaults to true.
+   */
+  closeOnConfirm?: boolean;
+  /**
+   * Closes after dismissal; defaults to true.
+   */
+  closeOnDismiss?: boolean;
+  /**
+   * Closes after a dismissal request; defaults to true.
+   */
+  closeOnDismissRequest?: boolean;
+  /**
+   * Modal background color.
+   */
+  containerColor?: ComposeColor;
+  /**
+   * Icon foreground color.
+   */
+  iconContentColor?: ComposeColor;
+  /**
+   * Title foreground color.
+   */
+  titleContentColor?: ComposeColor;
+  /**
+   * Body foreground color.
+   */
+  textContentColor?: ComposeColor;
+  /**
+   * Modal elevation.
+   */
+  tonalElevation?: number;
+  /**
+   * Modal surface shape.
+   */
+  shape?: ComposeShape;
+  /**
+   * Modal window policies.
+   */
+  properties?: DialogProperties;
+}
+
+/**
  * Core component factories available through `ComposeDslContext::UI`.
  */
 export interface ComposeUiFactoryRegistry {
+  /**
+   * Creates a text-only Material button.
+   */
+  TextButton: ComposeNodeFactory<ButtonProps>;
+  /**
+   * Creates a filled tonal Material button.
+   */
+  FilledTonalButton: ComposeNodeFactory<ButtonProps>;
+  /**
+   * Creates an anchored popup with indexed item selection.
+   */
+  DropdownMenu: ComposeNodeFactory<DropdownMenuProps>;
+  /**
+   * Creates a floating action button with a named icon.
+   */
+  FloatingActionButton: ComposeNodeFactory<FloatingActionButtonProps>;
+  /**
+   * Creates a compact floating action button with a named icon.
+   */
+  SmallFloatingActionButton: ComposeNodeFactory<FloatingActionButtonProps>;
+  /**
+   * Creates a custom modal dialog.
+   */
+  Dialog: ComposeNodeFactory<DialogProps>;
+  /**
+   * Creates a modal confirmation dialog.
+   */
+  AlertDialog: ComposeNodeFactory<AlertDialogProps>;
   /**
    * Creates a vertical layout container.
    */
@@ -3443,6 +3683,10 @@ export interface ComposeUiFactoryRegistry {
    * Creates a horizontal layout container.
    */
   Row: ComposeNodeFactory<RowProps>;
+  /**
+   * Creates a horizontal layout container that wraps child nodes across lines.
+   */
+  FlowRow: ComposeNodeFactory<FlowRowProps>;
   /**
    * Creates a stacking layout container.
    */
@@ -3590,7 +3834,7 @@ export interface ComposeResolveToolNameRequest {
 /**
  * Selects one source for the host file picker.
  */
-export type ComposeFilePickerMode = "document" | "photo" | "video" | "media";
+export type ComposeFilePickerMode = "document" | "photo" | "image" | "video" | "media" | "directory";
 
 /**
  * Selection behavior for the host file picker.
@@ -3604,6 +3848,10 @@ export interface ComposeFilePickerOptions {
    * Whether the user may select more than one document or visual-media item.
    */
   allowMultiple?: boolean;
+  /**
+   * MIME types accepted by the document selector.
+   */
+  mimeTypes?: string[];
 }
 
 /**
@@ -3673,9 +3921,46 @@ export interface ComposeRouteInfo {
 }
 
 /**
+ * Resolved colors and brightness supplied by the current UI host.
+ */
+export interface ComposeThemeSnapshot {
+  /**
+   * Effective host brightness, either light or dark.
+   */
+  brightness: string;
+  /**
+   * Resolved Material color roles encoded as CSS RRGGBBAA hex strings.
+   */
+  colors: Record<string, string>;
+}
+
+/**
+ * Completion returned by a theme change listener.
+ */
+export type ComposeThemeListenerOutput = void | Promise<void>;
+
+/**
+ * Host theme service independent of any WebView or rendering framework.
+ */
+export interface ComposeTheme {
+  /**
+   * Returns the current resolved theme; throws when no UI host supplied a theme.
+   */
+  getCurrent(): ComposeThemeSnapshot;
+  /**
+   * Observes later theme changes and returns an unsubscribe function.
+   */
+  subscribe(listener: (arg0: ComposeThemeSnapshot) => ComposeThemeListenerOutput): () => void;
+}
+
+/**
  * Theme, modifier builder, and component factories supplied to a screen renderer.
  */
 export interface ComposeDslContext {
+  /**
+   * Reads and observes the resolved theme of the current plugin UI host.
+   */
+  Theme: ComposeTheme;
   /**
    * Active Material theme values resolved by the host.
    */

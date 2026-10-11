@@ -4,6 +4,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'RetainedPage.dart';
+
 /// Hosts a resizable trailing panel on wide layouts and an overlay panel on phones.
 class AdaptiveSidePanel extends StatefulWidget {
   /// Creates a responsive trailing panel around the primary content.
@@ -20,6 +22,8 @@ class AdaptiveSidePanel extends StatefulWidget {
     this.resizeHandleHitWidth = 24,
     this.resizeHandleVisualWidth = 3,
     this.resizeHandleHeight = 56,
+    this.closedDropTarget,
+    this.animate = true,
   });
 
   final bool open;
@@ -33,6 +37,8 @@ class AdaptiveSidePanel extends StatefulWidget {
   final double resizeHandleHitWidth;
   final double resizeHandleVisualWidth;
   final double resizeHandleHeight;
+  final Widget? closedDropTarget;
+  final bool animate;
 
   /// Creates the state that tracks the panel width and drag interaction.
   @override
@@ -41,13 +47,32 @@ class AdaptiveSidePanel extends StatefulWidget {
 
 class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
   double? _panelWidth;
-  double? _dragStartGlobalX;
-  double? _dragStartWidth;
   bool _resizing = false;
+  bool _closing = false;
 
-  /// Builds the responsive side-panel layout from the available constraints.
+  /// Keeps the panel live only until its visible closing transition completes.
+  @override
+  void didUpdateWidget(covariant AdaptiveSidePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.open) {
+      _closing = false;
+    } else if (oldWidget.open) {
+      _closing = _animationDuration > Duration.zero;
+    }
+  }
+
+  /// Suspends the retained panel after it leaves the visible viewport.
+  void _finishPanelTransition() {
+    if (_closing && !widget.open) {
+      setState(() => _closing = false);
+    }
+  }
+
+  /// Changes only geometry when the available width crosses the breakpoint.
   @override
   Widget build(BuildContext context) {
+    // Retain the content widget across LayoutBuilder's constraint-only frames.
+    final content = widget.child;
     return LayoutBuilder(
       builder: (context, constraints) {
         final useWideLayout = constraints.maxWidth >= widget.breakpoint;
@@ -62,14 +87,13 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           minimumPanelWidth,
           maximumPanelWidth,
         );
-        if (useWideLayout) {
-          return _buildWideLayout(
-            panelWidth,
-            minimumPanelWidth,
-            maximumPanelWidth,
-          );
-        }
-        return _buildPhoneLayout(panelWidth);
+        return _buildLayout(
+          content: content,
+          useWideLayout: useWideLayout,
+          width: panelWidth,
+          minimum: minimumPanelWidth,
+          maximum: maximumPanelWidth,
+        );
       },
     );
   }
@@ -84,22 +108,44 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
     return rawWidth.clamp(minimum, maximum).toDouble();
   }
 
-  /// Builds the side-by-side layout used at and above the configured breakpoint.
-  Widget _buildWideLayout(double width, double minimum, double maximum) {
+  /// Uses the same ancestry for wide and overlay layouts so neither the chat
+  /// nor the panel is unmounted by a navigation sidebar width animation.
+  Widget _buildLayout({
+    required Widget content,
+    required bool useWideLayout,
+    required double width,
+    required double minimum,
+    required double maximum,
+  }) {
     return Stack(
       clipBehavior: Clip.none,
       children: <Widget>[
         Row(
+          // Positioned chat bodies must fill the viewport, not shrink to
+          // their non-positioned overlays and then be vertically centered.
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Expanded(child: widget.child),
+            Expanded(child: content),
             AnimatedContainer(
               duration: _animationDuration,
               curve: Curves.easeOutCubic,
-              width: widget.open ? width : 0,
+              width: useWideLayout && widget.open ? width : 0,
             ),
           ],
         ),
+        if (!useWideLayout && widget.open)
+          Positioned.fill(
+            key: const ValueKey<String>('sidePanelDismissBarrier'),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => widget.onOpenChanged(false),
+              child: const ColoredBox(color: Colors.transparent),
+            ),
+          ),
         AnimatedPositionedDirectional(
+          // The dismiss barrier must not shift the retained panel's Stack slot.
+          key: const ValueKey<String>('sidePanelLayer'),
+          onEnd: _finishPanelTransition,
           duration: _animationDuration,
           curve: Curves.easeOutCubic,
           top: 0,
@@ -109,8 +155,13 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
           child: Stack(
             clipBehavior: Clip.none,
             children: <Widget>[
-              Positioned.fill(child: widget.panel),
-              if (widget.open)
+              Positioned.fill(
+                child: RetainedPage(
+                  active: widget.open || _closing,
+                  child: widget.panel,
+                ),
+              ),
+              if (useWideLayout && widget.open)
                 PositionedDirectional(
                   top: 0,
                   bottom: 0,
@@ -119,18 +170,28 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
                   child: _AdaptiveSidePanelResizeHandle(
                     visualWidth: widget.resizeHandleVisualWidth,
                     height: widget.resizeHandleHeight,
-                    onDragStart: (details) {
-                      _startResize(details.globalPosition.dx, width);
+                    onDragStart: (_) {
+                      _startResize(width);
                     },
                     onDragUpdate: (details) {
-                      _updateWidthFromGlobalX(
-                        details.globalPosition.dx,
+                      _updateWidthFromDelta(
+                        -details.delta.dx,
                         minimum,
                         maximum,
                       );
                     },
                     onDragEnd: _endResize,
                   ),
+                ),
+              if (useWideLayout &&
+                  !widget.open &&
+                  widget.closedDropTarget != null)
+                PositionedDirectional(
+                  top: 0,
+                  bottom: 0,
+                  end: 0,
+                  width: widget.resizeHandleHitWidth * 2,
+                  child: widget.closedDropTarget!,
                 ),
             ],
           ),
@@ -139,58 +200,17 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
     );
   }
 
-  /// Builds the overlay layout used below the configured breakpoint.
-  Widget _buildPhoneLayout(double width) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: <Widget>[
-        Positioned.fill(child: widget.child),
-        if (widget.open)
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => widget.onOpenChanged(false),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.18),
-                ),
-              ),
-            ),
-          ),
-        AnimatedPositionedDirectional(
-          duration: _animationDuration,
-          curve: Curves.easeOutCubic,
-          top: 0,
-          bottom: 0,
-          end: widget.open ? 0 : -width,
-          width: width,
-          child: widget.panel,
-        ),
-      ],
-    );
-  }
-
   /// Starts one drag-resize interaction from the current panel width.
-  void _startResize(double globalX, double width) {
+  void _startResize(double width) {
     setState(() {
       _resizing = true;
-      _dragStartGlobalX = globalX;
-      _dragStartWidth = width;
+      _panelWidth = width;
     });
   }
 
-  /// Applies a width derived from the active drag position.
-  void _updateWidthFromGlobalX(double globalX, double minimum, double maximum) {
-    final dragStartGlobalX = _dragStartGlobalX;
-    final dragStartWidth = _dragStartWidth;
-    if (dragStartGlobalX == null || dragStartWidth == null) {
-      return;
-    }
-    _updateWidth(
-      dragStartWidth - (globalX - dragStartGlobalX),
-      minimum,
-      maximum,
-    );
+  /// Applies a local drag delta so resizing follows the zoomed viewport.
+  void _updateWidthFromDelta(double delta, double minimum, double maximum) {
+    _updateWidth(_panelWidth! + delta, minimum, maximum);
   }
 
   /// Stores a clamped panel width while a drag-resize interaction is active.
@@ -207,14 +227,13 @@ class _AdaptiveSidePanelState extends State<AdaptiveSidePanel> {
     }
     setState(() {
       _resizing = false;
-      _dragStartGlobalX = null;
-      _dragStartWidth = null;
     });
   }
 
   /// Returns the transition duration appropriate for the current resize state.
-  Duration get _animationDuration =>
-      _resizing ? Duration.zero : const Duration(milliseconds: 220);
+  Duration get _animationDuration => _resizing || !widget.animate
+      ? Duration.zero
+      : const Duration(milliseconds: 220);
 }
 
 class _AdaptiveSidePanelResizeHandle extends StatelessWidget {

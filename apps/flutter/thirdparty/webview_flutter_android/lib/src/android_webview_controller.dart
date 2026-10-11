@@ -472,6 +472,47 @@ class AndroidWebViewController extends PlatformWebViewController {
   int get webViewIdentifier =>
       android_webview.PigeonInstanceManager.instance.getIdentifier(_webView)!;
 
+  /// Installs a native ScriptHandler before future page scripts execute.
+  @override
+  Future<String> addUserScript(WebViewUserScript userScript) async {
+    final identifier = await const MethodChannel('operit/webview_user_scripts')
+        .invokeMethod<String>('add', {
+          'viewIdentifier': webViewIdentifier,
+          'source': buildUserScriptSource(
+            userScript,
+            platformHandlesMainFrameOnly: false,
+          ),
+        });
+    if (identifier == null) {
+      throw StateError('Android WebView did not return a script handle');
+    }
+    return identifier;
+  }
+
+  /// Removes one native document-start ScriptHandler.
+  @override
+  Future<void> removeUserScript(String identifier) =>
+      const MethodChannel('operit/webview_user_scripts').invokeMethod<void>(
+        'remove',
+        {'viewIdentifier': webViewIdentifier, 'identifier': identifier},
+      );
+
+  /// Removes application scripts without touching Android JavaScript interfaces.
+  @override
+  Future<void> removeAllUserScripts() => const MethodChannel(
+    'operit/webview_user_scripts',
+  ).invokeMethod<void>('removeAll', {'viewIdentifier': webViewIdentifier});
+
+  @override
+  String get localResourceScheme => 'https';
+
+  @override
+  Future<void> setLocalResourceHandler(
+    WebViewLocalResourceHandler? handler,
+  ) async {
+    await WebViewLocalResourceBridge.setHandler(webViewIdentifier, handler);
+  }
+
   @override
   Future<void> loadFile(String absoluteFilePath) {
     return loadFileWithParams(
@@ -594,9 +635,17 @@ class AndroidWebViewController extends PlatformWebViewController {
   Future<Object> runJavaScriptReturningResult(String javaScript) async {
     final String? result = await _webView.evaluateJavascript(javaScript);
     if (result == null) {
-      return '';
+      throw ArgumentError(
+        'The JavaScript returned `null` or `undefined`, which is unsupported.',
+      );
     }
-    return jsonDecode(result);
+    final Object? decoded = jsonDecode(result);
+    if (decoded == null) {
+      throw ArgumentError(
+        'The JavaScript returned `null` or `undefined`, which is unsupported.',
+      );
+    }
+    return decoded;
   }
 
   @override
@@ -1169,22 +1218,22 @@ class AndroidJavaScriptChannelParams extends JavaScriptChannelParams {
 @immutable
 class AndroidWebViewWidgetCreationParams
     extends PlatformWebViewWidgetCreationParams {
-  /// Creates [AndroidWebWidgetCreationParams].
+  /// Creates parameters that use native Hybrid Composition by default.
   const AndroidWebViewWidgetCreationParams({
     super.key,
     required super.controller,
     super.layoutDirection,
     super.gestureRecognizers,
-    this.displayWithHybridComposition = false,
+    this.displayWithHybridComposition = true,
     @visibleForTesting
     this.platformViewsServiceProxy = const PlatformViewsServiceProxy(),
   });
 
-  /// Constructs a [WebKitWebViewWidgetCreationParams] using a
+  /// Constructs native Hybrid Composition parameters using a
   /// [PlatformWebViewWidgetCreationParams].
   AndroidWebViewWidgetCreationParams.fromPlatformWebViewWidgetCreationParams(
     PlatformWebViewWidgetCreationParams params, {
-    bool displayWithHybridComposition = false,
+    bool displayWithHybridComposition = true,
     @visibleForTesting
     PlatformViewsServiceProxy platformViewsServiceProxy =
         const PlatformViewsServiceProxy(),
@@ -1206,14 +1255,15 @@ class AndroidWebViewWidgetCreationParams
   /// Whether the [WebView] will be displayed using the Hybrid Composition
   /// PlatformView implementation.
   ///
-  /// For most use cases, this flag should be set to false. Hybrid Composition
-  /// can have performance costs but doesn't have the limitation of rendering to
-  /// an Android SurfaceTexture. See
+  /// Defaults to true in the Operit fork so the native WebView participates in
+  /// Android view composition without rendering into a Flutter texture.
+  /// Flutter overlays are composed above the native view by the engine.
+  /// Hybrid Composition has its own performance costs. See
   /// * https://docs.flutter.dev/platform-integration/android/platform-views#performance
   /// * https://github.com/flutter/flutter/issues/104889
   /// * https://github.com/flutter/flutter/issues/116954
   ///
-  /// Defaults to false.
+  /// Explicitly setting this to false opts into texture layer composition.
   final bool displayWithHybridComposition;
 
   @override
@@ -1236,7 +1286,7 @@ class AndroidWebViewWidgetCreationParams
 
 /// An implementation of [PlatformWebViewWidget] with the Android WebView API.
 class AndroidWebViewWidget extends PlatformWebViewWidget {
-  /// Constructs a [WebKitWebViewWidget].
+  /// Constructs an Android WebView with native composition by default.
   AndroidWebViewWidget(PlatformWebViewWidgetCreationParams params)
     : super.implementation(
         params is AndroidWebViewWidgetCreationParams
@@ -1366,7 +1416,7 @@ class AndroidCustomViewWidget extends StatelessWidget {
       onCreatePlatformView: (PlatformViewCreationParams params) {
         return _initAndroidView(
             params,
-            displayWithHybridComposition: false,
+            displayWithHybridComposition: true,
             platformViewsServiceProxy: platformViewsServiceProxy,
             view: customView,
           )
@@ -1377,6 +1427,7 @@ class AndroidCustomViewWidget extends StatelessWidget {
   }
 }
 
+/// Creates the Android view using the explicitly selected composition mode.
 AndroidViewController _initAndroidView(
   PlatformViewCreationParams params, {
   required bool displayWithHybridComposition,

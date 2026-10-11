@@ -53,6 +53,23 @@ class FileSelectorAndroid extends FileSelectorPlatform {
     return files.map<XFile>(_xFileFromFileResponse).toList();
   }
 
+  /// Saves a host file through the native picker without reading its bytes in Dart.
+  @override
+  Future<FileSaveLocation?> saveFileReference({
+    required XFile file,
+    List<XTypeGroup>? acceptedTypeGroups,
+    SaveDialogOptions options = const SaveDialogOptions(),
+  }) async {
+    final path = await _saveChannel
+        .invokeMethod<String>('saveFileFromPath', <String, Object?>{
+          'sourcePath': file.path,
+          'name': options.suggestedName ?? file.name,
+          'mimeType': file.mimeType ?? 'application/octet-stream',
+          'initialDirectory': options.initialDirectory,
+        });
+    return path == null ? null : FileSaveLocation(path);
+  }
+
   /// Saves [file] through Android's Storage Access Framework document creator.
   @override
   Future<FileSaveLocation?> saveFile({
@@ -82,14 +99,13 @@ class FileSelectorAndroid extends FileSelectorPlatform {
     if (file.fileSelectorNativeException != null) {
       _resolveErrorCodeAndMaybeThrow(file.fileSelectorNativeException!);
     }
-    return XFile.fromData(
-      file.bytes,
-      // Note: The name parameter is not used by XFile. The XFile.name returns
-      // the extracted file name from XFile.path.
+    // Android has already made a bounded file-backed cache copy. Reading is lazy;
+    // selection must not retain an in-memory copy of the entire selected file.
+    return XFile(
+      file.path,
       name: file.name,
       length: file.size,
       mimeType: file.mimeType,
-      path: file.path,
     );
   }
 

@@ -19,6 +19,7 @@ import '../components/EmptyState.dart';
 import '../market/ArtifactMarketSupport.dart';
 import '../market/MarketBrowseControls.dart';
 import '../market/MarketBrowseList.dart';
+import '../market/MarketInstallStateStore.dart';
 import '../market/MarketStatsSupport.dart';
 import 'ArtifactPublishScreen.dart';
 import 'GitHubOAuthLoginDialog.dart';
@@ -302,7 +303,7 @@ class _MarketListPaneState extends State<_MarketListPane> {
   String? _errorMessage;
   int _page = 1;
   int _totalPages = 1;
-  final Set<String> _busyEntryIds = <String>{};
+  late final MarketInstallStateStore _installState;
   List<core_proxy.MarketEntrySummary> _items =
       <core_proxy.MarketEntrySummary>[];
   List<core_proxy.MarketEntrySummary> _searchItems =
@@ -322,7 +323,20 @@ class _MarketListPaneState extends State<_MarketListPane> {
   @override
   void initState() {
     super.initState();
+    _installState = MarketInstallStateStore.of(widget.clients);
+    _installState.addListener(_onInstallStateChanged);
+    _installState.refresh();
     _loadFirstPage();
+  }
+
+  void _onInstallStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _installState.removeListener(_onInstallStateChanged);
+    super.dispose();
   }
 
   /// Synchronizes search, filter, and featured prefetch state with new inputs.
@@ -408,7 +422,10 @@ class _MarketListPaneState extends State<_MarketListPane> {
       _totalPages = 1;
     });
     try {
-      await _loadFirstPage();
+      await Future.wait(<Future<void>>[
+        _loadFirstPage(),
+        _installState.refresh(),
+      ]);
     } finally {
       if (mounted && refreshGeneration == _refreshGeneration) {
         setState(() {
@@ -666,19 +683,28 @@ class _MarketListPaneState extends State<_MarketListPane> {
         items: displayed,
         groupByUpdatedDate: widget.sortOption == MarketSortOption.updated,
         updatedAt: (item) => item.updatedAt,
-        itemBuilder: (item) => MarketGridCard(
-          title: item.title,
-          description: item.description,
-          author: item.publisher?.login ?? item.author?.login ?? '',
-          downloads: _entryDownloads(item),
-          likes: _reactionTotal(item, '+1'),
-          hearts: _reactionTotal(item, 'heart'),
-          actionLabel: _actionLabel(item),
-          actionIcon: Icons.download_outlined,
-          actionBusy: _busyEntryIds.contains(item.id),
-          onAction: () => _installEntry(item),
-          onTap: () => _openDetails(item),
-        ),
+        itemBuilder: (item) {
+          final localState = _installState.stateFor(item);
+          final installing = _installState.isInstalling(item.id);
+          return MarketGridCard(
+            title: item.title,
+            apiVersion: item.latestVersion?.apiVersion,
+            description: item.description,
+            author: item.publisher?.login ?? item.author?.login ?? '',
+            downloads: _entryDownloads(item),
+            likes: _reactionTotal(item, '+1'),
+            hearts: _reactionTotal(item, 'heart'),
+            actionLabel: installing ? '安装中' : localState.actionLabel(item),
+            actionIcon: localState.actionIcon,
+            actionBusy: installing,
+            actionEnabled: localState != MarketLocalInstallState.installed,
+            statusLabel: localState.badgeLabel,
+            updateAvailable:
+                localState == MarketLocalInstallState.updateAvailable,
+            onAction: () => _installEntry(item),
+            onTap: () => _openDetails(item),
+          );
+        },
       );
     }
     return Column(
@@ -724,95 +750,25 @@ class _MarketListPaneState extends State<_MarketListPane> {
     );
   }
 
+  /// Successful installs are represented inline; bottom messages are errors only.
   Future<void> _installEntry(core_proxy.MarketEntrySummary item) async {
-    setState(() {
-      _busyEntryIds.add(item.id);
-    });
+    if (_installState.isInstalling(item.id) ||
+        _installState.stateFor(item) == MarketLocalInstallState.installed) {
+      return;
+    }
     try {
-      ensureMarketEntryVersionSupported(entry: item);
-      if (item.type == 'skill') {
-        await _installSkill(item);
-      } else if (item.type == 'mcp') {
-        await _installMcp(item);
-      } else {
-        final result = await runCoreMarketInstall(
-          clients: widget.clients,
-          type: item.type,
-          entryId: item.id,
-        );
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-      }
+      await _installState.install(item);
     } catch (error, stackTrace) {
       debugPrint('Failed to install market entry: $error\n$stackTrace');
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(error.toString()),
           behavior: SnackBarBehavior.floating,
         ),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _busyEntryIds.remove(item.id);
-        });
-      }
     }
   }
-
-  Future<void> _installSkill(core_proxy.MarketEntrySummary item) async {
-    final repoUrl = item.source?.url.trim() ?? '';
-    if (repoUrl.isEmpty) {
-      throw StateError('技能缺少仓库地址');
-    }
-    final result = await widget.clients.application
-        .skillRepository()
-        .importSkillFromGitHubRepo(repoUrl: repoUrl);
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result), behavior: SnackBarBehavior.floating),
-    );
-  }
-
-  Future<void> _installMcp(core_proxy.MarketEntrySummary item) async {
-    final repoUrl = item.source?.url.trim() ?? '';
-    if (repoUrl.isEmpty) {
-      throw StateError('MCP 缺少仓库地址');
-    }
-    final result = await widget.clients.application
-        .mcpRepository()
-        .installMcpServerWithObjectForFlutter(
-          pluginId: _safePackageId(item.title),
-          repoUrl: repoUrl,
-          name: item.title,
-          description: item.description,
-          mcpConfig:
-              item.repoVersion?.installConfig ??
-              item.latestVersion?.installConfig ??
-              '',
-        );
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result), behavior: SnackBarBehavior.floating),
-    );
-  }
-}
-
-String _actionLabel(core_proxy.MarketEntrySummary item) {
-  return (item.type == 'script' || item.type == 'package') ? '下载' : '安装';
 }
 
 int _reactionTotal(core_proxy.MarketEntrySummary item, String reaction) {
@@ -1510,15 +1466,6 @@ int _pageCount(int total, int pageSize) {
   return ((total + size - 1) ~/ size).clamp(1, 1 << 30);
 }
 
-String _safePackageId(String raw) {
-  final normalized = raw
-      .trim()
-      .replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')
-      .replaceAll(RegExp(r'_+'), '_')
-      .replaceAll(RegExp(r'^_|_$'), '');
-  return normalized.isEmpty ? 'market_item' : normalized;
-}
-
 class _MarketCategoryScopeHeader extends StatelessWidget {
   const _MarketCategoryScopeHeader({required this.title});
 
@@ -1735,8 +1682,11 @@ class _MarketCategoryGridSliver extends StatelessWidget {
   final List<core_proxy.MarketCategoryInfo> categories;
   final ValueChanged<core_proxy.MarketCategoryInfo> onOpenCategory;
 
+  /// Retains the category delegate until its data or column count changes.
   @override
   Widget build(BuildContext context) {
+    int? layoutColumns;
+    late Widget grid;
     return SliverLayoutBuilder(
       builder: (context, constraints) {
         final columnCount = constraints.crossAxisExtent >= 1280
@@ -1744,21 +1694,30 @@ class _MarketCategoryGridSliver extends StatelessWidget {
             : constraints.crossAxisExtent >= 760
             ? 2
             : 1;
-        return SliverGrid.builder(
-          itemCount: categories.length,
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columnCount,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 8,
-            mainAxisExtent: 128,
-          ),
-          itemBuilder: (context, index) {
-            final category = categories[index];
-            return _MarketCategoryGridCard(
-              category: category,
-              onTap: () => onOpenCategory(category),
-            );
-          },
+        if (layoutColumns != columnCount) {
+          layoutColumns = columnCount;
+          grid = _buildGrid(columnCount);
+        }
+        return grid;
+      },
+    );
+  }
+
+  /// Builds category cards lazily using their existing fixed-height layout.
+  Widget _buildGrid(int columnCount) {
+    return SliverGrid.builder(
+      itemCount: categories.length,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: columnCount,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 8,
+        mainAxisExtent: 128,
+      ),
+      itemBuilder: (context, index) {
+        final category = categories[index];
+        return _MarketCategoryGridCard(
+          category: category,
+          onTap: () => onOpenCategory(category),
         );
       },
     );
@@ -2010,16 +1969,13 @@ class _MarketMinePaneState extends State<_MarketMinePane> {
     );
   }
 
-  /// Opens the GitHub OAuth broker login dialog for this market session.
+  /// Opens the shared GitHub OAuth browser-choice flow for this market session.
   void _showGitHubLoginDialog(BuildContext context) {
     unawaited(
-      showDialog<void>(
+      showGitHubOAuthLoginDialog(
         context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => GitHubOAuthLoginDialog(
-          clients: widget.clients,
-          onLoginCompleted: _loadAuthState,
-        ),
+        clients: widget.clients,
+        onLoginCompleted: _loadAuthState,
       ),
     );
   }

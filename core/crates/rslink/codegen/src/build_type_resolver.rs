@@ -350,6 +350,7 @@ fn serializable_struct_type(
                     json_name: serde_rename(&field.attrs)
                         .unwrap_or_else(|| field_name.trim_start_matches("r#").to_string()),
                     ty: normalize_type(&field.ty, resolver),
+                    has_serde_default: serde_field_has_default(&field.attrs),
                 })
             })
             .collect::<Vec<_>>(),
@@ -388,6 +389,7 @@ fn serializable_enum_type(
                                     field_name.trim_start_matches("r#").to_string()
                                 }),
                                 ty: normalize_type(&field.ty, resolver),
+                                has_serde_default: serde_field_has_default(&field.attrs),
                             })
                         })
                         .collect::<Vec<_>>();
@@ -409,6 +411,7 @@ fn serializable_enum_type(
                                 name: field_name.clone(),
                                 json_name: field_name,
                                 ty: normalize_type(&field.ty, resolver),
+                                has_serde_default: serde_field_has_default(&field.attrs),
                             }
                         })
                         .collect::<Vec<_>>();
@@ -521,6 +524,26 @@ fn serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
         }
     }
     None
+}
+
+/// Returns whether serde substitutes a default when one field is absent.
+fn serde_field_has_default(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+        let Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .expect("serde field attribute metadata must parse")
+            .iter()
+            .any(|item| match item {
+                Meta::Path(path) => path.is_ident("default"),
+                Meta::NameValue(name_value) => name_value.path.is_ident("default"),
+                _ => false,
+            })
+    })
 }
 
 /// Returns whether serde excludes one field from both serialization and deserialization.

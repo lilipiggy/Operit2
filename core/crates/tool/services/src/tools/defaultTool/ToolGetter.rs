@@ -81,7 +81,10 @@ impl ToolGetter {
     /// Creates system-operation tools from the optional platform operation host.
     #[allow(non_snake_case)]
     pub fn getSystemOperationTools(context: &HostManager) -> StandardSystemOperationTools {
-        StandardSystemOperationTools::new(context.systemOperationHost.clone())
+        StandardSystemOperationTools::new(
+            context.systemOperationHost.clone(),
+            context.toastHost.clone(),
+        )
     }
 
     /// Creates terminal tools from the optional terminal host.

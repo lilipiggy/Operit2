@@ -1,3 +1,5 @@
+// ignore_for_file: file_names
+
 import 'package:flutter/material.dart';
 
 import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;

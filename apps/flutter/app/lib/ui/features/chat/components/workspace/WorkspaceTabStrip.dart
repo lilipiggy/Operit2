@@ -1,11 +1,11 @@
 // ignore_for_file: file_names
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 
 import '../../../../../l10n/generated/app_localizations.dart';
 import '../../../../theme/OperitGlassSurface.dart';
 import '../../../../theme/OperitTheme.dart';
+import '../../../../main/layout/SidebarDockController.dart';
 import 'WorkspaceLayoutMetrics.dart';
 import 'WorkspaceTabModels.dart';
 
@@ -23,12 +23,12 @@ class WorkspaceTabStrip extends StatelessWidget {
   final ValueChanged<int> onSelected;
   final ValueChanged<int> onClosed;
 
+  /// Builds a horizontally scrollable strip sized for the available width.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context)!;
     final useTermuxTabs =
-        defaultTargetPlatform == TargetPlatform.android &&
         MediaQuery.sizeOf(context).width < workspaceTabletBreakpoint;
     if (useTermuxTabs) {
       return _TermuxWorkspaceTabStrip(
@@ -72,7 +72,7 @@ class WorkspaceTabStrip extends StatelessWidget {
               itemBuilder: (context, index) {
                 final tab = tabs[index];
                 final selected = index == selectedIndex;
-                return _WorkspaceTabButton(
+                final button = _WorkspaceTabButton(
                   tab: tab,
                   title: _tabTitle(l10n, tab),
                   selected: selected,
@@ -85,6 +85,7 @@ class WorkspaceTabStrip extends StatelessWidget {
                         }
                       : null,
                 );
+                return _buildTabDragSource(context, tab, button);
               },
             ),
           ],
@@ -148,7 +149,7 @@ class _TermuxWorkspaceTabStrip extends StatelessWidget {
             itemBuilder: (context, index) {
               final tab = tabs[index];
               final selected = index == selectedIndex;
-              return _TermuxWorkspaceTabButton(
+              final button = _TermuxWorkspaceTabButton(
                 title: tabTitle(tab),
                 selected: selected,
                 closable: tab.closable,
@@ -164,12 +165,46 @@ class _TermuxWorkspaceTabStrip extends StatelessWidget {
                   onClosed(index);
                 },
               );
+              return _buildTabDragSource(context, tab, button);
             },
           ),
         ),
       ),
     );
   }
+}
+
+/// Starts tab docking after a long press so swipes remain scroll gestures.
+Widget _buildTabDragSource(
+  BuildContext context,
+  WorkspaceTab tab,
+  Widget child,
+) {
+  if (tab.kind == WorkspaceTabKind.home) {
+    return child;
+  }
+  if (tab.kind == WorkspaceTabKind.plugin && tab.pluginEntryId != null) {
+    return LongPressDraggable<SidebarDockDragPayload>(
+      maxSimultaneousDrags: 1,
+      data: SidebarDockDragPayload(entryId: tab.pluginEntryId!),
+      feedback: Material(
+        elevation: 8,
+        child: Opacity(opacity: 0.92, child: child),
+      ),
+      childWhenDragging: Opacity(opacity: 0.32, child: child),
+      child: child,
+    );
+  }
+  return LongPressDraggable<WorkspaceTabDragPayload>(
+    maxSimultaneousDrags: 1,
+    data: WorkspaceTabDragPayload(tab: tab),
+    feedback: Material(
+      elevation: 8,
+      child: Opacity(opacity: 0.92, child: child),
+    ),
+    childWhenDragging: Opacity(opacity: 0.32, child: child),
+    child: child,
+  );
 }
 
 class _TermuxWorkspaceTabButton extends StatelessWidget {
@@ -374,8 +409,6 @@ String _tabTitle(AppLocalizations l10n, WorkspaceTab tab) {
   switch (tab.kind) {
     case WorkspaceTabKind.home:
       return l10n.home;
-    case WorkspaceTabKind.setup:
-      return l10n.workspaceSetupTitle;
     case WorkspaceTabKind.workspacePicker:
       return l10n.workspaceBindExistingTitle;
     case WorkspaceTabKind.files:
@@ -388,5 +421,7 @@ String _tabTitle(AppLocalizations l10n, WorkspaceTab tab) {
       return 'visit_web';
     case WorkspaceTabKind.filePreview:
       return l10n.filePreview;
+    case WorkspaceTabKind.plugin:
+      return '插件';
   }
 }

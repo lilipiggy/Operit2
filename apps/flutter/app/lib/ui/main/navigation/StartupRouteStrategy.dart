@@ -2,11 +2,16 @@
 
 import 'package:flutter/material.dart';
 
+import '../../features/announcement/RemoteAnnouncementHost.dart';
+
 import '../screens/OperitMainScreen.dart';
 
 typedef StartupRouteCompleteCallback = void Function();
 typedef StartupRoutePageBuilder =
-    Widget Function(BuildContext context, StartupRouteCompleteCallback complete);
+    Widget Function(
+      BuildContext context,
+      StartupRouteCompleteCallback complete,
+    );
 
 abstract class StartupRouteStrategy {
   const StartupRouteStrategy();
@@ -96,13 +101,13 @@ class _StartupRouteHostState extends State<StartupRouteHost> {
           return const StartupRouteShell();
         }
         if (_startupRouteCompleted) {
-          return const OperitMainScreen();
+          return const RemoteAnnouncementHost(child: OperitMainScreen());
         }
         final decision = snapshot.data;
         if (decision != null) {
           return decision.builder(context, _completeStartupRoute);
         }
-        return const OperitMainScreen();
+        return const RemoteAnnouncementHost(child: OperitMainScreen());
       },
     );
   }
@@ -114,9 +119,6 @@ class StartupRouteShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Material(
-      color: colorScheme.surface,
-      child: const SizedBox.expand(),
-    );
+    return Material(color: colorScheme.surface, child: const SizedBox.expand());
   }
 }

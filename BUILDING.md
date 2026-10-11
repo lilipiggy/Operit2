@@ -22,6 +22,8 @@ Common tools:
 ```text
 Rust stable toolchain with rustup
 Python virtual environment at .venv
+Node.js with Corepack enabled
+pnpm 10.7.0 for plugins/packages/buildin/workflow
 Git
 ```
 
@@ -32,6 +34,9 @@ Visual Studio 2022 C++ build tools
 MSVC x64 and ARM64 components
 LLVM clang at C:\Program Files\LLVM\bin\clang.exe
 ```
+
+The GNU toolchain is not a supported alternative; see
+"Windows GNU Toolchain Troubleshooting" below if you must use it.
 
 Linux desktop App builds:
 
@@ -62,6 +67,142 @@ Required keys:
 GITHUB_TOKEN
 GITHUB_API_URL
 ```
+
+## Windows GNU Toolchain Troubleshooting
+
+The Windows requirements above ask for the MSVC toolchain. Building with the
+GNU toolchain (`x86_64-pc-windows-gnu`) instead hits a chain of failures whose
+error messages do not point at the fix. The symptoms and fixes below were
+recorded from an actual build session (rustup `stable-x86_64-pc-windows-gnu`;
+this section only covers x86_64).
+
+### Missing `as.exe` in the rustup self-contained directory
+
+The rustup GNU toolchain ships a minimal
+`lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\` directory without a
+working assembler (`ld.exe` and `dlltool.exe` are present), so link steps that
+go through `dlltool`-generated import libraries fail.
+
+Fix: copy `as.exe` and `ar.exe` from the MSYS2 `mingw-w64-x86_64-binutils`
+package into the self-contained directory. The directory is managed by rustup,
+so re-apply this after every `rustup update`.
+
+### The bundled `gcc.exe` cannot compile C sources
+
+The self-contained directory ships both `gcc.exe` and
+`x86_64-w64-mingw32-gcc.exe`; they are the same linker driver, and its bundled
+notice states it cannot compile C:
+
+```text
+gcc.exe contained in this folder cannot be used for compiling C files - it is
+only used as a linker. In order to be able to compile projects containing C
+code use the GCC provided by MinGW or Cygwin.
+```
+
+Crates that compile C code through `cc` therefore fail even though a GCC
+binary exists under both names.
+
+Fix: point `cc` at a real MinGW or Cygwin GCC (for example, prefix the MSYS2
+`mingw64\bin` directory to `PATH` or set `CC`), or switch to the MSVC
+toolchain as the requirements section specifies.
+
+### Missing DLLs: `libintl-8.dll`, `libiconv-2.dll`, `zlib1.dll`, `libzstd.dll`
+
+If `as.exe` was copied into the self-contained directory (instead of using an
+MSYS2 `mingw64\bin` on `PATH`, which carries all of its runtime DLLs), it may
+still fail to start because it depends on `libintl-8.dll`, which depends on
+`libiconv-2.dll`; similar gaps appear for `zlib1.dll` and `libzstd.dll`.
+
+Fix: copy the runtime DLLs shipped by the matching MSYS2 packages
+(`mingw-w64-x86_64-gettext-runtime`, `mingw-w64-x86_64-libiconv`,
+`mingw-w64-x86_64-zlib`, `mingw-w64-x86_64-zstd`) into the self-contained
+directory, including transitive dependencies such as `libcharset-1.dll` and
+`libasprintf-0.dll`. To enumerate a binary's DLL imports and chase missing
+ones, run `llvm-objdump --private-headers <file>`; the rustup toolchain ships
+`llvm-objdump.exe` one directory above self-contained. Re-apply after
+`rustup update`.
+
+The MSVC toolchain (see Requirements) avoids this entire class of problems
+and remains the supported configuration for Windows builds.
+
+## Pinned Build Inputs and Source of Truth
+
+The following values are the repository build contract validated on September 27,
+2026. Keep these values synchronized with the referenced source files and CI
+workflows when changing a build dependency.
+
+| Input | Version or pin | Source of truth |
+| --- | --- | --- |
+| Flutter SDK | AAswordman/flutter-ohos, 3.41.10-ohos-0.0.2-beta.operit.1 | `apps/flutter/app/.fvmrc`, installed through FVM |
+| FVM | 4.3.0 | `FVM_VERSION` in the Flutter CI workflows; Dart pub global package |
+| Dart SDK | `^3.10.8` | `apps/flutter/app/pubspec.yaml`; supplied by the pinned Flutter SDK |
+| Rust toolchain | 1.95.0 | `RUST_TOOLCHAIN_VERSION` in `.github/workflows/`; rustup |
+| Node.js | 22 | `actions/setup-node` in the CI workflows |
+| Java | Temurin 17 | `actions/setup-java` in `.github/workflows/android-flutter-build.yml` |
+| Gradle | 8.14 | `apps/flutter/app/android/gradle/wrapper/gradle-wrapper.properties` |
+| Workflow package manager | pnpm 10.7.0 | `plugins/packages/buildin/workflow/package.json` |
+| Apple scientific-runtime host Python | 3.13 | `tools/ios-runtime/native/build_scientific.py` and `tools/ios-runtime/prepare.py` |
+
+Dependency source rules:
+
+- Dart dependency versions and hosted-package checksums are recorded in
+  `apps/flutter/app/pubspec.lock`. Hosted packages use `https://pub.dev`.
+- Local Dart packages are resolved from `apps/flutter/thirdparty`; Git Dart
+  packages use the repository URL and commit recorded in `pubspec.yaml` and
+  `pubspec.lock`.
+- Workflow JavaScript dependencies are pinned by `package.json` and resolved by
+  `plugins/packages/buildin/workflow/pnpm-lock.yaml`. The generated license
+  inventory is `resources/THIRD_PARTY_NOTICES.txt` and must be regenerated from
+  that lockfile, not edited by hand.
+- Native runtime source archives are declared by their fetch/build scripts with
+  an upstream URL and SHA-256 value. The script and its checksum are the source
+  of truth for the downloaded artifact.
+- CI runner images are part of the build environment: `ubuntu-24.04`,
+  `windows-2025`, and `macos-15` as declared by `.github/workflows/`.
+
+When a dependency or toolchain changes, update its lockfile or pinned source
+entry in the same change as this documentation. Merge conflicts in generated
+lockfiles must preserve both the dependency graph change and the repository's
+source policy.
+
+## iOS Runtime Source Pins
+
+The iOS runtime source set is reproducible from the pins in
+`tools/ios-runtime/ish/fetch_sources.py` and
+`tools/ios-runtime/ish/build_alpine_rootfs_linux.sh`:
+
+| Component | Pin | Source and integrity |
+| --- | --- | --- |
+| iSH | `7864dd601e615d0fc09b888a93d327f458b25a1d` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
+| iSH libapps | `b8cacae35e5b11d64bb736a053921c16ca7faf9e` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
+| iSH Linux | `8ec9bf17f89c6dba818f3ed2427de4223e78644a` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
+| libarchive | `fc6563f5130d8a7ee1fc27c0e55baef35119f26c` | GitHub archive; SHA-256 is recorded in `fetch_sources.py` |
+| iSH Alpine rootfs | `g00712ff0a54b2839c5aa1a8ed758003ca65357dc` | GitHub release archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
+| iSH Alpine repository | Alpine v3.19, x86 | `https://dl-cdn.alpinelinux.org/alpine/v3.19` |
+| uv | 0.12.1, i686 musl | GitHub release archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
+| pnpm in iSH rootfs | 10.12.1 | npm registry archive; SHA-256 is recorded in `build_alpine_rootfs_linux.sh` |
+
+The iOS workflow runs on `macos-15` and records the installed Xcode SDK,
+Clang, Meson, and Ninja versions in its cache key. Keep those runner and source
+pins synchronized with `.github/workflows/ios-flutter-build.yml` and
+`.github/workflows/ios-app-package-build.yml`.
+## Built-In Workflow Plugin
+
+The workflow plugin is a pnpm project. Its `package.json` pins the package
+manager to pnpm 10.7.0; use Corepack so local commands honor that pin. The
+pnpm lockfile is the dependency source of truth. Do not use npm in this package.
+
+From the workflow package directory:
+
+```powershell
+corepack pnpm --version
+corepack pnpm install --frozen-lockfile
+corepack pnpm run pack:toolpkg
+corepack pnpm run test:web
+```
+
+`plugins/tools/sync_plugin_packages.py` invokes the package build through
+Corepack, so automated synchronization uses the version pinned in `package.json`.
 
 ## Rust Targets
 
@@ -232,9 +373,9 @@ OpenHarmony procedure below remains the supported build path until that SDK
 distribution source and the signing secrets are supplied.
 
 ```powershell
-gh workflow run "Apple Release Build" -f products=all -f include_ios=true -f build_web_assets=false
-gh workflow run "macOS Flutter Build" -f products=all -f build_web_assets=false
-gh workflow run "iOS Flutter Build" -f build_web_assets=false
+gh workflow run "Apple Release Build" -f products=all -f include_ios=true
+gh workflow run "macOS Flutter Build" -f products=all
+gh workflow run "iOS Flutter Build"
 gh workflow run "Windows Release Build" -f products=all -f cli_arches=all
 gh workflow run "Linux Release Build" -f products=all -f cli_arches=all
 gh workflow run "Android Flutter Build"
@@ -332,6 +473,22 @@ fvm install --skip-pub-get
 fvm dart pub get --enforce-lockfile
 ```
 
+### Dart Proxy Codegen
+
+`lib/core/proxy/generated/*.g.dart` is generated at build time and gitignored.
+The app build scripts (`build_flutter_android.py`, `build_flutter_ios.py`,
+`build_flutter_macos.py`) regenerate it before `pub get`. When you invoke
+`flutter build`, `flutter analyze`, or `fvm dart pub get` outside those scripts
+on a clean checkout, generate it first, or Dart analysis fails with
+`uri_has_not_been_generated` errors:
+
+```powershell
+cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
+```
+
+Run this from the repository root; the relative manifest path resolves against
+the current working directory.
+
 Windows app release build:
 
 ```powershell
@@ -351,22 +508,97 @@ tools/release/secrets/operit2-release.keystore
 tools/release/secrets/android-signing.properties
 ```
 
+### Local Windows Android Build
+
+Building the Android APK outside CI needs extra prerequisites that the CI runners
+provide implicitly:
+
+1. **Developer Mode** (Settings → Privacy & security → For developers). FVM creates
+   a directory symbolic link for the pinned SDK (`.fvm/flutter_sdk`); without the
+   privilege `fvm install` fails with `errno 1314`. A directory junction is not a
+   substitute — the staging check uses `Path.is_symlink()`.
+2. **Host C compiler**. Build-dependency crates (`tree-sitter-*`, `ring`) compile C
+   for the host during `cargo build`; rustup's bundled `gcc.exe` cannot compile C
+   (see its bundled `GCC-WARNING.txt`). Install a full MinGW toolchain (for example
+   `scoop install mingw-winlibs`) or MSVC Build Tools, and make sure it is on `PATH`
+   **before** the Gradle daemon starts — the daemon caches the environment it was
+   launched with, so restart it (`Stop-Process` on `java`) after changing `PATH`.
+3. **pnpm 10.7.0 via corepack**. The plugin sync hook invokes `corepack pnpm`, and
+   the project pins `packageManager: pnpm@10.7.0`; other pnpm installations on
+   `PATH` (scoop/npm shims) shadow corepack and abort with a version check. Remove
+   or align those shims. The workflow plugin dependencies must be installed
+   before the Gradle plugin-sync hook runs:
+
+   ```powershell
+   cd plugins\packages\buildin\workflow
+   corepack pnpm install --frozen-lockfile
+   cd ..\..\..\..
+   ```
+
+4. **Android runtime (rootfs) artifacts**. `liboperit_busybox.so`, `liboperit_proot.so`,
+   and `rootfs.tar.gz.bin` are produced on CI by `tools/android-runtime/build_alpine_rootfs_wsl.sh`
+   and require WSL. Without them the Gradle check
+   (`requiredOperitAndroidRuntimeLibraries`) fails.
+
+5. **bindgen libclang**. The Rust bridge build runs bindgen for
+   `aarch64-linux-android` (`rquickjs-sys` with the `bindgen` feature), which
+   loads `libclang.dll` at build time. CI provisions it from nuget.org into
+   `target/operit-build-tools` (see `android-flutter-build.yml`); locally, either
+   place that package the same way or point the Gradle task at a full LLVM
+   install before the daemon starts. Without it the bridge build fails with
+   "Unable to find libclang".
+
+With the prerequisites in place:
+
+```powershell
+python tools\build_scripts\build_flutter_android.py --build-name 2.0.0 --build-number 11
+```
+
+The command runs the full chain (plugin packaging, Rust bridge cross-build,
+Gradle `assembleRelease`) and writes
+`tools/release/dist/operit2-app-android-arm64-v8a.apk`. The NDK is provisioned
+automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
+is still required for the Rust bridge.
+
+Android Gradle selects the Rust bridge profile from the Android build variant:
+`debug` uses Cargo's `dev` profile and its `target/<rust-target>/debug` output;
+`profile` and `release` use `cargo build --release` and
+`target/<rust-target>/release`. JNI libraries are staged as variant-specific
+generated sources. The cached bridge in `src/main/jniLibs` is excluded from these
+sources so that a Release APK cannot package a previous Debug bridge.
+
+### Local Linux Android Build
+
+Linux hosts build the same chain with the NDK's `linux-x86_64` prebuilt toolchain
+(`*-clang` and `llvm-ar`, without the Windows `.cmd`/`.exe` suffixes). The Rust
+bridge binds `LIBCLANG_PATH` to `/usr/lib` by default, where most distributions
+install `libclang.so`; set `OPERIT_LIBCLANG_DIR` to override it when libclang
+lives elsewhere. All other prerequisites are shared with the Windows list above:
+host C compiler, pnpm 10.7.0 via corepack, Web Access bundle, plugin packaging,
+and the Android runtime (rootfs) artifacts.
+
+```bash
+python tools/build_scripts/build_flutter_android.py --build-name 2.0.0 --build-number 11
+```
+
 ## OpenHarmony Flutter App
 
 OpenHarmony builds require the OpenHarmony Flutter SDK maintained at:
 
 ```text
-https://gitcode.com/openharmony-sig/flutter_flutter.git
+https://github.com/AAswordman/flutter-ohos.git
 ```
 
-The Flutter app is pinned to the OpenHarmony `oh-3.41.9-dev` branch in
-`apps/flutter/app/.fvmrc`. Keep this SDK selected for OpenHarmony development;
-the standard Flutter SDK is a different toolchain and does not provide the
-OpenHarmony target.
+All platforms use the pinned Operit fork release **3.41.10-ohos-0.0.2-beta.operit.1** configured in
+`apps/flutter/app/.fvmrc`. FVM installs the tagged source at
+`.fvm/flutter_sdk`. The Windows engine cache uses the same version and downloads
+the Debug, Profile, and Release archives from the matching GitHub Release.
+After checkout, run `fvm install --skip-pub-get` and
+`fvm flutter precache --web --ohos` from `apps/flutter/app`.
 
 The user environment must provide:
 
-- FVM `4.1.2` through the Pub cache `bin` directory on `PATH`.
+- FVM `4.3.0` through the Pub cache `bin` directory on `PATH`.
 - `dart` through a Flutter or Dart SDK `bin` directory on `PATH` so the FVM
   launcher can start.
 - `OHOS_SDK_HOME` pointing to the OpenHarmony SDK root.
@@ -435,21 +667,55 @@ cd apps\flutter\app
 fvm flutter create --platforms ohos .
 ```
 
-Build the shared Web Access bundle from the repository root:
+The Web frontend is the standard Flutter Web project under
+`apps/flutter/app/web`. The dedicated `Deploy Web Experience` GitHub Actions
+workflow still builds this frontend and publishes `apps/flutter/app/build/web`
+to the `gh-pages` branch for `web.operit.app`.
+
+The Web build hook also compiles the Rust browser runtime and synchronizes the
+built-in plugins. From a clean checkout, prepare its dependencies at the repository
+root (use `python3` instead of `python` if required by your shell):
+
+```sh
+python -m venv .venv
+npm install --prefix .ci-tools/typescript --no-audit --no-fund typescript@5.9.3
+cd plugins/packages/buildin/workflow
+corepack pnpm install --frozen-lockfile
+cd ../../../..
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.122 --locked
+```
+
+The `wasm-bindgen` CLI version must match the bridge's `Cargo.lock`. The build hook
+downloads the pinned WASI SDK and browser guest assets; the first build requires
+network access. Later builds reuse cached BIOS resources only after verifying their
+pinned SHA-256 digests again. The deployment workflow performs the same dependency
+preparation.
+
+Build it locally with the same command used by GitHub Actions:
+
+```sh
+cd apps/flutter/app
+fvm flutter build web --release --no-wasm-dry-run --base-href /
+```
+
+For a quicker Rust-only check, run these from the repository root. Both are needed:
+the host crate does not compile all of the Flutter Web ABI adapters.
+
+```sh
+cargo check --locked --manifest-path hosts/web/Cargo.toml --target wasm32-unknown-unknown
+cargo check --locked --manifest-path apps/flutter/native/operit-flutter-bridge/Cargo.toml --target wasm32-unknown-unknown
+```
+
+To trigger the GitHub Pages deployment manually:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\build_scripts\build_flutter_web_access.py --base-href /
+gh workflow run "Deploy Web Experience"
 ```
 
-The remote access bundle is written to `apps/web_access/build/bundle` and
-synchronized into the native Flutter assets at:
-
-```text
-apps/flutter/app/assets/web_access
-```
-
-The bundle includes a generated `web_access_version.json`; native launchers use
-that version to reuse an already materialized Web Access directory.
+Native app and CLI release builds do not compile, copy, or package a Web
+frontend bundle. They expose only the Link Access service; users open
+`https://web.operit.app/?accessUrl=...&token=...`.
 
 Build the OpenHarmony HAP with the repository script. The script invokes the
 same FVM-selected Flutter SDK and the OpenHarmony native toolchain:

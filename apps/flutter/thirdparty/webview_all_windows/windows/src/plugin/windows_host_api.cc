@@ -1,6 +1,8 @@
+#include <flutter/method_result_functions.h>
 #include "plugin/windows_host_api.h"
 
 #include <windows.h>
+#include <flutter/standard_method_codec.h>
 
 #include <format>
 #include <functional>
@@ -30,8 +32,8 @@ constexpr auto kErrorScriptFailed = "script_failed";
 
 // static
 void WindowsHostApi::RegisterWithRegistrar(
-    flutter::PluginRegistrarWindows *registrar) {
-  auto plugin = std::make_unique<WindowsHostApi>(registrar->texture_registrar(),
+    flutter::PluginRegistrarWindows *registrar, FlutterDesktopViewRef view) {
+  auto plugin = std::make_unique<WindowsHostApi>(view,
                                                  registrar->messenger());
 
   webview_all_windows::WindowsWebViewHostApi::SetUp(registrar->messenger(),
@@ -40,59 +42,141 @@ void WindowsHostApi::RegisterWithRegistrar(
   registrar->AddPlugin(std::move(plugin));
 }
 
-WindowsHostApi::WindowsHostApi(flutter::TextureRegistrar *textures,
+WindowsHostApi::WindowsHostApi(FlutterDesktopViewRef view,
                                flutter::BinaryMessenger *messenger)
-    : textures_(textures), messenger_(messenger) {
+    : view_(view), messenger_(messenger) {
+  theme_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      messenger, "operit/webview_theme", &flutter::StandardMethodCodec::GetInstance());
+  // Applies the application preference to live views and retains it for new views.
+  theme_channel_->SetMethodCallHandler([this](const auto &call, auto result) {
+    if (call.method_name() != "setPreferredColorScheme") {
+      result->NotImplemented();
+      return;
+    }
+    const auto *scheme = call.arguments() == nullptr
+        ? nullptr : std::get_if<std::string>(call.arguments());
+    if (scheme == nullptr || (*scheme != "dark" && *scheme != "light")) {
+      result->Error("invalid_color_scheme", "Expected dark or light");
+      return;
+    }
+    const bool preferred_dark = *scheme == "dark";
+    for (const auto &entry : instances_) {
+      if (!entry.second->SetPreferredColorScheme(preferred_dark)) {
+        result->Error("color_scheme_failed", "WebView2 rejected the color preference");
+        return;
+      }
+    }
+    result->Success();
+  });
+  resource_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      messenger, "operit/webview_resources", &flutter::StandardMethodCodec::GetInstance());
+  resource_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    using V = flutter::EncodableValue;
+    using M = flutter::EncodableMap;
+    if (call.method_name() != "configure") { result->NotImplemented(); return; }
+    const auto* args = call.arguments() ? std::get_if<M>(call.arguments()) : nullptr;
+    if (!args || !args->contains(V("identifier")) || !args->contains(V("enabled"))) {
+      result->Error("invalid_arguments", "Missing view identifier"); return;
+    }
+    const int64_t id = args->at(V("identifier")).LongValue();
+    const auto found = instances_.find(id);
+    if (found == instances_.end()) { result->Error("unknown_view", "WebView no longer exists"); return; }
+    Webview::LocalResourceCallback callback;
+    if (std::get<bool>(args->at(V("enabled")))) {
+      callback = [this, id](const std::string& url, const std::string& method,
+          const std::map<std::string, std::string>& headers, bool main_frame,
+          Webview::LocalResourceReply reply) {
+        M request_headers;
+        for (const auto& [name, value] : headers) request_headers[V(name)] = V(value);
+        auto payload = std::make_unique<V>(M{
+          {V("identifier"), V(id)}, {V("url"), V(url)}, {V("method"), V(method)},
+          {V("headers"), V(request_headers)}, {V("isMainFrame"), V(main_frame)}});
+        resource_channel_->InvokeMethod("request", std::move(payload),
+          std::make_unique<flutter::MethodResultFunctions<V>>(
+            [reply](const V* value) {
+              const auto* map = value ? std::get_if<M>(value) : nullptr;
+              if (!map || !map->contains(V("body"))) { reply(500, "Resource error", {}, {}); return; }
+              std::map<std::string, std::string> response_headers;
+              for (const auto& [name, item] : std::get<M>(map->at(V("headers")))) {
+                response_headers[std::get<std::string>(name)] = std::get<std::string>(item);
+              }
+              bool has_type = false;
+              for (const auto& [name, _] : response_headers) {
+                if (_stricmp(name.c_str(), "Content-Type") == 0) has_type = true;
+              }
+              if (!has_type) response_headers["Content-Type"] =
+                std::get<std::string>(map->at(V("mimeType"))) + "; charset=" +
+                std::get<std::string>(map->at(V("encoding")));
+              reply(static_cast<int>(map->at(V("statusCode")).LongValue()),
+                std::get<std::string>(map->at(V("reasonPhrase"))), response_headers,
+                std::get<std::vector<uint8_t>>(map->at(V("body"))));
+            },
+            [reply](const std::string&, const std::string&, const V*) { reply(500, "Resource error", {}, {}); },
+            [reply]() { reply(501, "Not implemented", {}, {}); }));
+      };
+    }
+    if (!found->second->SetLocalResourceHandler(std::move(callback))) {
+      result->Error("resource_handler_failed", "WebView2 rejected the resource handler"); return;
+    }
+    result->Success();
+  });
   window_class_.lpszClassName = L"FlutterWebviewMessage";
   window_class_.lpfnWndProc = &DefWindowProc;
   RegisterClass(&window_class_);
 }
 
+/// Releases WebView resources after the engine has stopped dispatching messages.
 WindowsHostApi::~WindowsHostApi() {
-  webview_all_windows::WindowsWebViewHostApi::SetUp(messenger_, nullptr);
+  // Engine teardown owns channel cleanup. Its messenger is already detached
+  // when the registrar destroys this plugin; channel handlers must not be
+  // changed here, including the theme channel handler.
+  *alive_ = false;
   instances_.clear();
   UnregisterClass(window_class_.lpszClassName, nullptr);
 }
 
-std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::InitializeEnvironment(
-    const webview_all_windows::WindowsEnvironmentOptions &options) {
-  if (webview_host_) {
-    return webview_all_windows::FlutterError(
-        kErrorCodeEnvironmentAlreadyInitialized,
-        "The webview environment is already initialized");
+// Creates an explicitly configured environment once per plugin instance.
+void WindowsHostApi::InitializeEnvironment(
+    const WindowsEnvironmentOptions& options,
+    std::function<void(std::optional<FlutterError>)> result) {
+  if (webview_host_ || environment_initializing_) {
+    result(FlutterError(kErrorCodeEnvironmentAlreadyInitialized));
+    return;
   }
-
   if (!InitPlatform()) {
-    return webview_all_windows::FlutterError(kErrorUnsupportedPlatform,
-                                             "The platform is not supported");
+    result(FlutterError(kErrorUnsupportedPlatform));
+    return;
   }
+  environment_waiters_.push_back(std::move(result));
+  StartEnvironment(options);
+}
 
-  std::optional<std::wstring> browser_exe_wpath = std::nullopt;
-  if (options.browser_exe_path()) {
-    browser_exe_wpath = util::Utf16FromUtf8(*options.browser_exe_path());
-  }
-
-  std::optional<std::wstring> user_data_wpath = std::nullopt;
-  if (options.user_data_path()) {
-    user_data_wpath = util::Utf16FromUtf8(*options.user_data_path());
-  } else {
-    user_data_wpath = platform_->GetDefaultDataDirectory();
-  }
-
-  std::optional<std::string> additional_args = std::nullopt;
-  if (options.additional_arguments()) {
-    additional_args = *options.additional_arguments();
-  }
-
-  webview_host_ = std::move(WebviewHost::Create(
-      platform_.get(), user_data_wpath, browser_exe_wpath, additional_args));
-  if (!webview_host_) {
-    return webview_all_windows::FlutterError(
-        kErrorCodeEnvironmentCreationFailed);
-  }
-
-  return std::nullopt;
+// Coalesces browser creation requests while the shared environment initializes.
+void WindowsHostApi::StartEnvironment(const WindowsEnvironmentOptions& options) {
+  environment_initializing_ = true;
+  std::optional<std::wstring> browser;
+  if (options.browser_exe_path()) browser = util::Utf16FromUtf8(*options.browser_exe_path());
+  const auto directory = options.user_data_path()
+      ? std::optional<std::wstring>(util::Utf16FromUtf8(*options.user_data_path()))
+      : platform_->GetDefaultDataDirectory();
+  std::optional<std::string> arguments;
+  if (options.additional_arguments()) arguments = *options.additional_arguments();
+  WebviewHost::Create(directory, browser, arguments,
+      [this, alive = alive_](std::shared_ptr<WebviewHost> host, HRESULT error) {
+        if (!*alive) return;
+        environment_initializing_ = false;
+        webview_host_ = std::move(host);
+        auto pending = std::move(environment_waiters_);
+        environment_waiters_.clear();
+        for (auto& reply : pending) {
+          if (FAILED(error)) {
+            reply(FlutterError(kErrorCodeEnvironmentCreationFailed,
+                std::format("WebView2 environment HRESULT: {:#010x}", error)));
+          } else {
+            reply(std::nullopt);
+          }
+        }
+      });
 }
 
 webview_all_windows::ErrorOr<std::optional<std::string>>
@@ -117,23 +201,22 @@ void WindowsHostApi::CreateWebView(
   }
 
   if (!webview_host_) {
-    webview_host_ = std::move(WebviewHost::Create(
-        platform_.get(), platform_->GetDefaultDataDirectory()));
-    if (!webview_host_) {
-      return result(webview_all_windows::FlutterError(
-          kErrorCodeEnvironmentCreationFailed));
-    }
+    environment_waiters_.push_back([this, alive = alive_, result](std::optional<FlutterError> error) {
+      if (!*alive) return;
+      if (error) { result(*error); return; }
+      CreateWebView(result);
+    });
+    if (!environment_initializing_) StartEnvironment(WindowsEnvironmentOptions());
+    return;
   }
 
-  auto hwnd =
-      CreateWindowEx(0, window_class_.lpszClassName, L"", 0, 0, 0, 0, 0,
-                     HWND_MESSAGE, nullptr, window_class_.hInstance, nullptr);
-
+  const auto hwnd = FlutterDesktopViewGetHWND(view_);
   webview_host_->CreateWebview(
-      hwnd, true, true,
-      [result = std::move(result),
+      hwnd, true, false,
+      [result = std::move(result), host = webview_host_, alive = alive_,
        this](std::unique_ptr<Webview> webview,
              std::unique_ptr<WebviewCreationError> error) mutable {
+        if (!*alive) return;
         if (!webview) {
           if (error) {
             return result(webview_all_windows::FlutterError(
@@ -146,28 +229,37 @@ void WindowsHostApi::CreateWebView(
               kErrorCodeWebviewCreationFailed, "Creating the webview failed."));
         }
 
+        auto composition = FlutterDesktopViewCreateNativeComposition(view_);
+        if (!composition) {
+          return result(FlutterError("native_composition_failed",
+                                    "The custom Flutter engine could not create a native visual"));
+        }
+        if (!webview->AttachVisual(FlutterDesktopNativeCompositionGetVisual(composition))) {
+          FlutterDesktopNativeCompositionDestroy(composition);
+          return result(FlutterError("native_composition_failed", "WebView2 rejected the native visual"));
+        }
         auto bridge = std::make_unique<WebviewBridge>(
-            messenger_, textures_, platform_->graphics_context(),
-            std::move(webview));
-        auto texture_id = bridge->texture_id();
-        instances_[texture_id] = std::move(bridge);
+            messenger_, composition, std::move(webview));
+        auto view_id = bridge->view_id();
+        instances_[view_id] = std::move(bridge);
 
-        result(webview_all_windows::WindowsCreateWebViewResult(texture_id));
+        result(webview_all_windows::WindowsCreateWebViewResult(view_id));
       });
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::DisposeWebView(int64_t texture_id) {
-  const auto it = instances_.find(texture_id);
+WindowsHostApi::DisposeWebView(int64_t view_id) {
+  const auto it = instances_.find(view_id);
   if (it != instances_.end()) {
+    it->second->DisposeChannels();
     instances_.erase(it);
     return std::nullopt;
   }
   return webview_all_windows::FlutterError(kErrorCodeInvalidId);
 }
 
-WebviewBridge *WindowsHostApi::FindBridge(int64_t texture_id) {
-  const auto it = instances_.find(texture_id);
+WebviewBridge *WindowsHostApi::FindBridge(int64_t view_id) {
+  const auto it = instances_.find(view_id);
   if (it == instances_.end()) {
     return nullptr;
   }
@@ -185,8 +277,8 @@ WindowsHostApi::MethodFailedError(const std::string &message) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::LoadUrl(int64_t texture_id, const std::string &url) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::LoadUrl(int64_t view_id, const std::string &url) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -195,9 +287,9 @@ WindowsHostApi::LoadUrl(int64_t texture_id, const std::string &url) {
 }
 
 std::optional<webview_all_windows::FlutterError> WindowsHostApi::LoadRequest(
-    int64_t texture_id,
+    int64_t view_id,
     const webview_all_windows::WindowsLoadRequestData &request) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -209,9 +301,9 @@ std::optional<webview_all_windows::FlutterError> WindowsHostApi::LoadRequest(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::LoadStringContent(int64_t texture_id,
+WindowsHostApi::LoadStringContent(int64_t view_id,
                                   const std::string &content) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -220,8 +312,8 @@ WindowsHostApi::LoadStringContent(int64_t texture_id,
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::Reload(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::Reload(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -232,8 +324,8 @@ WindowsHostApi::Reload(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::Stop(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::Stop(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -244,8 +336,8 @@ WindowsHostApi::Stop(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::GoBack(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::GoBack(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -256,8 +348,8 @@ WindowsHostApi::GoBack(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::GoForward(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::GoForward(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -268,11 +360,11 @@ WindowsHostApi::GoForward(int64_t texture_id) {
 }
 
 void WindowsHostApi::AddScriptToExecuteOnDocumentCreated(
-    int64_t texture_id, const std::string &script,
+    int64_t view_id, const std::string &script,
     std::function<
         void(webview_all_windows::ErrorOr<std::optional<std::string>> reply)>
         result) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return result(webview_all_windows::FlutterError(kErrorCodeInvalidId));
   }
@@ -289,8 +381,8 @@ void WindowsHostApi::AddScriptToExecuteOnDocumentCreated(
 
 std::optional<webview_all_windows::FlutterError>
 WindowsHostApi::RemoveScriptToExecuteOnDocumentCreated(
-    int64_t texture_id, const std::string &script_id) {
-  auto bridge = FindBridge(texture_id);
+    int64_t view_id, const std::string &script_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -299,10 +391,10 @@ WindowsHostApi::RemoveScriptToExecuteOnDocumentCreated(
 }
 
 void WindowsHostApi::ExecuteScript(
-    int64_t texture_id, const std::string &script,
+    int64_t view_id, const std::string &script,
     std::function<void(webview_all_windows::ErrorOr<std::string> reply)>
         result) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return result(webview_all_windows::FlutterError(kErrorCodeInvalidId));
   }
@@ -318,8 +410,8 @@ void WindowsHostApi::ExecuteScript(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::PostWebMessage(int64_t texture_id, const std::string &message) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::PostWebMessage(int64_t view_id, const std::string &message) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -331,9 +423,9 @@ WindowsHostApi::PostWebMessage(int64_t texture_id, const std::string &message) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetUserAgent(int64_t texture_id,
+WindowsHostApi::SetUserAgent(int64_t view_id,
                              const std::string *user_agent) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -345,8 +437,8 @@ WindowsHostApi::SetUserAgent(int64_t texture_id,
 }
 
 webview_all_windows::ErrorOr<std::optional<std::string>>
-WindowsHostApi::GetUserAgent(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::GetUserAgent(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return webview_all_windows::FlutterError(kErrorCodeInvalidId);
   }
@@ -354,8 +446,8 @@ WindowsHostApi::GetUserAgent(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetJavaScriptEnabled(int64_t texture_id, bool enabled) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetJavaScriptEnabled(int64_t view_id, bool enabled) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -367,9 +459,9 @@ WindowsHostApi::SetJavaScriptEnabled(int64_t texture_id, bool enabled) {
 }
 
 void WindowsHostApi::ClearCookies(
-    int64_t texture_id,
+    int64_t view_id,
     std::function<void(webview_all_windows::ErrorOr<bool> reply)> result) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return result(webview_all_windows::FlutterError(kErrorCodeInvalidId));
   }
@@ -383,8 +475,8 @@ void WindowsHostApi::ClearCookies(
 }
 
 std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetCookie(
-    int64_t texture_id, const webview_all_windows::WindowsCookieData &cookie) {
-  auto bridge = FindBridge(texture_id);
+    int64_t view_id, const webview_all_windows::WindowsCookieData &cookie) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -409,11 +501,11 @@ std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetCookie(
 }
 
 void WindowsHostApi::GetCookies(
-    int64_t texture_id, const std::string &url,
+    int64_t view_id, const std::string &url,
     std::function<
         void(webview_all_windows::ErrorOr<flutter::EncodableList> reply)>
         result) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return result(webview_all_windows::FlutterError(kErrorCodeInvalidId));
   }
@@ -447,8 +539,8 @@ void WindowsHostApi::GetCookies(
 }
 
 std::optional<webview_all_windows::FlutterError> WindowsHostApi::DeleteCookie(
-    int64_t texture_id, const webview_all_windows::WindowsCookieData &cookie) {
-  auto bridge = FindBridge(texture_id);
+    int64_t view_id, const webview_all_windows::WindowsCookieData &cookie) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -473,10 +565,10 @@ std::optional<webview_all_windows::FlutterError> WindowsHostApi::DeleteCookie(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::DeleteCookiesWithNameAndUrl(int64_t texture_id,
+WindowsHostApi::DeleteCookiesWithNameAndUrl(int64_t view_id,
                                             const std::string &name,
                                             const std::string &url) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -487,11 +579,11 @@ WindowsHostApi::DeleteCookiesWithNameAndUrl(int64_t texture_id,
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::DeleteCookiesWithNameDomainAndPath(int64_t texture_id,
+WindowsHostApi::DeleteCookiesWithNameDomainAndPath(int64_t view_id,
                                                    const std::string &name,
                                                    const std::string &domain,
                                                    const std::string &path) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -502,8 +594,8 @@ WindowsHostApi::DeleteCookiesWithNameDomainAndPath(int64_t texture_id,
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::ClearCache(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::ClearCache(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -514,10 +606,10 @@ WindowsHostApi::ClearCache(int64_t texture_id) {
 }
 
 void WindowsHostApi::ClearLocalStorage(
-    int64_t texture_id,
+    int64_t view_id,
     std::function<void(std::optional<webview_all_windows::FlutterError> reply)>
         result) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return result(InvalidIdError());
   }
@@ -531,8 +623,8 @@ void WindowsHostApi::ClearLocalStorage(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetCacheDisabled(int64_t texture_id, bool disabled) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetCacheDisabled(int64_t view_id, bool disabled) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -543,8 +635,8 @@ WindowsHostApi::SetCacheDisabled(int64_t texture_id, bool disabled) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::OpenDevTools(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::OpenDevTools(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -555,8 +647,8 @@ WindowsHostApi::OpenDevTools(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetBackgroundColor(int64_t texture_id, int64_t color) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetBackgroundColor(int64_t view_id, int64_t color) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -568,8 +660,8 @@ WindowsHostApi::SetBackgroundColor(int64_t texture_id, int64_t color) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetZoomControlEnabled(int64_t texture_id, bool enabled) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetZoomControlEnabled(int64_t view_id, bool enabled) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -581,8 +673,8 @@ WindowsHostApi::SetZoomControlEnabled(int64_t texture_id, bool enabled) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetZoomFactor(int64_t texture_id, double zoom_factor) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetZoomFactor(int64_t view_id, double zoom_factor) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -594,8 +686,8 @@ WindowsHostApi::SetZoomFactor(int64_t texture_id, double zoom_factor) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetPopupWindowPolicy(int64_t texture_id, int64_t policy) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetPopupWindowPolicy(int64_t view_id, int64_t policy) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -604,10 +696,10 @@ WindowsHostApi::SetPopupWindowPolicy(int64_t texture_id, int64_t policy) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetJavaScriptDialogCallbacksEnabled(int64_t texture_id,
+WindowsHostApi::SetJavaScriptDialogCallbacksEnabled(int64_t view_id,
                                                     bool alert, bool confirm,
                                                     bool prompt) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -616,8 +708,8 @@ WindowsHostApi::SetJavaScriptDialogCallbacksEnabled(int64_t texture_id,
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::Suspend(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::Suspend(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -626,8 +718,8 @@ WindowsHostApi::Suspend(int64_t texture_id) {
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::Resume(int64_t texture_id) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::Resume(int64_t view_id) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -637,9 +729,9 @@ WindowsHostApi::Resume(int64_t texture_id) {
 
 std::optional<webview_all_windows::FlutterError>
 WindowsHostApi::SetVirtualHostNameMapping(
-    int64_t texture_id,
+    int64_t view_id,
     const webview_all_windows::WindowsVirtualHostMappingData &mapping) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -649,9 +741,9 @@ WindowsHostApi::SetVirtualHostNameMapping(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::ClearVirtualHostNameMapping(int64_t texture_id,
+WindowsHostApi::ClearVirtualHostNameMapping(int64_t view_id,
                                             const std::string &host_name) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -662,20 +754,22 @@ WindowsHostApi::ClearVirtualHostNameMapping(int64_t texture_id,
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetFpsLimit(int64_t texture_id, int64_t max_fps) {
-  auto bridge = FindBridge(texture_id);
+WindowsHostApi::SetFpsLimit(int64_t view_id, int64_t max_fps) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
-  bridge->SetFpsLimit(max_fps);
+  if (max_fps != 0) {
+    return FlutterError(kErrorNotSupported, "Native WebView2 composition is paced by Windows");
+  }
   return std::nullopt;
 }
 
 std::optional<webview_all_windows::FlutterError>
 WindowsHostApi::SetPointerUpdate(
-    int64_t texture_id,
+    int64_t view_id,
     const webview_all_windows::WindowsPointerUpdateData &update) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -685,8 +779,8 @@ WindowsHostApi::SetPointerUpdate(
 }
 
 std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetCursorPos(
-    int64_t texture_id, const webview_all_windows::WindowsPointData &position) {
-  auto bridge = FindBridge(texture_id);
+    int64_t view_id, const webview_all_windows::WindowsPointData &position) {
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -696,9 +790,9 @@ std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetCursorPos(
 
 std::optional<webview_all_windows::FlutterError>
 WindowsHostApi::SetPointerButton(
-    int64_t texture_id,
+    int64_t view_id,
     const webview_all_windows::WindowsPointerButtonData &button) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -707,10 +801,10 @@ WindowsHostApi::SetPointerButton(
 }
 
 std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetScrollDelta(
-    int64_t texture_id,
+    int64_t view_id,
     const webview_all_windows::WindowsPointData &delta,
     bool control_key_pressed) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }
@@ -719,9 +813,9 @@ std::optional<webview_all_windows::FlutterError> WindowsHostApi::SetScrollDelta(
 }
 
 std::optional<webview_all_windows::FlutterError>
-WindowsHostApi::SetSize(int64_t texture_id,
+WindowsHostApi::SetSize(int64_t view_id,
                         const webview_all_windows::WindowsSizeData &size) {
-  auto bridge = FindBridge(texture_id);
+  auto bridge = FindBridge(view_id);
   if (!bridge) {
     return InvalidIdError();
   }

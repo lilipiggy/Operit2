@@ -6,3 +6,6 @@ pub mod RuntimePackageManager;
 
 #[path = "ToolPkgDebugInstallReceiver.rs"]
 pub mod ToolPkgDebugInstallReceiver;
+
+#[path = "ToolPkgDesktopWidgetService.rs"]
+mod ToolPkgDesktopWidgetService;

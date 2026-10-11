@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'local_resource.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
+import 'package:flutter/services.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'platform_navigation_delegate.dart';
@@ -19,6 +20,25 @@ import 'webview_platform.dart' show WebViewPlatform;
 /// `implements` this interface will be broken by newly added
 /// [PlatformWebViewController] methods.
 abstract class PlatformWebViewController extends PlatformInterface {
+  /// Scopes an injected script and applies main-frame filtering when requested.
+  @protected
+  String buildUserScriptSource(
+    WebViewUserScript userScript, {
+    required bool platformHandlesMainFrameOnly,
+  }) {
+    final guard = userScript.forMainFrameOnly && !platformHandlesMainFrameOnly
+        ? 'if (globalThis.top !== globalThis) return;'
+        : '';
+    return '(function() {\n$guard\n${userScript.source}\n}).call(globalThis);';
+  }
+
+  /// Applies the embedding application's color preference through its native host.
+  Future<void> setPreferredColorScheme(Brightness brightness) {
+    return const MethodChannel(
+      'operit/webview_theme',
+    ).invokeMethod<void>('setPreferredColorScheme', brightness.name);
+  }
+
   /// Creates a new [PlatformWebViewController]
   factory PlatformWebViewController(
     PlatformWebViewControllerCreationParams params,
@@ -59,6 +79,16 @@ abstract class PlatformWebViewController extends PlatformInterface {
   Future<void> loadFile(String absoluteFilePath) {
     throw UnimplementedError(
       'loadFile is not implemented on the current platform',
+    );
+  }
+
+  /// URL scheme used for socket-free local resources, or null if unsupported.
+  String? get localResourceScheme => null;
+
+  /// Installs an application-owned virtual-origin resource handler for this view.
+  Future<void> setLocalResourceHandler(WebViewLocalResourceHandler? handler) {
+    throw UnsupportedError(
+      'Native local resources are not supported on this platform',
     );
   }
 
@@ -190,6 +220,27 @@ abstract class PlatformWebViewController extends PlatformInterface {
     );
   }
 
+  /// Registers a native document-start script and returns its host-owned handle.
+  Future<String> addUserScript(WebViewUserScript userScript) {
+    throw UnimplementedError(
+      'addUserScript must be implemented by the WebView host',
+    );
+  }
+
+  /// Removes one native document-start script without removing channel scripts.
+  Future<void> removeUserScript(String identifier) {
+    throw UnimplementedError(
+      'removeUserScript must be implemented by the WebView host',
+    );
+  }
+
+  /// Removes application-owned scripts while retaining the host's bridge scripts.
+  Future<void> removeAllUserScripts() {
+    throw UnimplementedError(
+      'removeAllUserScripts must be implemented by the WebView host',
+    );
+  }
+
   /// Runs the given JavaScript in the context of the current page.
   ///
   /// The Future completes with an error if a JavaScript error occurred.
@@ -298,6 +349,24 @@ abstract class PlatformWebViewController extends PlatformInterface {
     throw UnimplementedError(
       'setZoomFactor is not implemented on the current platform',
     );
+  }
+
+  /// Whether application paint scaling must be replaced by native content zoom.
+  ///
+  /// Native overlays that cannot map transformed input should return true and
+  /// implement [setApplicationZoomFactor]. Composited platform views keep the
+  /// default: Flutter scales their content and maps pointer coordinates, so
+  /// applying the same scale to their page zoom would zoom the content twice.
+  bool get requiresNativeApplicationZoom => false;
+
+  /// Applies the embedding application's zoom after native viewport scaling
+  /// has been removed to keep input coordinates aligned.
+  ///
+  /// Platforms needing this compensation should combine [zoomFactor] with the
+  /// page zoom requested through [setZoomFactor], without replacing it. Other
+  /// platforms retain their existing paint scaling and can ignore this value.
+  Future<void> setApplicationZoomFactor(double zoomFactor) {
+    return Future<void>.value();
   }
 
   /// Set the current background color of this view.

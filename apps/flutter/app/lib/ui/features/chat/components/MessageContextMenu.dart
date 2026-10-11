@@ -1,14 +1,21 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:operit2/l10n/generated/app_localizations.dart';
+import 'style/MessageHeaderMetadata.dart';
 
+import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
+import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../common/interactions/MessagePressShield.dart';
+import '../../../common/icons/MaterialIconNameResolver.dart';
 import '../../../../util/ChatMarkupRegex.dart';
 import '../viewmodel/ChatViewModel.dart';
 import 'MessageCopyPreview.dart';
+import '../../packages/screens/ToolPkgUiLauncherScreen.dart';
 
 typedef MessageTimestampAction = Future<void> Function(int timestamp);
 typedef MessageTimestampBoolAction = Future<bool> Function(int timestamp);
@@ -24,6 +31,10 @@ class MessageContextMenu extends StatefulWidget {
   const MessageContextMenu({
     super.key,
     required this.message,
+    required this.chatId,
+    required this.messageIndex,
+    required this.clients,
+    required this.packageManager,
     required this.onToggleFavoriteMessage,
     this.splitMarkdownContent,
     required this.child,
@@ -42,6 +53,10 @@ class MessageContextMenu extends StatefulWidget {
   });
 
   final ChatUiMessage message;
+  final String chatId;
+  final int messageIndex;
+  final GeneratedCoreProxyClients clients;
+  final GeneratedApplicationPackageManagerCoreProxy packageManager;
   final MessageFavoriteAction onToggleFavoriteMessage;
   final MarkdownCopySplitter? splitMarkdownContent;
   final MessageTimestampAction? onDeleteMessage;
@@ -70,7 +85,6 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
   Offset? _longPressStartPosition;
   int? _longPressPointer;
   Timer? _longPressTimer;
-  bool _isPressing = false;
   final MessagePressShieldController _pressShieldController =
       MessagePressShieldController();
 
@@ -100,7 +114,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
                 }
               : null,
           onSecondaryTap: _isActionable ? _showContextMenu : null,
-          child: _PressFeedback(isPressing: _isPressing, child: widget.child),
+          child: widget.child,
         ),
       ),
     );
@@ -122,7 +136,6 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         _longPressStartPosition = null;
         return;
       }
-      _setPressing(true);
       _longPressTimer?.cancel();
       _longPressTimer = Timer(_longPressDuration, () {
         _longPressTimer = null;
@@ -155,16 +168,6 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     _longPressTimer = null;
     _longPressStartPosition = null;
     _longPressPointer = null;
-    _setPressing(false);
-  }
-
-  void _setPressing(bool value) {
-    if (_isPressing == value || !mounted) {
-      return;
-    }
-    setState(() {
-      _isPressing = value;
-    });
   }
 
   Future<void> _showContextMenu() async {
@@ -174,16 +177,26 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
       return;
     }
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final localPosition = overlay.globalToLocal(position);
     final rect = RelativeRect.fromRect(
-      position & const Size(1, 1),
+      localPosition & const Size(1, 1),
       Offset.zero & overlay.size,
     );
-    final action = await showMenu<_MessageMenuAction>(
+    final useEnglish = Localizations.localeOf(context).languageCode == 'en';
+    final toolPkgItems = await widget.packageManager
+        .getToolPkgChatMessageMenuItems(
+          sender: widget.message.sender,
+          useEnglish: useEnglish,
+        );
+    if (!mounted) {
+      return;
+    }
+    final action = await showMenu<_MessageMenuSelection>(
       context: context,
       position: rect,
       constraints: const BoxConstraints(minWidth: 180, maxWidth: 220),
       popUpAnimationStyle: AnimationStyle.noAnimation,
-      items: _menuItems(context),
+      items: _menuItems(context, toolPkgItems),
     );
     if (!mounted || action == null) {
       return;
@@ -197,9 +210,13 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     super.dispose();
   }
 
-  List<PopupMenuEntry<_MessageMenuAction>> _menuItems(BuildContext context) {
+  /// Builds built-in and ToolPkg context-menu entries for the selected message.
+  List<PopupMenuEntry<_MessageMenuSelection>> _menuItems(
+    BuildContext context,
+    List<core_proxy.ToolPkgChatMessageMenuItem> toolPkgItems,
+  ) {
     final message = widget.message;
-    final items = <PopupMenuEntry<_MessageMenuAction>>[
+    final items = <PopupMenuEntry<_MessageMenuSelection>>[
       _menuItem(
         value: _MessageMenuAction.copy,
         icon: Icons.content_copy,
@@ -207,7 +224,14 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
       ),
     ];
     if (message.sender == 'user') {
-      items.addAll(<PopupMenuEntry<_MessageMenuAction>>[
+      items.add(
+        _menuItem(
+          value: _MessageMenuAction.queueMemory,
+          icon: Icons.psychology_outlined,
+          label: '加入记忆队列',
+        ),
+      );
+      items.addAll(<PopupMenuEntry<_MessageMenuSelection>>[
         _menuItem(
           value: _MessageMenuAction.editAndResend,
           icon: Icons.edit,
@@ -221,7 +245,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
       ]);
     }
     if (message.sender == 'ai') {
-      items.addAll(<PopupMenuEntry<_MessageMenuAction>>[
+      items.addAll(<PopupMenuEntry<_MessageMenuSelection>>[
         _menuItem(
           value: _MessageMenuAction.regenerate,
           icon: Icons.refresh,
@@ -248,7 +272,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         );
       }
     }
-    items.addAll(<PopupMenuEntry<_MessageMenuAction>>[
+    items.addAll(<PopupMenuEntry<_MessageMenuSelection>>[
       _menuItem(
         value: _MessageMenuAction.delete,
         icon: Icons.delete,
@@ -264,7 +288,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         ),
       );
     }
-    items.addAll(<PopupMenuEntry<_MessageMenuAction>>[
+    items.addAll(<PopupMenuEntry<_MessageMenuSelection>>[
       _menuItem(
         value: _MessageMenuAction.insertSummary,
         icon: Icons.summarize,
@@ -282,16 +306,42 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         label: '多选',
       ),
     ]);
+    if (toolPkgItems.isNotEmpty) {
+      items.add(const PopupMenuDivider());
+      items.addAll(
+        toolPkgItems.map(
+          (item) => PopupMenuItem<_MessageMenuSelection>(
+            value: _MessageMenuSelection.toolPkg(item),
+            height: 36,
+            child: Row(
+              children: <Widget>[
+                if (item.icon != null)
+                  Icon(MaterialIconNameResolver.resolve(item.icon!), size: 16),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    item.title,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return items;
   }
 
-  PopupMenuItem<_MessageMenuAction> _menuItem({
+  /// Builds one built-in context-menu entry.
+  PopupMenuItem<_MessageMenuSelection> _menuItem({
     required _MessageMenuAction value,
     required IconData icon,
     required String label,
   }) {
-    return PopupMenuItem<_MessageMenuAction>(
-      value: value,
+    return PopupMenuItem<_MessageMenuSelection>(
+      value: _MessageMenuSelection.builtIn(value),
       height: 36,
       child: Row(
         children: <Widget>[
@@ -303,8 +353,14 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     );
   }
 
-  Future<void> _handleAction(_MessageMenuAction action) async {
-    switch (action) {
+  /// Runs the chosen built-in command or ToolPkg menu callback.
+  Future<void> _handleAction(_MessageMenuSelection selection) async {
+    final toolPkgItem = selection.toolPkgItem;
+    if (toolPkgItem != null) {
+      await _runToolPkgMenuItem(toolPkgItem);
+      return;
+    }
+    switch (selection.builtInAction!) {
       case _MessageMenuAction.copy:
         await showModalBottomSheet<void>(
           context: context,
@@ -318,6 +374,24 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         break;
       case _MessageMenuAction.editAndResend:
         widget.onSelectMessageToEdit?.call(widget.message);
+        break;
+      case _MessageMenuAction.queueMemory:
+        try {
+          await widget.clients.chatRuntimeHolderMain
+              .enqueueSelectedMessagesForMemory(
+                chatId: widget.chatId,
+                messageTimestamps: [widget.message.timestamp],
+              );
+          if (mounted)
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('已加入所属记忆库队列')));
+        } catch (error) {
+          if (mounted)
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text('入队失败：$error')));
+        }
         break;
       case _MessageMenuAction.modifyMemory:
         widget.onSelectMessageToEdit?.call(widget.message);
@@ -361,8 +435,107 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     }
   }
 
+  /// Builds the ToolPkg snapshot with text from the selected message parts.
+  Map<String, Object?> _toolPkgMessageSnapshot() {
+    return <String, Object?>{
+      ...widget.message.toJson(),
+      'content': widget.message.displayText,
+    };
+  }
+
+  /// Invokes a ToolPkg context-menu callback with the selected message snapshot.
+  Future<void> _runToolPkgMenuItem(
+    core_proxy.ToolPkgChatMessageMenuItem item,
+  ) async {
+    final result = await widget.packageManager.invokeToolPkgChatMessageMenuItem(
+      containerPackageName: item.containerPackageName,
+      itemId: item.itemId,
+      chatId: widget.chatId,
+      messageIndex: widget.messageIndex,
+      message: _toolPkgMessageSnapshot(),
+    );
+    final dialog = item.dialog;
+    if (dialog != null) {
+      await _showToolPkgMenuDialog(item: item, result: result);
+    }
+  }
+
+  /// Opens the registered Compose DSL dialog with callback-provided state.
+  Future<void> _showToolPkgMenuDialog({
+    required core_proxy.ToolPkgChatMessageMenuItem item,
+    required String? result,
+  }) async {
+    final dialog = item.dialog!;
+    final response = result == null
+        ? const <String, Object?>{}
+        : _toolPkgJsonObject(jsonDecode(result), 'menu item result');
+    final rawDialog = response['dialog'];
+    final dialogResult = rawDialog == null
+        ? const <String, Object?>{}
+        : _toolPkgJsonObject(rawDialog, 'menu item dialog result');
+    final state = <String, Object?>{
+      'chatId': widget.chatId,
+      'messageIndex': widget.messageIndex,
+      'message': _toolPkgMessageSnapshot(),
+      'menuItemId': item.itemId,
+    };
+    final rawState = dialogResult['state'];
+    if (rawState != null) {
+      state.addAll(_toolPkgJsonObject(rawState, 'menu item dialog state'));
+    }
+    final moduleSpec = <String, Object?>{
+      'id': item.itemId,
+      'runtime': 'compose_dsl',
+      'screen': dialog.screen,
+      'title': dialog.title,
+      'toolPkgId': item.containerPackageName,
+      'menuItemId': item.itemId,
+    };
+    final rawModuleSpec = dialogResult['moduleSpec'];
+    if (rawModuleSpec != null) {
+      moduleSpec.addAll(
+        _toolPkgJsonObject(rawModuleSpec, 'menu item dialog moduleSpec'),
+      );
+    }
+    final rawTitle = dialogResult['title'];
+    final dialogTitle = switch (rawTitle) {
+      null => dialog.title,
+      String title => title,
+      _ => throw StateError('ToolPkg menu item dialog title must be a string'),
+    };
+    final plugin = await widget.packageManager.getToolPkgContainerRuntime(
+      containerPackageName: item.containerPackageName,
+    );
+    if (!mounted) {
+      return;
+    }
+    if (plugin == null) {
+      throw StateError(
+        'ToolPkg container not found: ${item.containerPackageName}',
+      );
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => ToolPkgUiLauncherScreen(
+        clients: widget.clients,
+        plugin: plugin,
+        initialRouteId: dialog.screen,
+        embeddedScreenPath: dialog.screen,
+        showLauncherChrome: false,
+        dialogTitle: dialogTitle,
+        initialState: state,
+        initialModuleSpec: moduleSpec,
+      ),
+    );
+  }
+
   Future<void> _confirmDelete() async {
-    final confirmed = await _confirm('确认删除', '确定删除这条消息？');
+    final l10n = AppLocalizations.of(context);
+    final confirmed = await _confirm(
+      l10n?.chatMessageDeleteConfirmTitle ?? '确认删除',
+      l10n?.chatMessageDeleteConfirmMessage ?? '确定删除这条消息？',
+    );
     if (!confirmed) {
       return;
     }
@@ -371,22 +544,30 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
   }
 
   Future<bool> _confirm(String title, String message) async {
+    final l10n = AppLocalizations.of(context);
+    final anchor = _menuPosition;
     final result = await showDialog<bool>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: Text(title),
-          content: Text(message),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('删除'),
-            ),
-          ],
+        return CursorAnchoredDialog(
+          anchorGlobalPosition: anchor,
+          child: AlertDialog(
+            insetPadding: anchor == null
+                ? const EdgeInsets.symmetric(horizontal: 40, vertical: 24)
+                : EdgeInsets.zero,
+            title: Text(title),
+            content: Text(message),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text(l10n?.cancel ?? '取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: Text(l10n?.delete ?? '删除'),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -394,69 +575,96 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
   }
 
   Future<void> _showInfoDialog() {
+    final l10n = AppLocalizations.of(context);
     final message = widget.message;
+    final anchor = _menuPosition;
     return showDialog<void>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('消息信息'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text('发送者: ${message.sender}'),
-              Text('时间戳: ${message.timestamp}'),
-              if (message.roleName.isNotEmpty) Text('角色: ${message.roleName}'),
-              if (message.modelName.isNotEmpty)
-                Text('模型: ${message.modelName}'),
-              if (message.provider.isNotEmpty) Text('提供商: ${message.provider}'),
-              Text('输入 token: ${message.inputTokens}'),
-              Text('缓存输入 token: ${message.cachedInputTokens}'),
-              Text('输出 token: ${message.outputTokens}'),
-              Text('等待耗时: ${message.waitDurationMs}ms'),
-              Text('输出耗时: ${message.outputDurationMs}ms'),
+        return CursorAnchoredDialog(
+          anchorGlobalPosition: anchor,
+          child: AlertDialog(
+            insetPadding: anchor == null
+                ? const EdgeInsets.symmetric(horizontal: 40, vertical: 24)
+                : EdgeInsets.zero,
+            title: Text(l10n?.chatMessageInfoDialogTitle ?? '消息信息'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  l10n?.chatMessageSender(message.sender) ??
+                      '发送者: ${message.sender}',
+                ),
+                Text(
+                  l10n?.chatMessageTimestamp(message.timestamp.toString()) ??
+                      '时间戳: ${message.timestamp}',
+                ),
+                if (message.roleName.isNotEmpty)
+                  Text(
+                    l10n?.chatMessageRole(message.roleName) ??
+                        '角色: ${message.roleName}',
+                  ),
+                if (message.modelName.isNotEmpty)
+                  Text(
+                    l10n?.chatMessageModel(message.modelName) ??
+                        '模型: ${message.modelName}',
+                  ),
+                if (message.provider.isNotEmpty)
+                  Text(
+                    l10n?.chatMessageProvider(message.provider) ??
+                        '提供商: ${message.provider}',
+                  ),
+                Text(
+                  l10n?.chatMessageTokensInput(
+                        message.inputTokens.toString(),
+                      ) ??
+                      '输入 token: ${message.inputTokens}',
+                ),
+                Text(
+                  l10n?.chatMessageTokensCached(
+                        message.cachedInputTokens.toString(),
+                      ) ??
+                      '缓存输入 token: ${message.cachedInputTokens}',
+                ),
+                Text(
+                  l10n?.chatMessageCacheHitRate(formatCacheHitRate(message)) ??
+                      '缓存命中率: ${formatCacheHitRate(message)}',
+                ),
+                Text(
+                  l10n?.chatMessageTokensOutput(
+                        message.outputTokens.toString(),
+                      ) ??
+                      '输出 token: ${message.outputTokens}',
+                ),
+                if (formatTokenSpeed(message).isNotEmpty)
+                  Text(
+                    l10n?.chatMessageTokenSpeed(formatTokenSpeed(message)) ??
+                        'Token 速率: ${formatTokenSpeed(message)}',
+                  ),
+                Text(
+                  l10n?.chatMessageWaitDuration(
+                        '${message.waitDurationMs}ms',
+                      ) ??
+                      '等待耗时: ${message.waitDurationMs}ms',
+                ),
+                Text(
+                  l10n?.chatMessageOutputDuration(
+                        '${message.outputDurationMs}ms',
+                      ) ??
+                      '输出耗时: ${message.outputDurationMs}ms',
+                ),
+              ],
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(l10n?.ok ?? '确定'),
+              ),
             ],
           ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('确定'),
-            ),
-          ],
         );
       },
-    );
-  }
-}
-
-class _PressFeedback extends StatelessWidget {
-  const _PressFeedback({required this.isPressing, required this.child});
-
-  final bool isPressing;
-  final Widget child;
-
-  /// Builds the long-press visual feedback using only the color overlay.
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Stack(
-      children: <Widget>[
-        child,
-        Positioned.fill(
-          child: IgnorePointer(
-            child: AnimatedOpacity(
-              opacity: isPressing ? 1 : 0,
-              duration: const Duration(milliseconds: 80),
-              curve: Curves.easeOut,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: colorScheme.onSurface.withValues(alpha: 0.06),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -465,6 +673,7 @@ enum _MessageMenuAction {
   copy,
   editAndResend,
   modifyMemory,
+  queueMemory,
   rollback,
   regenerate,
   deleteVariant,
@@ -475,6 +684,32 @@ enum _MessageMenuAction {
   createBranch,
   info,
   multiSelect,
+}
+
+/// Identifies one built-in or ToolPkg message context-menu selection.
+class _MessageMenuSelection {
+  const _MessageMenuSelection.builtIn(this.builtInAction) : toolPkgItem = null;
+
+  const _MessageMenuSelection.toolPkg(this.toolPkgItem) : builtInAction = null;
+
+  final _MessageMenuAction? builtInAction;
+  final core_proxy.ToolPkgChatMessageMenuItem? toolPkgItem;
+}
+
+/// Converts a JSON object while rejecting values with non-string keys.
+Map<String, Object?> _toolPkgJsonObject(Object? value, String fieldName) {
+  if (value is! Map) {
+    throw StateError('ToolPkg $fieldName must be an object');
+  }
+  final object = <String, Object?>{};
+  for (final entry in value.entries) {
+    final key = entry.key;
+    if (key is! String) {
+      throw StateError('ToolPkg $fieldName has a non-string key');
+    }
+    object[key] = entry.value;
+  }
+  return object;
 }
 
 String cleanMessageContent(String content) {

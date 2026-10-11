@@ -55,7 +55,7 @@ impl IosTerminalHost {
         }
     }
 
-    /// Mounts an App-owned directory into the embedded iSH filesystem for MCP execution.
+    /// Shares a host directory with iSH at the same absolute path.
     pub fn mountManagedRuntimeDirectory(
         &self,
         hostDirectory: &str,
@@ -251,6 +251,25 @@ impl IosTerminalHost {
 }
 
 impl TerminalHost for IosTerminalHost {
+    /// Resolves iSH guest paths without requiring a Linux mount on the iOS host.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        workingDir: &str,
+        resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        match self.requestedBackend(terminal, terminalType)? {
+            IosTerminalBackend::Ish => {
+                operit_host_api::TerminalWorkingDirectory::resolveLinuxGuestDirectory(
+                    workingDir,
+                    resolveHostDirectory,
+                )
+            }
+            IosTerminalBackend::SystemShell => resolveHostDirectory(workingDir),
+        }
+    }
+
     /// Describes iSH and the real system shell capability, including privileged availability.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         let primaryBackend = self.primaryBackend();
@@ -382,7 +401,7 @@ impl TerminalHost for IosTerminalHost {
 
     /// Lists active iSH and system-shell sessions with their exact terminal identities.
     fn listSessions(&self) -> HostResult<Vec<TerminalSessionListEntry>> {
-        let ishResponse = callIshTerminal("terminalList", Value::Null)?;
+        let ishResponse = callIshTerminal("terminalList", json!({}))?;
         let ishSessions = ishResponse
             .get("sessions")
             .and_then(Value::as_array)
@@ -405,7 +424,18 @@ impl TerminalHost for IosTerminalHost {
 
     /// Creates or reuses the Host-selected terminal backend for a plugin session.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
-        self.createOrGetBackendSession(self.primaryBackend(), sessionName)
+        self.createOrGetTypedSession(sessionName, SHELL_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses the requested interpreter in the configured iOS terminal backend.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        let backend = self.primaryBackend();
+        let backend = self.requestedBackend(Self::terminalName(backend), terminalType)?;
+        self.createOrGetBackendSession(backend, sessionName)
     }
 
     /// Executes one complete command in the terminal backend registered for the session.

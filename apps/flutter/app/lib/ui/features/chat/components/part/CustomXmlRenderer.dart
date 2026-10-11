@@ -3,8 +3,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:xml/xml.dart' as xml;
 
 import '../../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../../../../core/logging/ClientLogger.dart';
 import '../../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../../core/proxy/generated/CoreProxyModels.g.dart'
     as core_proxy;
@@ -14,12 +17,14 @@ import '../../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../../common/markdown/XmlRenderPluginRegistry.dart';
 import '../../../../../util/ChatMarkupRegex.dart';
 import '../../../packages/screens/ToolPkgUiLauncherScreen.dart';
+import '../ChatRuntimeScope.dart';
 import 'DetailsTagRenderer.dart';
 import 'DialogComponents.dart';
 import 'FileDiffDisplay.dart';
 import 'FontTagRenderer.dart';
 import 'ToolDisplayComponents.dart';
 import 'ToolResultDisplay.dart';
+import 'XmlCanvasBlockComponents.dart';
 
 class CustomXmlRenderer extends StatelessWidget {
   const CustomXmlRenderer({
@@ -67,11 +72,18 @@ class CustomXmlRenderer extends StatelessWidget {
       return pluginRender;
     }
     return _ToolPkgXmlRenderBridge(
+      key: ValueKey((
+        parsed.tagName,
+        ChatRuntimeScope.maybeOf(context),
+        ChatRuntimeScope.maybeChatIdOf(context),
+      )),
       tagName: parsed.tagName,
       xmlContent: xmlContent,
       isStreaming: isStreaming,
       textColor: textColor,
       splitMarkdownContent: splitMarkdownContent,
+      chatCore: ChatRuntimeScope.maybeOf(context),
+      chatId: ChatRuntimeScope.maybeChatIdOf(context),
       defaultBuilder: (context) => _buildDefaultXml(context, parsed),
     );
   }
@@ -102,11 +114,11 @@ class CustomXmlRenderer extends StatelessWidget {
           fullHeight: allowExpandedThinkingFullHeight,
         );
       case 'search':
-        return _LabeledPanel(
-          label: 'Search',
-          text: parsed.body,
-          color: Theme.of(context).colorScheme.tertiary,
+        return _SearchPanel(
+          xmlContent: xmlContent,
+          textColor: textColor,
           isStreaming: isStreaming,
+          splitMarkdownContent: splitMarkdownContent,
         );
       case 'status':
         return _StatusChip(
@@ -180,12 +192,15 @@ class CustomXmlRenderer extends StatelessWidget {
 
 class _ToolPkgXmlRenderBridge extends StatefulWidget {
   const _ToolPkgXmlRenderBridge({
+    super.key,
     required this.tagName,
     required this.xmlContent,
     required this.isStreaming,
     required this.textColor,
     required this.defaultBuilder,
     required this.splitMarkdownContent,
+    required this.chatCore,
+    required this.chatId,
   });
 
   final String tagName;
@@ -194,6 +209,8 @@ class _ToolPkgXmlRenderBridge extends StatefulWidget {
   final Color textColor;
   final WidgetBuilder defaultBuilder;
   final MarkdownContentSplitter splitMarkdownContent;
+  final GeneratedChatRuntimeHolderMainCoreProxy? chatCore;
+  final String? chatId;
 
   @override
   State<_ToolPkgXmlRenderBridge> createState() =>
@@ -205,22 +222,68 @@ class _ToolPkgXmlRenderBridgeState extends State<_ToolPkgXmlRenderBridge> {
     ProxyCoreRuntimeBridge(),
   );
 
-  late Future<Object?> _renderFuture = _loadRender();
+  late Future<Object?> _renderFuture;
+  StreamSubscription<int>? _revisionSubscription;
+  int _subscriptionGeneration = 0;
+  int _renderGeneration = 0;
 
+  /// Loads the XML once and observes hooks even when none currently handle this tag.
+  @override
+  void initState() {
+    super.initState();
+    _renderFuture = _loadRender();
+    _subscribeToRegistry();
+  }
+
+  /// Follows the current runtime and reloads changed XML inputs without replacing its host.
   @override
   void didUpdateWidget(covariant _ToolPkgXmlRenderBridge oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.chatCore != widget.chatCore) {
+      _subscribeToRegistry();
+      _renderGeneration++;
+    }
     if (oldWidget.tagName != widget.tagName ||
-        oldWidget.xmlContent != widget.xmlContent) {
+        oldWidget.xmlContent != widget.xmlContent ||
+        oldWidget.chatCore != widget.chatCore ||
+        oldWidget.chatId != widget.chatId) {
       _renderFuture = _loadRender();
     }
   }
 
+  /// Invalidates cached XML output only after the runtime publishes committed hooks.
+  void _subscribeToRegistry() {
+    final generation = ++_subscriptionGeneration;
+    unawaited(_revisionSubscription?.cancel());
+    _revisionSubscription = (widget.chatCore ?? _clients.chatRuntimeHolderMain)
+        .xmlRenderRegistryRevisionFlow()
+        .distinct()
+        .listen((revision) {
+          if (!mounted || generation != _subscriptionGeneration) {
+            return;
+          }
+          setState(() {
+            // A registry change invalidates DSL hosts as well as previously unhandled XML.
+            _renderGeneration++;
+            _renderFuture = _loadRender();
+          });
+        });
+  }
+
+  /// Releases the revision watch when the message XML node leaves the widget tree.
+  @override
+  void dispose() {
+    _subscriptionGeneration++;
+    unawaited(_revisionSubscription?.cancel());
+    super.dispose();
+  }
+
   /// Requests ToolPkg XML render output from the active Core runtime.
   Future<Object?> _loadRender() {
-    return _clients.chatRuntimeHolderMain.renderToolPkgXml(
+    return (widget.chatCore ?? _clients.chatRuntimeHolderMain).renderToolPkgXml(
       tagName: widget.tagName,
       xmlContent: widget.xmlContent,
+      chatId: widget.chatId,
     );
   }
 
@@ -228,11 +291,12 @@ class _ToolPkgXmlRenderBridgeState extends State<_ToolPkgXmlRenderBridge> {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<Object?>(
+      key: ValueKey(_renderGeneration),
       future: _renderFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done ||
-            snapshot.hasError ||
-            snapshot.data == null) {
+        // A new XML chunk must not unmount the resolved DSL host while its
+        // replacement is pending. FutureBuilder retains the previous data.
+        if (snapshot.hasError || snapshot.data == null) {
           return widget.defaultBuilder(context);
         }
         final data = snapshot.data;
@@ -257,16 +321,20 @@ class _ToolPkgXmlRenderBridgeState extends State<_ToolPkgXmlRenderBridge> {
           final containerPackageName = data['containerPackageName'];
           final screen = data['screen'];
           if (containerPackageName is String && screen is String) {
-            return _ToolPkgXmlComposeDslRender(
-              clients: _clients,
-              containerPackageName: containerPackageName,
-              screen: screen,
-              initialState: _requiredJsonObject(data['state'], 'state'),
-              initialMemo: _requiredJsonObject(data['memo'], 'memo'),
-              initialModuleSpec: data['moduleSpec'] == null
-                  ? null
-                  : _requiredJsonObject(data['moduleSpec'], 'moduleSpec'),
-              defaultBuilder: widget.defaultBuilder,
+            final providedModuleSpec = data['moduleSpec'] == null
+                ? null
+                : _requiredJsonObject(data['moduleSpec'], 'moduleSpec');
+            return SelectionContainer.disabled(
+              child: _ToolPkgXmlComposeDslRender(
+                key: ValueKey((containerPackageName, screen)),
+                clients: _clients,
+                containerPackageName: containerPackageName,
+                screen: screen,
+                initialState: _requiredJsonObject(data['state'], 'state'),
+                initialMemo: _requiredJsonObject(data['memo'], 'memo'),
+                initialModuleSpec: providedModuleSpec,
+                defaultBuilder: widget.defaultBuilder,
+              ),
             );
           }
         }
@@ -278,6 +346,7 @@ class _ToolPkgXmlRenderBridgeState extends State<_ToolPkgXmlRenderBridge> {
 
 class _ToolPkgXmlComposeDslRender extends StatefulWidget {
   const _ToolPkgXmlComposeDslRender({
+    super.key,
     required this.clients,
     required this.containerPackageName,
     required this.screen,
@@ -301,9 +370,14 @@ class _ToolPkgXmlComposeDslRender extends StatefulWidget {
 }
 
 class _ToolPkgXmlComposeDslRenderState
-    extends State<_ToolPkgXmlComposeDslRender> {
+    extends State<_ToolPkgXmlComposeDslRender>
+    with AutomaticKeepAliveClientMixin<_ToolPkgXmlComposeDslRender> {
   late Future<core_proxy.ToolPkgContainerRuntime?> _pluginFuture =
       _loadPlugin();
+
+  /// Keeps the resolved DSL host alive while its chat list item is off-screen.
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void didUpdateWidget(covariant _ToolPkgXmlComposeDslRender oldWidget) {
@@ -325,6 +399,16 @@ class _ToolPkgXmlComposeDslRenderState
   /// Builds an embedded Compose DSL surface for XML-render hook output.
   @override
   Widget build(BuildContext context) {
+    super.build(context);
+    final moduleSpec =
+        widget.initialModuleSpec ??
+        <String, Object?>{
+          'id': 'xml_render',
+          'runtime': 'compose_dsl',
+          'screen': widget.screen,
+          'title': widget.screen,
+          'toolPkgId': widget.containerPackageName,
+        };
     return FutureBuilder<core_proxy.ToolPkgContainerRuntime?>(
       future: _pluginFuture,
       builder: (context, snapshot) {
@@ -337,11 +421,12 @@ class _ToolPkgXmlComposeDslRenderState
         return ToolPkgUiLauncherScreen(
           clients: widget.clients,
           plugin: plugin,
-          initialRouteId: widget.screen,
+          initialRouteId: 'xml_render',
+          embeddedScreenPath: widget.screen,
           showLauncherChrome: false,
           initialState: widget.initialState,
           initialMemo: widget.initialMemo,
-          initialModuleSpec: widget.initialModuleSpec,
+          initialModuleSpec: moduleSpec,
         );
       },
     );
@@ -496,6 +581,7 @@ class _ThinkPanel extends StatefulWidget {
   final bool fullHeight;
   final MarkdownContentSplitter splitMarkdownContent;
 
+  /// Creates state for the expandable thinking panel.
   @override
   State<_ThinkPanel> createState() => _ThinkPanelState();
 }
@@ -504,12 +590,12 @@ class _ThinkPanelState extends State<_ThinkPanel> {
   late bool _expanded;
   late bool _bodyFullHeight;
   late final ScrollController _scrollController;
-  bool _skipCollapseAnimationOnce = false;
   bool _autoScrollEnabled = true;
   bool _userHasInteractedWithScroll = false;
   bool _isProgrammaticScroll = false;
   int _expandSession = 0;
 
+  /// Initializes expansion, height, and scroll state.
   @override
   void initState() {
     super.initState();
@@ -519,6 +605,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     _scrollController = ScrollController();
   }
 
+  /// Syncs expansion state when streaming or caller defaults change.
   @override
   void didUpdateWidget(covariant _ThinkPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -529,22 +616,11 @@ class _ThinkPanelState extends State<_ThinkPanel> {
         _expandSession += 1;
       }
       if (!targetExpanded && oldWidget.isStreaming && !widget.isStreaming) {
-        _skipCollapseAnimationOnce = true;
         _bodyFullHeight = false;
       }
       _expanded = targetExpanded;
       if (_expanded) {
         _resetAutoScrollState();
-      }
-      if (_skipCollapseAnimationOnce) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) {
-            return;
-          }
-          setState(() {
-            _skipCollapseAnimationOnce = false;
-          });
-        });
       }
     }
 
@@ -553,12 +629,14 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     }
   }
 
+  /// Releases the body scroll controller.
   @override
   void dispose() {
     _scrollController.dispose();
     super.dispose();
   }
 
+  /// Resolves the current expansion target from stream state and caller intent.
   bool _targetExpandedFor(_ThinkPanel widget) {
     if (widget.initiallyExpanded && !widget.isStreaming) {
       return true;
@@ -569,9 +647,9 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     return false;
   }
 
+  /// Toggles visibility for the thinking body.
   void _handleHeaderTap() {
     setState(() {
-      _skipCollapseAnimationOnce = false;
       final nextExpanded = !_expanded;
       if (nextExpanded) {
         _expandSession += 1;
@@ -581,17 +659,20 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     });
   }
 
+  /// Toggles the thinking body between capped and complete height.
   void _handleBodyTap() {
     setState(() {
       _bodyFullHeight = !_bodyFullHeight;
     });
   }
 
+  /// Restores automatic scrolling for a new expansion session.
   void _resetAutoScrollState() {
     _autoScrollEnabled = true;
     _userHasInteractedWithScroll = false;
   }
 
+  /// Tracks user scroll position inside capped thinking bodies.
   bool _handleScrollNotification(ScrollNotification notification) {
     if (!_expanded || _isProgrammaticScroll || !_scrollController.hasClients) {
       return false;
@@ -608,6 +689,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
     return false;
   }
 
+  /// Updates automatic scroll intent from the current capped scroll position.
   void _updateAutoScrollFromPosition() {
     if (!_userHasInteractedWithScroll || !_scrollController.hasClients) {
       return;
@@ -618,6 +700,7 @@ class _ThinkPanelState extends State<_ThinkPanel> {
         position.pixels >= position.maxScrollExtent - threshold;
   }
 
+  /// Pins the capped thinking body to its latest streamed content.
   void _scrollToBottomAfterFrame() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients || !_autoScrollEnabled) {
@@ -644,9 +727,13 @@ class _ThinkPanelState extends State<_ThinkPanel> {
         _expanded && (contentText.isNotEmpty || hasStreamingMarkdown);
     final renderFullHeight =
         (widget.fullHeight || _bodyFullHeight) && _expanded;
-    final switchDuration = _skipCollapseAnimationOnce
-        ? Duration.zero
-        : const Duration(milliseconds: 220);
+    final bodyConstraints = renderFullHeight
+        ? const BoxConstraints()
+        : const BoxConstraints(maxHeight: 300);
+    final bodyScrollPhysics = renderFullHeight
+        ? const NeverScrollableScrollPhysics()
+        : null;
+    const switchDuration = Duration(milliseconds: 220);
     return Semantics(
       label: contentText.isEmpty
           ? thinkingTitle
@@ -661,14 +748,12 @@ class _ThinkPanelState extends State<_ThinkPanel> {
                 onTap: _handleHeaderTap,
                 borderRadius: BorderRadius.circular(6),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  padding: EdgeInsets.zero,
                   child: Row(
                     children: <Widget>[
                       AnimatedRotation(
                         turns: _expanded ? 0.25 : 0,
-                        duration: _skipCollapseAnimationOnce
-                            ? Duration.zero
-                            : const Duration(milliseconds: 300),
+                        duration: const Duration(milliseconds: 300),
                         child: Icon(
                           Icons.keyboard_arrow_right,
                           size: 20,
@@ -722,39 +807,42 @@ class _ThinkPanelState extends State<_ThinkPanel> {
                             ),
                             child: MessagePressShieldRegion(
                               child: GestureDetector(
+                                key: const ValueKey<String>(
+                                  'thinking-body-toggle',
+                                ),
                                 behavior: HitTestBehavior.translucent,
                                 onTap: _handleBodyTap,
-                                child: ConstrainedBox(
-                                  constraints: renderFullHeight
-                                      ? const BoxConstraints()
-                                      : const BoxConstraints(maxHeight: 300),
-                                  child: renderFullHeight
-                                      ? _ThinkMarkdownBody(
-                                          contentText: contentText,
-                                          contentStream: hasStreamingMarkdown
-                                              ? widget.markdownEventStream
-                                              : null,
-                                          textColor: widget.textColor,
-                                          splitMarkdownContent: widget.splitMarkdownContent,
-                                        )
-                                      : NotificationListener<
-                                          ScrollNotification
-                                        >(
-                                          onNotification:
-                                              _handleScrollNotification,
-                                          child: SingleChildScrollView(
-                                            controller: _scrollController,
-                                            child: _ThinkMarkdownBody(
-                                              contentText: contentText,
-                                              contentStream:
-                                                  hasStreamingMarkdown
-                                                  ? widget.markdownEventStream
-                                                  : null,
-                                              textColor: widget.textColor,
-                                              splitMarkdownContent: widget.splitMarkdownContent,
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  child: AnimatedSize(
+                                    alignment: Alignment.topCenter,
+                                    duration: const Duration(milliseconds: 240),
+                                    curve: Curves.easeOutCubic,
+                                    child: ConstrainedBox(
+                                      constraints: bodyConstraints,
+                                      child:
+                                          NotificationListener<
+                                            ScrollNotification
+                                          >(
+                                            onNotification:
+                                                _handleScrollNotification,
+                                            child: SingleChildScrollView(
+                                              controller: _scrollController,
+                                              physics: bodyScrollPhysics,
+                                              child: _ThinkMarkdownBody(
+                                                contentText: contentText,
+                                                contentStream:
+                                                    hasStreamingMarkdown
+                                                    ? widget.markdownEventStream
+                                                    : null,
+                                                textColor: widget.textColor,
+                                                splitMarkdownContent:
+                                                    widget.splitMarkdownContent,
+                                              ),
                                             ),
                                           ),
-                                        ),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
@@ -827,14 +915,20 @@ class _ThinkingTitle extends StatefulWidget {
   final Color color;
   final bool streaming;
 
+  /// Creates state that owns the title sweep animation.
   @override
   State<_ThinkingTitle> createState() => _ThinkingTitleState();
 }
 
 class _ThinkingTitleState extends State<_ThinkingTitle>
     with SingleTickerProviderStateMixin {
+  static const double _highlightBandWidth = 0.9;
+  static const double _highlightPathStart = -1.0 - _highlightBandWidth;
+  static const double _highlightPathEnd = 1.0;
+
   late final AnimationController _controller;
 
+  /// Starts the sweep animation when streamed thinking is visible.
   @override
   void initState() {
     super.initState();
@@ -847,6 +941,7 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
     }
   }
 
+  /// Syncs the sweep animation with streaming state changes.
   @override
   void didUpdateWidget(covariant _ThinkingTitle oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -861,12 +956,14 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
     }
   }
 
+  /// Disposes the sweep animation controller.
   @override
   void dispose() {
     _controller.dispose();
     super.dispose();
   }
 
+  /// Builds the thinking title with a continuous off-text sweep loop.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -882,7 +979,9 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
-        final shift = _controller.value;
+        final sweepStart =
+            _highlightPathStart +
+            (_highlightPathEnd - _highlightPathStart) * _controller.value;
         return Stack(
           fit: StackFit.passthrough,
           children: <Widget>[
@@ -893,18 +992,14 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
                   blendMode: BlendMode.srcIn,
                   shaderCallback: (bounds) {
                     return LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
+                      begin: Alignment(sweepStart, 0),
+                      end: Alignment(sweepStart + _highlightBandWidth, 0),
                       colors: <Color>[
                         Colors.transparent,
                         theme.colorScheme.primary.withValues(alpha: 0.95),
                         Colors.transparent,
                       ],
-                      stops: <double>[
-                        (shift - 0.25).clamp(0.0, 1.0),
-                        shift.clamp(0.0, 1.0),
-                        (shift + 0.25).clamp(0.0, 1.0),
-                      ],
+                      stops: const <double>[0.0, 0.5, 1.0],
                     ).createShader(bounds);
                   },
                   child: Text(widget.text, style: highlightStyle),
@@ -919,59 +1014,552 @@ class _ThinkingTitleState extends State<_ThinkingTitle>
   }
 }
 
-class _LabeledPanel extends StatelessWidget {
-  const _LabeledPanel({
-    required this.label,
-    required this.text,
-    required this.color,
+class _SearchPanel extends StatefulWidget {
+  const _SearchPanel({
+    required this.xmlContent,
+    required this.textColor,
     required this.isStreaming,
+    required this.splitMarkdownContent,
   });
 
-  final String label;
-  final String text;
-  final Color color;
+  final String xmlContent;
+  final Color textColor;
   final bool isStreaming;
+  final MarkdownContentSplitter splitMarkdownContent;
 
+  /// Creates state for rendering structured and text search content.
+  @override
+  State<_SearchPanel> createState() => _SearchPanelState();
+}
+
+class _SearchPanelState extends State<_SearchPanel> {
+  bool _expanded = false;
+
+  /// Toggles the visible source Markdown body.
+  void _handleHeaderTap() {
+    setState(() {
+      _expanded = !_expanded;
+    });
+  }
+
+  /// Builds the search body with the legacy structured and text modes.
   @override
   Widget build(BuildContext context) {
+    final state = _SearchRenderState.parse(widget.xmlContent);
+    if (state.isStructured) {
+      if (state.sources.isEmpty && state.queries.isEmpty) {
+        return const SizedBox.shrink();
+      }
+      return _StructuredSearchBody(
+        renderState: state,
+        textColor: widget.textColor,
+      );
+    }
     final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(8),
-        border: Border(
-          left: BorderSide(color: color.withValues(alpha: 0.55), width: 3),
-        ),
-      ),
+    final l10n = AppLocalizations.of(context)!;
+    final bodyText = state.bodyText.trim();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(
-            label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+          CanvasExpandableHeaderRow(
+            title: l10n.searchSources,
+            semanticDescription: _expanded
+                ? l10n.commonCollapse
+                : l10n.commonExpand,
+            expanded: _expanded,
+            titleColor: widget.textColor.withValues(alpha: 0.7),
+            rotationTurns: _expanded ? 0.25 : 0,
+            onClick: _handleHeaderTap,
           ),
-          const SizedBox(height: 4),
-          SelectableText(
-            text,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              height: 1.35,
-            ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            switchInCurve: Curves.linear,
+            switchOutCurve: Curves.linear,
+            transitionBuilder: (child, animation) {
+              return FadeTransition(opacity: animation, child: child);
+            },
+            child: _expanded && bodyText.isNotEmpty
+                ? CanvasIndentedGuide(
+                    key: const ValueKey<String>('search-expanded'),
+                    child: StreamMarkdownRenderer(
+                      content: bodyText,
+                      isStreaming: widget.isStreaming,
+                      textColor: widget.textColor.withValues(alpha: 0.8),
+                      backgroundColor: theme.colorScheme.surface,
+                      selectionRoot: false,
+                      splitMarkdownContent: widget.splitMarkdownContent,
+                    ),
+                  )
+                : const SizedBox.shrink(
+                    key: ValueKey<String>('search-collapsed'),
+                  ),
           ),
-          if (isStreaming)
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: StreamingCursor(),
-            ),
         ],
       ),
     );
   }
+}
+
+class _StructuredSearchBody extends StatelessWidget {
+  const _StructuredSearchBody({
+    required this.renderState,
+    required this.textColor,
+  });
+
+  final _SearchRenderState renderState;
+  final Color textColor;
+
+  /// Builds the structured source list or query list.
+  @override
+  Widget build(BuildContext context) {
+    final searchRows = renderState.sources.isNotEmpty
+        ? renderState.sources
+        : renderState.queries.map(_SearchSource.query).toList(growable: false);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        for (final source in searchRows)
+          _SearchSourceRow(
+            source: source,
+            textColor: textColor,
+            onClick: () {
+              _showSearchSourceDetailDialog(context, source);
+            },
+          ),
+      ],
+    );
+  }
+}
+
+class _SearchSourceRow extends StatelessWidget {
+  const _SearchSourceRow({
+    required this.source,
+    required this.textColor,
+    required this.onClick,
+  });
+
+  final _SearchSource source;
+  final Color textColor;
+  final VoidCallback onClick;
+
+  /// Builds one compact, clickable search source row.
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final icon = source.url.isEmpty ? Icons.search : Icons.language;
+    return MessagePressShieldRegion(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onClick,
+          borderRadius: BorderRadius.circular(6),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 24),
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: Center(
+                    child: source.faviconUrl.isNotEmpty
+                        ? _SearchFavicon(url: source.faviconUrl)
+                        : Icon(
+                            icon,
+                            size: 14,
+                            color: theme.colorScheme.primary.withValues(
+                              alpha: 0.55,
+                            ),
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    source.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: textColor.withValues(alpha: 0.9),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SearchFavicon extends StatelessWidget {
+  const _SearchFavicon({required this.url, this.size = 18});
+
+  final String url;
+  final double size;
+
+  /// Builds the favicon image for one search source.
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: Image.network(
+        url,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        loadingBuilder: (context, child, loadingProgress) {
+          if (loadingProgress == null) {
+            return child;
+          }
+          return Icon(
+            Icons.language,
+            size: size * 0.78,
+            color: color.withValues(alpha: 0.45),
+          );
+        },
+        errorBuilder: (context, error, stackTrace) {
+          return Icon(
+            Icons.language,
+            size: size * 0.78,
+            color: color.withValues(alpha: 0.55),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SearchSourceDetailDialog extends StatelessWidget {
+  const _SearchSourceDetailDialog({
+    required this.source,
+    required this.onDismiss,
+  });
+
+  final _SearchSource source;
+  final VoidCallback onDismiss;
+
+  /// Builds the detail dialog for one search source row.
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context)!;
+    final icon = source.url.isEmpty ? Icons.search : Icons.language;
+    return AlertDialog(
+      icon: source.faviconUrl.isNotEmpty
+          ? SizedBox.square(
+              dimension: 32,
+              child: _SearchFavicon(url: source.faviconUrl, size: 32),
+            )
+          : Icon(icon),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            source.displayName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (source.host.isNotEmpty)
+            Text(
+              source.host,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (source.title.isNotEmpty)
+            SelectableText(source.title, style: theme.textTheme.bodyMedium),
+          if (source.url.isNotEmpty) ...<Widget>[
+            if (source.title.isNotEmpty) const SizedBox(height: 8),
+            SelectableText(
+              source.url,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: <Widget>[
+        if (source.url.isNotEmpty)
+          TextButton(
+            onPressed: () {
+              unawaited(_openSearchSource(source.url));
+            },
+            child: Text(l10n.open),
+          ),
+        TextButton(onPressed: onDismiss, child: Text(l10n.close)),
+      ],
+    );
+  }
+}
+
+class _SearchRenderState {
+  const _SearchRenderState({
+    required this.provider,
+    required this.action,
+    required this.status,
+    required this.queries,
+    required this.sources,
+    required this.bodyText,
+    required this.isStructured,
+  });
+
+  final String provider;
+  final String action;
+  final String status;
+  final List<String> queries;
+  final List<_SearchSource> sources;
+  final String bodyText;
+  final bool isStructured;
+
+  /// Parses the search XML into the render state used by the UI.
+  static _SearchRenderState parse(String content) {
+    final bodyText = _extractContentFromXml(content, tagName: 'search').trim();
+    final parsed = _parseStructuredSearchXml(content, bodyText);
+    return parsed ??
+        _SearchRenderState(
+          provider: '',
+          action: '',
+          status: '',
+          queries: const <String>[],
+          sources: const <_SearchSource>[],
+          bodyText: bodyText,
+          isStructured: false,
+        );
+  }
+}
+
+class _SearchSource {
+  const _SearchSource({
+    required this.title,
+    required this.url,
+    required this.faviconUrl,
+    required this.host,
+    required this.siteName,
+    required this.displayName,
+    required this.attributes,
+  });
+
+  factory _SearchSource.query(String query) {
+    return _SearchSource(
+      title: query,
+      url: '',
+      faviconUrl: '',
+      host: '',
+      siteName: '',
+      displayName: query,
+      attributes: <String, String>{'type': 'query', 'query': query},
+    );
+  }
+
+  final String title;
+  final String url;
+  final String faviconUrl;
+  final String host;
+  final String siteName;
+  final String displayName;
+  final Map<String, String> attributes;
+}
+
+/// Parses structured search XML produced by model search providers.
+_SearchRenderState? _parseStructuredSearchXml(String content, String bodyText) {
+  try {
+    final document = xml.XmlDocument.parse(content);
+    final root = document.rootElement;
+    final hasSearchRoot = root.name.local.toLowerCase() == 'search';
+    final provider = _searchAttribute(root, 'provider');
+    final action = _searchAttribute(root, 'action');
+    final status = _searchAttribute(root, 'status');
+    final queries = root.descendants
+        .whereType<xml.XmlElement>()
+        .where((element) => element.name.local.toLowerCase() == 'query')
+        .map((element) => element.innerText.trim())
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
+    final sources = root.descendants
+        .whereType<xml.XmlElement>()
+        .where((element) => element.name.local.toLowerCase() == 'source')
+        .map(_searchSourceFromElement)
+        .whereType<_SearchSource>()
+        .toList(growable: false);
+    final structured =
+        hasSearchRoot &&
+        (provider.isNotEmpty ||
+            action.isNotEmpty ||
+            status.isNotEmpty ||
+            queries.isNotEmpty ||
+            sources.isNotEmpty);
+    if (!structured) {
+      return null;
+    }
+    return _SearchRenderState(
+      provider: provider,
+      action: action,
+      status: status,
+      queries: queries,
+      sources: sources,
+      bodyText: bodyText,
+      isStructured: true,
+    );
+  } on xml.XmlException {
+    return null;
+  }
+}
+
+/// Builds one render source from a structured source element.
+_SearchSource? _searchSourceFromElement(xml.XmlElement element) {
+  final url = _searchAttribute(element, 'url');
+  if (url.isEmpty) {
+    return null;
+  }
+  final title = _searchAttribute(element, 'title');
+  final host = _hostFromSearchUrl(url);
+  final siteName = _searchSourceSiteName(element);
+  return _SearchSource(
+    title: title,
+    url: url,
+    faviconUrl: _faviconUrlForSearchSource(url),
+    host: host,
+    siteName: siteName,
+    displayName: _searchSourceDisplayName(siteName, host, title, url),
+    attributes: _searchAttributes(element),
+  );
+}
+
+/// Reads and trims a named XML attribute.
+String _searchAttribute(xml.XmlElement element, String name) {
+  return element.getAttribute(name)?.trim() ?? '';
+}
+
+/// Reads all non-empty XML attributes from a source element.
+Map<String, String> _searchAttributes(xml.XmlElement element) {
+  final attributes = <String, String>{};
+  for (final attribute in element.attributes) {
+    final name = attribute.name.qualified.trim();
+    final value = attribute.value.trim();
+    if (name.isNotEmpty && value.isNotEmpty) {
+      attributes[name] = value;
+    }
+  }
+  return attributes;
+}
+
+/// Resolves the site name attribute used by search providers.
+String _searchSourceSiteName(xml.XmlElement element) {
+  for (final name in const <String>[
+    'site_name',
+    'siteName',
+    'source',
+    'name',
+  ]) {
+    final value = _searchAttribute(element, name);
+    if (value.isNotEmpty) {
+      return value;
+    }
+  }
+  return '';
+}
+
+/// Extracts a host name from a search result URL.
+String _hostFromSearchUrl(String url) {
+  var host = url;
+  final schemeIndex = host.indexOf('://');
+  if (schemeIndex >= 0) {
+    host = host.substring(schemeIndex + 3);
+  }
+  final slashIndex = host.indexOf('/');
+  if (slashIndex >= 0) {
+    host = host.substring(0, slashIndex);
+  }
+  final questionIndex = host.indexOf('?');
+  if (questionIndex >= 0) {
+    host = host.substring(0, questionIndex);
+  }
+  final fragmentIndex = host.indexOf('#');
+  if (fragmentIndex >= 0) {
+    host = host.substring(0, fragmentIndex);
+  }
+  final atIndex = host.lastIndexOf('@');
+  if (atIndex >= 0) {
+    host = host.substring(atIndex + 1);
+  }
+  final colonIndex = host.indexOf(':');
+  if (colonIndex >= 0) {
+    host = host.substring(0, colonIndex);
+  }
+  return host.trim();
+}
+
+/// Chooses the compact row label for a search source.
+String _searchSourceDisplayName(
+  String siteName,
+  String host,
+  String title,
+  String url,
+) {
+  if (siteName.isNotEmpty) {
+    return siteName;
+  }
+  final domainName = host.startsWith('www.') ? host.substring(4).trim() : host;
+  if (domainName.isNotEmpty) {
+    return domainName;
+  }
+  if (title.isNotEmpty) {
+    return title;
+  }
+  return url;
+}
+
+/// Builds the favicon URL for a search source host.
+String _faviconUrlForSearchSource(String url) {
+  final host = _hostFromSearchUrl(url).toLowerCase();
+  if (host.isEmpty) {
+    return '';
+  }
+  return 'https://www.google.com/s2/favicons?sz=64&domain=$host';
+}
+
+/// Opens a search source URL from the detail dialog.
+Future<void> _openSearchSource(String url) async {
+  try {
+    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+  } catch (error, stackTrace) {
+    ClientLogger.w(
+      'Cannot open search source: $url',
+      tag: 'SearchDisplay',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
+}
+
+/// Shows the detail dialog for a selected search source.
+void _showSearchSourceDetailDialog(BuildContext context, _SearchSource source) {
+  showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return _SearchSourceDetailDialog(
+        source: source,
+        onDismiss: () => Navigator.of(dialogContext).pop(),
+      );
+    },
+  );
 }
 
 class _StatusChip extends StatelessWidget {
@@ -1172,6 +1760,7 @@ class _ParsedXml {
   });
 
   factory _ParsedXml.from(String xml) {
+    xml = sanitizeUtf16(xml);
     final open = RegExp(
       r'^<([a-zA-Z_][\w:-]*)\b([^>]*)>',
       dotAll: true,

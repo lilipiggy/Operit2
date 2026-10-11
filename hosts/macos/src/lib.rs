@@ -23,6 +23,8 @@ pub use operit_host_apple_native::{
     AppleTtsPlaybackHost as MacosTtsPlaybackHost, AppleTtsSynthesisHost as MacosTtsSynthesisHost,
 };
 
+pub use operit_host_apple_native::ApplePluginSdkIpcHost as MacosPluginSdkIpcHost;
+
 #[cfg(target_os = "macos")]
 pub use operit_host_apple_native::{
     AppleBrowserAutomationHost as MacosBrowserAutomationHost,
@@ -58,10 +60,15 @@ pub fn createRuntimeHostManager(
     )
     .withHostSecretStore(hostSecretStore)
     .withWebSocketHost(Arc::new(MacosHttpHost::new()))
+    .withHttpServerHost(Arc::new(operit_host_native_common::NativeHttpServerHost))
+    .withTcpHost(Arc::new(operit_host_native_common::NativeTcpHost))
+    .withSerialPortHost(Arc::new(operit_host_native_common::NativeSerialPortHost))
     .withArchiveStagingHost(archiveStagingHost)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withHostRuntimeEventHost(Arc::new(MacosHostRuntimeEventHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(MacosHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(MacosHostJavaScriptRuntimeHost::new()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(MacosHostRuntimeTaskSchedulerHost::new()))
+    .withPluginSdkIpcHost(Arc::new(MacosPluginSdkIpcHost::new()))
 }

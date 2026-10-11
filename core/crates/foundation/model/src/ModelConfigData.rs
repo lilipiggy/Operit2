@@ -1,14 +1,68 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::ApiKeyInfo::ApiKeyInfo;
 use super::BillingMode::BillingMode;
 use super::ModelParameter::ModelParameter;
 
+#[path = "../collects/ThinkingConfigurations.rs"]
+mod ThinkingConfigurationRows;
+
+/// Provides the declarative thinking rules persisted by every new model profile.
+pub const DEFAULT_THINKING_CONFIGURATIONS: &str =
+    ThinkingConfigurationRows::THINKING_CONFIGURATIONS;
+
+/// Builds the initial persisted thinking rule set for new model profiles.
+fn defaultThinkingConfigurations(providerTypeId: &str) -> String {
+    thinkingConfigurationsForProvider(providerTypeId)
+}
+
+/// Builds the persisted thinking rule set owned by one provider type.
+#[allow(non_snake_case)]
+pub fn thinkingConfigurationsForProvider(providerTypeId: &str) -> String {
+    let provider = providerTypeId.trim().to_ascii_uppercase();
+    let rules = serde_json::from_str::<Vec<Value>>(DEFAULT_THINKING_CONFIGURATIONS)
+        .expect("built-in thinking configurations must be valid JSON")
+        .into_iter()
+        .filter(|rule| thinkingRuleTargetsProvider(rule, &provider))
+        .map(removeThinkingRuleProviderTargets)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&rules).expect("provider thinking configurations must encode")
+}
+
+/// Returns whether one declarative thinking rule belongs to a provider type.
+#[allow(non_snake_case)]
+fn thinkingRuleTargetsProvider(rule: &Value, providerTypeId: &str) -> bool {
+    ["providers", "providerTypeIds"].iter().any(|key| {
+        rule.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|providers| {
+                providers.iter().any(|candidate| {
+                    candidate
+                        .as_str()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(providerTypeId))
+                })
+            })
+    })
+}
+
+/// Removes catalog-only provider selectors from one provider-owned thinking rule.
+#[allow(non_snake_case)]
+fn removeThinkingRuleProviderTargets(mut rule: Value) -> Value {
+    if let Value::Object(object) = &mut rule {
+        object.remove("providers");
+        object.remove("providerTypeIds");
+    }
+    rule
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
 pub enum ApiProviderType {
     OPENAI,
+    XAI,
     OPENAI_RESPONSES,
+    OPENAI_CODEX,
     OPENAI_RESPONSES_GENERIC,
     OPENAI_GENERIC,
     ANTHROPIC,
@@ -27,6 +81,7 @@ pub enum ApiProviderType {
     SILICONFLOW,
     IFLOW,
     OPENROUTER,
+    OPENCODE,
     FOUR_ROUTER,
     NOUS_PORTAL,
     INFINIAI,
@@ -39,15 +94,19 @@ pub enum ApiProviderType {
     LOCAL_MODEL,
     PPINFRA,
     NOVITA,
+    MINIMAX,
     OTHER,
 }
 
 impl ApiProviderType {
     #[allow(non_snake_case)]
+    /// Parses a stable provider type id into its enum representation.
     pub fn fromProviderTypeId(providerTypeId: &str) -> Option<Self> {
         match providerTypeId.trim().to_ascii_uppercase().as_str() {
             "OPENAI" => Some(Self::OPENAI),
+            "XAI" => Some(Self::XAI),
             "OPENAI_RESPONSES" => Some(Self::OPENAI_RESPONSES),
+            "OPENAI_CODEX" => Some(Self::OPENAI_CODEX),
             "OPENAI_RESPONSES_GENERIC" => Some(Self::OPENAI_RESPONSES_GENERIC),
             "OPENAI_GENERIC" => Some(Self::OPENAI_GENERIC),
             "ANTHROPIC" => Some(Self::ANTHROPIC),
@@ -66,6 +125,7 @@ impl ApiProviderType {
             "SILICONFLOW" => Some(Self::SILICONFLOW),
             "IFLOW" => Some(Self::IFLOW),
             "OPENROUTER" => Some(Self::OPENROUTER),
+            "OPENCODE" => Some(Self::OPENCODE),
             "FOUR_ROUTER" => Some(Self::FOUR_ROUTER),
             "NOUS_PORTAL" => Some(Self::NOUS_PORTAL),
             "INFINIAI" => Some(Self::INFINIAI),
@@ -78,15 +138,19 @@ impl ApiProviderType {
             "LOCAL_MODEL" => Some(Self::LOCAL_MODEL),
             "PPINFRA" => Some(Self::PPINFRA),
             "NOVITA" => Some(Self::NOVITA),
+            "MINIMAX" => Some(Self::MINIMAX),
             "OTHER" => Some(Self::OTHER),
             _ => None,
         }
     }
 
+    /// Returns the stable provider type id used in persisted configuration.
     pub fn name(&self) -> &'static str {
         match self {
             Self::OPENAI => "OPENAI",
+            Self::XAI => "XAI",
             Self::OPENAI_RESPONSES => "OPENAI_RESPONSES",
+            Self::OPENAI_CODEX => "OPENAI_CODEX",
             Self::OPENAI_RESPONSES_GENERIC => "OPENAI_RESPONSES_GENERIC",
             Self::OPENAI_GENERIC => "OPENAI_GENERIC",
             Self::ANTHROPIC => "ANTHROPIC",
@@ -105,6 +169,7 @@ impl ApiProviderType {
             Self::SILICONFLOW => "SILICONFLOW",
             Self::IFLOW => "IFLOW",
             Self::OPENROUTER => "OPENROUTER",
+            Self::OPENCODE => "OPENCODE",
             Self::FOUR_ROUTER => "FOUR_ROUTER",
             Self::NOUS_PORTAL => "NOUS_PORTAL",
             Self::INFINIAI => "INFINIAI",
@@ -117,6 +182,7 @@ impl ApiProviderType {
             Self::LOCAL_MODEL => "LOCAL_MODEL",
             Self::PPINFRA => "PPINFRA",
             Self::NOVITA => "NOVITA",
+            Self::MINIMAX => "MINIMAX",
             Self::OTHER => "OTHER",
         }
     }
@@ -132,7 +198,6 @@ pub struct ModelConfigDefaults;
 
 impl ModelConfigDefaults {
     pub const DEFAULT_MAX_CONTEXT_LENGTH: f32 = 200.0;
-    pub const DEFAULT_ENABLE_MAX_CONTEXT_MODE: bool = false;
     pub const DEFAULT_SUMMARY_TOKEN_THRESHOLD: f32 = 0.70;
     pub const DEFAULT_ENABLE_SUMMARY: bool = true;
     pub const DEFAULT_ENABLE_SUMMARY_BY_MESSAGE_COUNT: bool = true;
@@ -165,6 +230,7 @@ pub struct ModelPricing {
     pub billingMode: BillingMode,
     pub inputPricePerMillion: f64,
     pub cachedInputPricePerMillion: Option<f64>,
+    pub cacheWritePricePerMillion: Option<f64>,
     pub outputPricePerMillion: f64,
     pub pricePerRequest: f64,
     pub currency: PricingCurrency,
@@ -181,6 +247,7 @@ impl ModelPricing {
             billingMode: BillingMode::TOKEN,
             inputPricePerMillion,
             cachedInputPricePerMillion,
+            cacheWritePricePerMillion: None,
             outputPricePerMillion,
             pricePerRequest: 0.0,
             currency,
@@ -261,14 +328,12 @@ impl ModelBuiltinTool {
 #[allow(non_snake_case)]
 pub struct ModelContextSpec {
     pub maxContextLength: f32,
-    pub enableMaxContextMode: bool,
 }
 
 impl Default for ModelContextSpec {
     fn default() -> Self {
         Self {
             maxContextLength: ModelConfigDefaults::DEFAULT_MAX_CONTEXT_LENGTH,
-            enableMaxContextMode: ModelConfigDefaults::DEFAULT_ENABLE_MAX_CONTEXT_MODE,
         }
     }
 }
@@ -333,12 +398,16 @@ impl Default for LocalModelRuntimeSettings {
 #[allow(non_snake_case)]
 pub struct ModelRequestSpec {
     pub supportsStructuredTools: bool,
+    /// Uses Kotlin's optional one-hour TTL for Claude prompt-cache breakpoints.
+    #[serde(default)]
+    pub enableClaude1hPromptCache: bool,
 }
 
 impl Default for ModelRequestSpec {
     fn default() -> Self {
         Self {
             supportsStructuredTools: false,
+            enableClaude1hPromptCache: false,
         }
     }
 }
@@ -389,10 +458,18 @@ pub struct ModelCatalogEntry {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
+pub struct ProviderEndpointOption {
+    pub endpoint: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(non_snake_case)]
 pub struct ProviderCatalogEntry {
     pub providerTypeId: String,
     pub displayName: String,
     pub defaultEndpoint: String,
+    pub endpointOptions: Vec<ProviderEndpointOption>,
     pub operations: Vec<ProviderOperationSpec>,
     pub models: Vec<ModelCatalogEntry>,
 }
@@ -402,6 +479,13 @@ pub enum AvailableProviderModelSource {
     Catalog,
     Remote,
     Local,
+}
+
+impl AvailableProviderModelSource {
+    /// Returns whether this source is a live listing rather than catalog history.
+    pub fn isFetched(&self) -> bool {
+        !matches!(self, Self::Catalog)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -414,6 +498,13 @@ pub struct AvailableProviderModel {
     pub capabilities: Option<ModelCapabilities>,
     pub builtinTools: Vec<ModelBuiltinTool>,
     pub request: Option<ModelRequestSpec>,
+}
+
+impl AvailableProviderModel {
+    /// Returns whether this option came from a live provider listing or local runtime.
+    pub fn isFetched(&self) -> bool {
+        self.source.isFetched()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -462,15 +553,19 @@ pub struct ProviderProfile {
     pub customHeaders: String,
     pub requestLimitPerMinute: i32,
     pub maxConcurrentRequests: i32,
+    pub thinkingConfigurations: String,
+    pub thinkingOptionId: String,
     pub models: Vec<ModelProfile>,
 }
 
 impl ProviderProfile {
+    /// Creates a provider profile with provider-scoped thinking configuration.
     pub fn new(id: String, name: String, providerType: ApiProviderType, endpoint: String) -> Self {
+        let providerTypeName = providerType.name().to_string();
         Self {
             id,
             name,
-            providerTypeId: providerType.name().to_string(),
+            providerTypeId: providerTypeName.clone(),
             providerType,
             endpoint,
             apiKey: String::new(),
@@ -481,6 +576,8 @@ impl ProviderProfile {
             customHeaders: "{}".to_string(),
             requestLimitPerMinute: 0,
             maxConcurrentRequests: 0,
+            thinkingConfigurations: defaultThinkingConfigurations(&providerTypeName),
+            thinkingOptionId: String::new(),
             models: Vec::new(),
         }
     }
@@ -509,6 +606,8 @@ pub struct ResolvedModelConfig {
     pub builtinTools: Vec<ModelBuiltinTool>,
     pub request: ModelRequestSpec,
     pub parameters: Vec<ModelParameter<serde_json::Value>>,
+    pub thinkingConfigurations: String,
+    pub thinkingOptionId: String,
     pub summary: ModelSummarySettings,
     pub localRuntime: LocalModelRuntimeSettings,
 }
@@ -560,6 +659,7 @@ pub fn local_model_provider() -> ProviderProfile {
     )
 }
 
+/// Builds the default DeepSeek model profile with optional Responses search.
 pub fn default_deepseek_model() -> ModelProfile {
     let mut model = ModelProfile::new(ModelConfigDefaults::DEFAULT_MODEL_ID.to_string());
     model.contextOverride = Some(ModelContextSpec::default());
@@ -569,6 +669,13 @@ pub fn default_deepseek_model() -> ModelProfile {
     });
     model.requestOverride = Some(ModelRequestSpec {
         supportsStructuredTools: true,
+        ..ModelRequestSpec::default()
     });
+    model.builtinToolsOverride = Some(vec![ModelBuiltinTool::disabled(
+        BuiltinToolType::WebSearch,
+        "内置联网搜索".to_string(),
+        BuiltinToolRequestFormat::OpenAiWebSearch,
+        BuiltinToolExclusivity::CanMixWithExternalTools,
+    )]);
     model
 }

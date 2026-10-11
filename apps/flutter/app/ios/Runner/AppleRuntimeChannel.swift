@@ -1,6 +1,8 @@
 import AVFoundation
 import CoreBluetooth
 import CoreMedia
+import CoreLocation
+import Darwin
 import Flutter
 import Foundation
 import Network
@@ -8,16 +10,22 @@ import UserNotifications
 import Vision
 import UIKit
 
-final class AppleRuntimeChannel: NSObject {
+final class AppleRuntimeChannel: NSObject, UIDocumentInteractionControllerDelegate {
   private static var shared: AppleRuntimeChannel?
   private static var pendingNotificationActivations: [[String: Any]] = []
   private static var notificationActivationReceiverReady = false
   private var channel: FlutterMethodChannel
   private let workQueue = DispatchQueue(label: "operit.runtime.apple", qos: .userInitiated)
-  private let watchQueue = DispatchQueue(label: "operit.runtime.apple.watch", qos: .utility)
-  private let watchLock = NSLock()
-  private var watchPumpRunning = false
   private var handle: UnsafeMutableRawPointer?
+  private var locationManager: CLLocationManager?
+  private var locationCompletion: FlutterResult?
+  private var locationTimeout: DispatchWorkItem?
+  private var locationGeocoder: CLGeocoder?
+  private var locationRequestStarted = false
+  private var locationIncludeAddress = false
+  private var locationTimeoutSeconds: Double = 0
+  private var fileController: UIDocumentInteractionController?
+  private var filePresenter: UIViewController?
   private var audioPlayers: [String: AVAudioPlayer] = [:]
   private var musicPlayer: AVPlayer?
   private var musicSource: String?
@@ -28,6 +36,7 @@ final class AppleRuntimeChannel: NSObject {
   private var musicLoopPlayback = false
   private var musicState = "idle"
   private var musicMessage = "apple music player idle"
+  private var ttsFileJobs: [String: AppleTtsFileJob] = [:]
   private let speechSynthesizer = AVSpeechSynthesizer()
   private var ttsAudioPlayer: AVAudioPlayer?
   private var ttsAudioPaused = false
@@ -96,22 +105,12 @@ final class AppleRuntimeChannel: NSObject {
 
   private func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
-    case "call":
-      callRuntime(call: call, result: result, nativeCall: operit_flutter_bridge_native_call)
-    case "pushOpen":
-      callRuntime(call: call, result: result, nativeCall: operit_flutter_bridge_push_open)
-    case "pushItem":
-      callRuntime(call: call, result: result, nativeCall: operit_flutter_bridge_push_item)
-    case "pushClose":
-      pushClose(call: call, result: result)
-    case "watchSnapshot":
-      callRuntime(call: call, result: result, nativeCall: operit_flutter_bridge_watch_snapshot)
-    case "watchStream":
-      watchStream(call: call, result: result)
-    case "closeWatchStream":
-      closeWatchStream(call: call, result: result)
-    case "startWebAccessServer":
-      startWebAccessServer(call: call, result: result)
+    case "connectCoreFfi":
+      runRuntime(result: result) { handle in
+        self.takeString(operit_flutter_bridge_ffi_connect(handle))
+      }
+    case "restartApplication":
+      restartApplication(result: result)
     case "localRuntimeStorageDefaults":
       localRuntimeStorageDefaults(result: result)
     case "runtimeBootstrapRead":
@@ -122,6 +121,8 @@ final class AppleRuntimeChannel: NSObject {
       localRuntimeStoragePaths(call: call, result: result)
     case "setLocalRuntimeStorage":
       setLocalRuntimeStorage(call: call, result: result)
+    case "readClipboardImages":
+      readClipboardImages(result: result)
     case "notificationActivationInitial":
       result(Self.takePendingNotificationActivation())
     case "notificationActivationReady":
@@ -132,16 +133,14 @@ final class AppleRuntimeChannel: NSObject {
       hostOnboardingPermissionSnapshot(call: call, result: result)
     case "hostOnboardingRequestPermission":
       hostOnboardingRequestPermission(call: call, result: result)
-    case "stopWebAccessServer":
-      runRuntime(result: result) { handle in
-        self.takeString(operit_flutter_bridge_stop_web_access_server(handle))
-      }
     case "ownerSystemCaptureScreenshot":
       ownerSystemCaptureScreenshot(result: result)
     case "ownerSystemRecognizeText":
       ownerSystemRecognizeText(call: call, result: result)
     case "ownerSystemOperation":
       ownerSystemOperation(call: call, result: result)
+    case "ownerFileOpen":
+      ownerFileOpen(call: call, result: result)
     case "ownerAudioPlay":
       ownerAudioPlay(call: call, result: result)
     case "ownerMusicPlayback":
@@ -156,6 +155,20 @@ final class AppleRuntimeChannel: NSObject {
       ownerLocalInference(call: call, result: result)
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  /// Releases runtime resources and terminates the iOS host process.
+  private func restartApplication(result: @escaping FlutterResult) {
+    workQueue.async {
+      if let handle = self.handle {
+        operit_flutter_bridge_destroy(handle)
+        self.handle = nil
+      }
+      DispatchQueue.main.async {
+        result(nil)
+        Darwin.exit(0)
+      }
     }
   }
 
@@ -418,6 +431,26 @@ final class AppleRuntimeChannel: NSObject {
     ])
   }
 
+  /// Reads PNG byte payloads from the iOS pasteboard.
+  private func readClipboardImages(result: @escaping FlutterResult) {
+    DispatchQueue.main.async {
+      guard let images = UIPasteboard.general.images else {
+        result([])
+        return
+      }
+      let payloads = images.compactMap { image -> [String: Any]? in
+        guard let data = image.pngData() else {
+          return nil
+        }
+        return [
+          "mimeType": "image/png",
+          "bytes": FlutterStandardTypedData(bytes: data),
+        ]
+      }
+      result(payloads)
+    }
+  }
+
   /// Reads the client bootstrap record through the Rust startup Host.
   private func runtimeBootstrapRead(result: @escaping FlutterResult) {
     let defaultRuntimeRoot = defaultStorageRoots().runtime.path
@@ -425,8 +458,63 @@ final class AppleRuntimeChannel: NSObject {
       let response = self.takeString(
         operit_flutter_bridge_runtime_bootstrap_read(defaultRuntimeRoot)
       )
-      DispatchQueue.main.async { result(response) }
+      do {
+        let restored = try self.restoreSandboxPaths(response, defaultRuntimeRoot: defaultRuntimeRoot)
+        DispatchQueue.main.async { result(restored) }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "STORAGE_RESTORE_FAILED", message: error.localizedDescription, details: nil))
+        }
+      }
     }
+  }
+
+  /// iOS may relocate the app container on installation. Keep this platform
+  /// concern in the host; Dart continues to receive ordinary storage paths.
+  private func restoreSandboxPaths(_ response: String, defaultRuntimeRoot: String) throws -> String {
+    guard var envelope = try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any],
+          envelope["ok"] as? Bool == true,
+          let encoded = envelope["value"] as? String,
+          var config = try JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]
+    else { return response }
+    let pattern = #"^(.*?/Containers/Data/Application/)[0-9A-Fa-f-]{36}(/.*)$"#
+    let regex = try NSRegularExpression(pattern: pattern)
+    let current = NSHomeDirectory() as NSString
+    let currentWithSuffix = current.appendingPathComponent("Library") as NSString
+    guard let currentMatch = regex.firstMatch(in: currentWithSuffix as String,
+      range: NSRange(location: 0, length: currentWithSuffix.length)) else { return response }
+    var changed = false
+    for key in ["runtimeRoot", "workspaceRoot"] {
+      guard let oldPath = config[key] as? String else { continue }
+      let old = oldPath as NSString
+      guard let match = regex.firstMatch(in: oldPath, range: NSRange(location: 0, length: old.length)),
+            old.substring(with: match.range(at: 1)) == currentWithSuffix.substring(with: currentMatch.range(at: 1))
+      else { continue }
+      let suffix = old.substring(with: match.range(at: 2))
+      guard !suffix.components(separatedBy: "/").contains("..") else { continue }
+      let newPath = (current as String) + suffix
+      guard newPath != oldPath else { continue }
+      let manager = FileManager.default
+      // Normal device reinstalls move the data with the container. A simulator
+      // can retain the old directory: copy it only if the destination is absent.
+      // Never overwrite current data or delete the original.
+      if !manager.fileExists(atPath: newPath), manager.fileExists(atPath: oldPath) {
+        try manager.createDirectory(atPath: (newPath as NSString).deletingLastPathComponent,
+                                    withIntermediateDirectories: true)
+        try manager.copyItem(atPath: oldPath, toPath: newPath)
+      }
+      config[key] = newPath
+      changed = true
+    }
+    guard changed else { return response }
+    let content = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
+    let written = takeString(operit_flutter_bridge_runtime_bootstrap_write(defaultRuntimeRoot, content))
+    guard let status = try JSONSerialization.jsonObject(with: Data(written.utf8)) as? [String: Any],
+          status["ok"] as? Bool == true else {
+      throw RuntimeChannelError.createFailed("Could not persist restored iOS storage paths")
+    }
+    envelope["value"] = content
+    return String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
   }
 
   /// Writes the client bootstrap record through the Rust startup Host.
@@ -501,139 +589,6 @@ final class AppleRuntimeChannel: NSObject {
     }
   }
 
-  /// Runs one binary Link operation and returns Flutter typed data.
-  private func runRuntimeBytes(result: @escaping FlutterResult, _ body: @escaping (UnsafeMutableRawPointer) throws -> Data) {
-    workQueue.async {
-      do {
-        let handle = try self.ensureRuntimeHandle()
-        let response = try body(handle)
-        DispatchQueue.main.async { result(FlutterStandardTypedData(bytes: response)) }
-      } catch {
-        DispatchQueue.main.async {
-          result(FlutterError(code: "OPERIT_RUNTIME_ERROR", message: error.localizedDescription, details: nil))
-        }
-      }
-    }
-  }
-
-  private func callRuntime(
-    call: FlutterMethodCall,
-    result: @escaping FlutterResult,
-    nativeCall: @escaping (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, UInt) -> OperitByteBuffer
-  ) {
-    guard let request = (call.arguments as? FlutterStandardTypedData)?.data else {
-      result(FlutterError(code: "INVALID_ARGS", message: "\(call.method) expects MessagePack bytes", details: nil))
-      return
-    }
-    runRuntimeBytes(result: result) { handle in
-      request.withUnsafeBytes { bytes in
-        self.takeBytes(nativeCall(handle, bytes.bindMemory(to: UInt8.self).baseAddress, UInt(bytes.count)))
-      }
-    }
-  }
-
-  private func watchStream(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard let request = (call.arguments as? FlutterStandardTypedData)?.data else {
-      result(FlutterError(code: "INVALID_ARGS", message: "watchStream expects MessagePack bytes", details: nil))
-      return
-    }
-    runRuntimeBytes(result: result) { handle in
-      let response = request.withUnsafeBytes { bytes in
-        self.takeBytes(operit_flutter_bridge_watch_stream(handle, bytes.bindMemory(to: UInt8.self).baseAddress, UInt(bytes.count)))
-      }
-      self.ensureWatchPump()
-      return response
-    }
-  }
-
-  private func closeWatchStream(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard let subscriptionId = call.arguments as? String else {
-      result(FlutterError(code: "INVALID_ARGS", message: "closeWatchStream expects a subscription id", details: nil))
-      return
-    }
-    runRuntimeBytes(result: result) { handle in
-      self.takeBytes(operit_flutter_bridge_close_watch_stream(handle, subscriptionId))
-    }
-  }
-
-  /// Closes one local Link push stream.
-  private func pushClose(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard let pushId = call.arguments as? String else {
-      result(FlutterError(code: "INVALID_ARGS", message: "pushClose expects a push id", details: nil))
-      return
-    }
-    runRuntimeBytes(result: result) { handle in
-      self.takeBytes(operit_flutter_bridge_push_close(handle, pushId))
-    }
-  }
-
-  private func ensureWatchPump() {
-    watchLock.lock()
-    if watchPumpRunning {
-      watchLock.unlock()
-      return
-    }
-    watchPumpRunning = true
-    watchLock.unlock()
-    watchQueue.async {
-      while true {
-        self.watchLock.lock()
-        let running = self.watchPumpRunning
-        self.watchLock.unlock()
-        if !running {
-          return
-        }
-        do {
-          let handle = try self.ensureRuntimeHandle()
-          let frameBuffer = operit_flutter_bridge_next_watch_channel_event(handle)
-          guard frameBuffer.ptr != nil else {
-            self.stopWatchPump()
-            return
-          }
-          let frame = self.takeBytes(frameBuffer)
-          DispatchQueue.main.async {
-            self.channel.invokeMethod("watchChannelEvent", arguments: FlutterStandardTypedData(bytes: frame))
-          }
-        } catch {
-          self.stopWatchPump()
-          return
-        }
-      }
-    }
-  }
-
-  private func stopWatchPump() {
-    watchLock.lock()
-    watchPumpRunning = false
-    watchLock.unlock()
-  }
-
-  private func startWebAccessServer(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard let args = call.arguments as? [String: Any],
-      let bindAddress = args["bindAddress"] as? String,
-      let token = args["token"] as? String,
-      let shutdownToken = args["shutdownToken"] as? String,
-      let webRoot = args["webRoot"] as? String,
-      let deviceInfo = args["deviceInfo"] as? String,
-      let enableWebAccess = args["enableWebAccess"] as? String,
-      let enableDiscovery = args["enableDiscovery"] as? String
-    else {
-      result(FlutterError(code: "INVALID_ARGS", message: "startWebAccessServer arguments are incomplete", details: nil))
-      return
-    }
-    runRuntime(result: result) { handle in
-      self.takeString(operit_flutter_bridge_start_web_access_server(
-        handle,
-        bindAddress,
-        token,
-        shutdownToken,
-        webRoot,
-        deviceInfo,
-        enableWebAccess,
-        enableDiscovery
-      ))
-    }
-  }
 
   /// Returns and consumes the oldest notification activation received before Dart startup.
   private static func takePendingNotificationActivation() -> [String: Any]? {
@@ -725,11 +680,123 @@ final class AppleRuntimeChannel: NSObject {
   }
 
   /// Executes one Core-owned system operation through the iOS application host.
+  /// Requests an authorized current location on the application's main thread.
+  private func ownerDeviceLocation(paramsJson: String, result: @escaping FlutterResult) {
+    guard locationCompletion == nil else {
+      result(FlutterError(code: "LOCATION_BUSY", message: "A location request is already active", details: nil))
+      return
+    }
+    do {
+      guard let data = paramsJson.data(using: .utf8),
+            let params = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let timeout = params["timeout"] as? NSNumber, timeout.doubleValue > 0,
+            let highAccuracy = params["highAccuracy"] as? Bool,
+            let includeAddress = params["includeAddress"] as? Bool else {
+        throw RuntimeChannelError.invalidArgs("Location requires a positive timeout, highAccuracy, and includeAddress")
+      }
+      guard CLLocationManager.locationServicesEnabled() else {
+        throw RuntimeChannelError.invalidArgs("System location services are disabled")
+      }
+      let manager = CLLocationManager()
+      manager.delegate = self
+      manager.desiredAccuracy = highAccuracy ? kCLLocationAccuracyBest : kCLLocationAccuracyHundredMeters
+      locationManager = manager
+      locationCompletion = result
+      locationRequestStarted = false
+      locationIncludeAddress = includeAddress
+      locationTimeoutSeconds = timeout.doubleValue
+      scheduleLocationTimeout(seconds: 60)
+      authorizeLocation(manager)
+    } catch {
+      result(FlutterError(code: "LOCATION_REQUEST_ERROR", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  /// Requests permission or begins acquisition according to the actual authorization state.
+  private func authorizeLocation(_ manager: CLLocationManager) {
+    switch manager.authorizationStatus {
+    case .notDetermined:
+      manager.requestWhenInUseAuthorization()
+    case .authorizedAlways, .authorizedWhenInUse:
+      guard !locationRequestStarted else { return }
+      locationRequestStarted = true
+      scheduleLocationTimeout(seconds: locationTimeoutSeconds)
+      manager.requestLocation()
+    case .denied, .restricted:
+      finishLocation(FlutterError(code: "LOCATION_PERMISSION_DENIED", message: "Location access is not authorized", details: nil))
+    @unknown default:
+      finishLocation(FlutterError(code: "LOCATION_AUTHORIZATION_ERROR", message: "Unknown location authorization state", details: nil))
+    }
+  }
+
+  /// Bounds both authorization and acquisition without returning a cached position.
+  private func scheduleLocationTimeout(seconds: Double) {
+    locationTimeout?.cancel()
+    let timeout = DispatchWorkItem { [weak self] in
+      self?.finishLocation(FlutterError(code: "LOCATION_TIMEOUT", message: "Current location request timed out", details: nil))
+    }
+    locationTimeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: timeout)
+  }
+
+  /// Serializes the location result using the common SystemOperationHost schema.
+  private func deliverLocation(_ location: CLLocation, placemark: CLPlacemark?) {
+    do {
+      var payload: [String: Any] = [
+        "latitude": location.coordinate.latitude,
+        "longitude": location.coordinate.longitude,
+        "accuracy": location.horizontalAccuracy,
+        "provider": "apple.core_location",
+        "timestamp": Int64(location.timestamp.timeIntervalSince1970 * 1000),
+        "rawData": "",
+        "address": "", "city": "", "province": "", "country": "",
+      ]
+      if locationIncludeAddress {
+        guard let placemark, let name = placemark.name,
+              let city = placemark.locality, let province = placemark.administrativeArea,
+              let country = placemark.country else {
+          throw RuntimeChannelError.invalidArgs("Reverse geocoding did not return the requested address fields")
+        }
+        payload["address"] = name
+        payload["city"] = city
+        payload["province"] = province
+        payload["country"] = country
+      }
+      let data = try JSONSerialization.data(withJSONObject: payload)
+      guard let json = String(data: data, encoding: .utf8) else {
+        throw RuntimeChannelError.invalidArgs("Location response could not be encoded as UTF-8")
+      }
+      finishLocation(["resultJson": json])
+    } catch {
+      finishLocation(FlutterError(code: "LOCATION_RESPONSE_ERROR", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  /// Completes a location request exactly once and releases its native resources.
+  private func finishLocation(_ response: Any) {
+    guard let completion = locationCompletion else { return }
+    locationCompletion = nil
+    locationTimeout?.cancel()
+    locationTimeout = nil
+    locationGeocoder?.cancelGeocode()
+    locationGeocoder = nil
+    locationManager?.stopUpdatingLocation()
+    locationManager?.delegate = nil
+    locationManager = nil
+    locationRequestStarted = false
+    completion(response)
+  }
+
+  /// Dispatches owner operations using their typed operation identifiers.
   private func ownerSystemOperation(call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let payload = call.arguments as? [String: Any],
           let operation = payload["operation"] as? String,
           let paramsJson = payload["paramsJson"] as? String else {
       result(FlutterError(code: "INVALID_ARGS", message: "ownerSystemOperation expects operation and paramsJson", details: nil))
+      return
+    }
+    if operation == "get_device_location" {
+      ownerDeviceLocation(paramsJson: paramsJson, result: result)
       return
     }
     guard operation == "send_notification" else {
@@ -793,6 +860,73 @@ final class AppleRuntimeChannel: NSObject {
     }
   }
 
+  /// Presents the real UIKit document preview, falling back to an Open In menu.
+  private func ownerFileOpen(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any],
+          let path = args["path"] as? String, path.hasPrefix("/"), !path.contains("\0") else {
+      result(["success": false, "error": "ownerFileOpen expects an absolute file path"])
+      return
+    }
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+          !isDirectory.boolValue, FileManager.default.isReadableFile(atPath: path) else {
+      result(["success": false, "error": "File is missing or unreadable: \(path)"])
+      return
+    }
+    guard let scene = UIApplication.shared.connectedScenes
+      .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+      var presenter = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+      result(["success": false, "error": "Opening a document requires an active application window"])
+      return
+    }
+    while let presented = presenter.presentedViewController { presenter = presented }
+    guard !presenter.isBeingDismissed, !presenter.isBeingPresented else {
+      result(["success": false, "error": "The document presenter is transitioning; try again"])
+      return
+    }
+    guard fileController == nil else {
+      result(["success": false, "error": "Close the current document preview or Open In menu first"])
+      return
+    }
+    // Retain the controller and its presenter until UIKit reports dismissal.
+    let controller = UIDocumentInteractionController(url: URL(fileURLWithPath: path))
+    controller.delegate = self
+    fileController = controller
+    filePresenter = presenter
+    let shown = controller.presentPreview(animated: true) || controller.presentOpenInMenu(
+      from: CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1),
+      in: presenter.view, animated: true
+    )
+    if shown {
+      result(["success": true])
+    } else {
+      fileController = nil
+      filePresenter = nil
+      result(["success": false, "error": "No installed application can open this document"])
+    }
+  }
+
+  func documentInteractionControllerViewControllerForPreview(
+    _ controller: UIDocumentInteractionController
+  ) -> UIViewController {
+    // Set immediately before presentPreview, while the foreground presenter is alive.
+    return filePresenter!
+  }
+
+  func documentInteractionControllerDidEndPreview(_ controller: UIDocumentInteractionController) {
+    if fileController === controller {
+      fileController = nil
+      filePresenter = nil
+    }
+  }
+
+  func documentInteractionControllerDidDismissOpenInMenu(_ controller: UIDocumentInteractionController) {
+    if fileController === controller {
+      fileController = nil
+      filePresenter = nil
+    }
+  }
+
   private func ownerAudioPlay(call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let payload = call.arguments as? [String: Any],
       let path = payload["path"] as? String
@@ -851,7 +985,39 @@ final class AppleRuntimeChannel: NSObject {
   }
 
   private func ownerTtsSynthesize(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    result(FlutterError(code: "OWNER_TTS_SYNTHESIZE_ERROR", message: "Apple TTS file synthesis is not implemented", details: nil))
+    guard let payload = call.arguments as? [String: Any],
+      let text = payload["text"] as? String,
+      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      let speed = payload["speed"] as? NSNumber,
+      let pitch = payload["pitch"] as? NSNumber,
+      payload["outputFormat"] as? String == "wav"
+    else {
+      result(FlutterError(code: "INVALID_ARGS", message: "TTS synthesis requires nonempty text, speed, pitch and wav outputFormat", details: nil))
+      return
+    }
+    do {
+      guard let root = configuredRuntimeRoot else {
+        throw RuntimeChannelError.invalidArgs("runtime storage is not configured")
+      }
+      let utterance = AVSpeechUtterance(string: text)
+      try configureSpeechUtterance(utterance, payload: payload, speed: speed, pitch: pitch)
+      let directory = root.appendingPathComponent("temp/tts", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let id = UUID().uuidString
+      let output = directory.appendingPathComponent("\(id).wav")
+      let job = AppleTtsFileJob(output: output) { [weak self] error in
+        self?.ttsFileJobs.removeValue(forKey: id)
+        if let error {
+          result(FlutterError(code: "OWNER_TTS_SYNTHESIZE_ERROR", message: error.localizedDescription, details: nil))
+        } else {
+          result(["audioPath": output.path, "details": "Apple speech synthesis completed"])
+        }
+      }
+      ttsFileJobs[id] = job
+      job.start(utterance)
+    } catch {
+      result(FlutterError(code: "OWNER_TTS_SYNTHESIZE_ERROR", message: error.localizedDescription, details: nil))
+    }
   }
 
   /// Handles owner-host local inference commands.
@@ -1194,15 +1360,6 @@ final class AppleRuntimeChannel: NSObject {
     return value
   }
 
-  /// Copies and releases one owned Rust Link byte buffer.
-  private func takeBytes(_ buffer: OperitByteBuffer) -> Data {
-    guard let pointer = buffer.ptr else {
-      return Data()
-    }
-    let data = Data(bytes: pointer, count: Int(buffer.len))
-    operit_flutter_bridge_free_bytes(buffer)
-    return data
-  }
 }
 
 private enum AppleCrashChannel {
@@ -1809,5 +1966,129 @@ private enum RuntimeChannelError: LocalizedError {
     case .invalidState(let message):
       return message
     }
+  }
+}
+
+/// Owns one file synthesis independently of interactive speech playback.
+/// All state and file writes are serialized on the main queue.
+private final class AppleTtsFileJob: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+  private let synthesizer = AVSpeechSynthesizer()
+  private let output: URL
+  private var file: AVAudioFile?
+  private var completion: ((Error?) -> Void)?
+  private var timeout: DispatchWorkItem?
+
+  init(output: URL, completion: @escaping (Error?) -> Void) {
+    self.output = output
+    self.completion = completion
+    super.init()
+    synthesizer.delegate = self
+  }
+
+  func start(_ utterance: AVSpeechUtterance) {
+    let timeout = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.finish(self.failure("Speech synthesis timed out"))
+    }
+    self.timeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: timeout)
+    synthesizer.write(utterance) { [weak self] buffer in
+      DispatchQueue.main.async { self?.consume(buffer) }
+    }
+  }
+
+  private func failure(_ message: String) -> NSError {
+    NSError(domain: "OperitTtsSynthesis", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message])
+  }
+
+  private func consume(_ buffer: AVAudioBuffer) {
+    guard completion != nil else { return }
+    guard let pcm = buffer as? AVAudioPCMBuffer else {
+      finish(failure("Speech synthesis returned a non-PCM buffer"))
+      return
+    }
+    if pcm.frameLength == 0 {
+      let hasAudio = (file?.length ?? 0) > 0
+      finish(hasAudio ? nil : failure("Speech synthesis produced no audio"))
+      return
+    }
+    do {
+      if file == nil {
+        file = try AVAudioFile(forWriting: output, settings: [
+          AVFormatIDKey: kAudioFormatLinearPCM,
+          AVSampleRateKey: pcm.format.sampleRate,
+          AVNumberOfChannelsKey: pcm.format.channelCount,
+          AVLinearPCMBitDepthKey: 16,
+          AVLinearPCMIsFloatKey: false,
+          AVLinearPCMIsBigEndianKey: false,
+        ], commonFormat: pcm.format.commonFormat,
+           interleaved: pcm.format.isInterleaved)
+      }
+      try file?.write(from: pcm)
+    } catch {
+      finish(error)
+    }
+  }
+
+  private func finish(_ error: Error?) {
+    guard let completion else { return }
+    self.completion = nil
+    timeout?.cancel()
+    timeout = nil
+    // Closing the file finalizes the WAV header before exposing its path.
+    file = nil
+    if error != nil {
+      synthesizer.stopSpeaking(at: .immediate)
+      try? FileManager.default.removeItem(at: output)
+    }
+    completion(error)
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                         didCancel utterance: AVSpeechUtterance) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.finish(self.failure("Speech synthesis was cancelled"))
+    }
+  }
+}
+
+/// Connects the owner location request to Core Location's asynchronous callbacks.
+extension AppleRuntimeChannel: CLLocationManagerDelegate {
+  /// Resumes the pending request after the user decides the location authorization.
+  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    guard manager === locationManager else { return }
+    authorizeLocation(manager)
+  }
+
+  /// Returns a fresh valid fix and optionally reverse-geocodes the requested address.
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard manager === locationManager else { return }
+    guard let location = locations.last, location.horizontalAccuracy >= 0,
+          abs(location.timestamp.timeIntervalSinceNow) <= locationTimeoutSeconds else {
+      finishLocation(FlutterError(code: "LOCATION_INVALID_FIX", message: "Core Location did not return a fresh valid position", details: nil))
+      return
+    }
+    guard locationIncludeAddress else {
+      deliverLocation(location, placemark: nil)
+      return
+    }
+    let geocoder = CLGeocoder()
+    locationGeocoder = geocoder
+    geocoder.reverseGeocodeLocation(location) { [weak self, weak manager] placemarks, error in
+      guard let self, let manager, manager === self.locationManager else { return }
+      if let error {
+        self.finishLocation(FlutterError(code: "LOCATION_GEOCODING_ERROR", message: error.localizedDescription, details: nil))
+        return
+      }
+      self.deliverLocation(location, placemark: placemarks?.first)
+    }
+  }
+
+  /// Reports native acquisition failures without substituting a previous position.
+  func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    guard manager === locationManager else { return }
+    finishLocation(FlutterError(code: "LOCATION_ACQUISITION_ERROR", message: error.localizedDescription, details: nil))
   }
 }

@@ -1,0 +1,8 @@
+name: webview_platform_interface
+version: 1.4.0
+description: Shared WebView interface identity for Operit's platform adapters.
+environment:
+  sdk: ^3.9.0
+dependencies:
+  webview_flutter_platform_interface:
+    path: ../webview_flutter_platform_interface

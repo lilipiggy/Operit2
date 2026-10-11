@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::chat::llmprovider::AIService::AiServiceError;
+use crate::chat::llmprovider::EndpointCompleter::EndpointCompleter;
 use operit_model::ModelConfigData::{ApiProviderType, ModelBuiltinTool, ResolvedModelConfig};
 
 /// Trace metadata attached to one outbound LLM request attempt.
@@ -19,6 +20,7 @@ pub struct LlmRequestTraceContext {
 pub enum ProviderServiceKind {
     OpenAIProvider,
     OpenAIResponsesProvider,
+    OpenCodeProvider,
     ClaudeProvider,
     GeminiProvider,
     OllamaProvider,
@@ -67,6 +69,19 @@ pub enum ProviderCreateParams {
         supports_vision: bool,
         supports_audio: bool,
         supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
+        enable_tool_call: bool,
+    },
+    OpenCodeProvider {
+        api_endpoint: String,
+        api_key_provider: ApiKeyProviderSpec,
+        model_name: String,
+        custom_headers: BTreeMap<String, String>,
+        protocol: ApiProviderType,
+        supports_vision: bool,
+        supports_audio: bool,
+        supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
         enable_tool_call: bool,
     },
     ClaudeProvider {
@@ -76,6 +91,7 @@ pub enum ProviderCreateParams {
         custom_headers: BTreeMap<String, String>,
         provider_type: ApiProviderType,
         enable_tool_call: bool,
+        enable_claude_1h_prompt_cache: bool,
     },
     GeminiProvider {
         api_endpoint: String,
@@ -139,6 +155,7 @@ pub enum ProviderCreateParams {
         supports_vision: bool,
         supports_audio: bool,
         supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
         enable_tool_call: bool,
     },
     MistralProvider {
@@ -267,15 +284,21 @@ impl AIServiceFactory {
         let supports_audio = config.capabilities.directAudio;
         let supports_video = config.capabilities.directVideo;
         let enable_tool_call = config.capabilities.toolCall;
+        let enable_claude_1h_prompt_cache = config.request.enableClaude1hPromptCache;
         let builtin_tools = config.builtinTools.clone();
         let model_name = config.modelId.clone();
         let provider_type = request.provider_type;
+        let api_endpoint = EndpointCompleter::completeEndpointForProviderType(
+            &config.apiEndpoint,
+            provider_type.clone(),
+        );
 
         let spec = match provider_type {
             ApiProviderType::OPENAI
+            | ApiProviderType::XAI
             | ApiProviderType::OPENAI_GENERIC
             | ApiProviderType::OPENAI_LOCAL => Self::open_ai_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -287,7 +310,7 @@ impl AIServiceFactory {
             ),
             ApiProviderType::OPENAI_RESPONSES | ApiProviderType::OPENAI_RESPONSES_GENERIC => {
                 Self::open_ai_responses_provider(
-                    config.apiEndpoint,
+                    api_endpoint,
                     api_key_provider,
                     model_name,
                     custom_headers,
@@ -295,21 +318,35 @@ impl AIServiceFactory {
                     supports_vision,
                     supports_audio,
                     supports_video,
+                    builtin_tools,
                     enable_tool_call,
                 )
             }
+            ApiProviderType::OPENAI_CODEX => Self::open_ai_responses_provider(
+                api_endpoint,
+                api_key_provider,
+                model_name,
+                custom_headers,
+                provider_type,
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
+                enable_tool_call,
+            ),
             ApiProviderType::ANTHROPIC | ApiProviderType::ANTHROPIC_GENERIC => {
                 Self::claude_provider(
-                    config.apiEndpoint,
+                    api_endpoint,
                     api_key_provider,
                     model_name,
                     custom_headers,
                     provider_type,
                     enable_tool_call,
+                    enable_claude_1h_prompt_cache,
                 )
             }
             ApiProviderType::GOOGLE | ApiProviderType::GEMINI_GENERIC => Self::gemini_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -318,7 +355,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::LMSTUDIO => Self::open_ai_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -329,7 +366,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::OLLAMA => Self::ollama_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -345,7 +382,7 @@ impl AIServiceFactory {
                 ));
             }
             ApiProviderType::ALIYUN => Self::qwen_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -364,8 +401,9 @@ impl AIServiceFactory {
             | ApiProviderType::ALIPAY_BAILING
             | ApiProviderType::PPINFRA
             | ApiProviderType::NOVITA
+            | ApiProviderType::MINIMAX
             | ApiProviderType::OTHER => Self::open_ai_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -376,7 +414,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::MOONSHOT => Self::kimi_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -387,7 +425,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::MIMO => Self::mimo_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -398,7 +436,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::DEEPSEEK => Self::deepseek_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -406,10 +444,11 @@ impl AIServiceFactory {
                 supports_vision,
                 supports_audio,
                 supports_video,
+                builtin_tools,
                 enable_tool_call,
             ),
             ApiProviderType::MISTRAL => Self::mistral_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -420,7 +459,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::SILICONFLOW => Self::qwen_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -431,7 +470,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::OPENROUTER => Self::open_router_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -441,8 +480,21 @@ impl AIServiceFactory {
                 supports_video,
                 enable_tool_call,
             ),
+            ApiProviderType::OPENCODE => {
+                Self::open_code_provider(
+                    api_endpoint,
+                    api_key_provider,
+                    model_name,
+                    custom_headers,
+                    supports_vision,
+                    supports_audio,
+                    supports_video,
+                    builtin_tools,
+                    enable_tool_call,
+                )
+            }
             ApiProviderType::FOUR_ROUTER => Self::four_router_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -453,7 +505,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::NOUS_PORTAL => Self::nous_portal_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -464,7 +516,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::DOUBAO => Self::doubao_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -475,7 +527,7 @@ impl AIServiceFactory {
                 enable_tool_call,
             ),
             ApiProviderType::NVIDIA => Self::nvidia_provider(
-                config.apiEndpoint,
+                api_endpoint,
                 api_key_provider,
                 model_name,
                 custom_headers,
@@ -571,6 +623,49 @@ impl AIServiceFactory {
         })
     }
 
+    /// Builds the OpenCode routing provider spec.
+    fn open_code_provider(
+        api_endpoint: String,
+        api_key_provider: ApiKeyProviderSpec,
+        model_name: String,
+        custom_headers: BTreeMap<String, String>,
+        supports_vision: bool,
+        supports_audio: bool,
+        supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
+        enable_tool_call: bool,
+    ) -> Result<ProviderServiceSpec, AiServiceError> {
+        let model_name = model_name.trim();
+        let model_name = if let Some(value) = model_name.strip_prefix("opencode/") {
+            value
+        } else if let Some(value) = model_name.strip_prefix("opencode-go/") {
+            value
+        } else {
+            model_name
+        }
+        .to_string();
+        let protocol = crate::chat::llmprovider::OpenCodeProvider::OpenCodeRouting::protocol_for(
+            &api_endpoint,
+            &model_name,
+        )
+        .map_err(AiServiceError::RequestFailed)?;
+        Ok(ProviderServiceSpec {
+            kind: ProviderServiceKind::OpenCodeProvider,
+            params: ProviderCreateParams::OpenCodeProvider {
+                api_endpoint,
+                api_key_provider,
+                model_name,
+                custom_headers,
+                protocol,
+                supports_vision,
+                supports_audio,
+                supports_video,
+                builtin_tools,
+                enable_tool_call,
+            },
+        })
+    }
+
     /// Builds a DeepSeek provider spec.
     fn deepseek_provider(
         api_endpoint: String,
@@ -581,6 +676,7 @@ impl AIServiceFactory {
         supports_vision: bool,
         supports_audio: bool,
         supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
         enable_tool_call: bool,
     ) -> Result<ProviderServiceSpec, AiServiceError> {
         Ok(ProviderServiceSpec {
@@ -594,6 +690,7 @@ impl AIServiceFactory {
                 supports_vision,
                 supports_audio,
                 supports_video,
+                builtin_tools,
                 enable_tool_call,
             },
         })
@@ -609,6 +706,7 @@ impl AIServiceFactory {
         supports_vision: bool,
         supports_audio: bool,
         supports_video: bool,
+        builtin_tools: Vec<ModelBuiltinTool>,
         enable_tool_call: bool,
     ) -> Result<ProviderServiceSpec, AiServiceError> {
         Ok(ProviderServiceSpec {
@@ -622,6 +720,7 @@ impl AIServiceFactory {
                 supports_vision,
                 supports_audio,
                 supports_video,
+                builtin_tools,
                 enable_tool_call,
             },
         })
@@ -635,6 +734,7 @@ impl AIServiceFactory {
         custom_headers: BTreeMap<String, String>,
         provider_type: ApiProviderType,
         enable_tool_call: bool,
+        enable_claude_1h_prompt_cache: bool,
     ) -> Result<ProviderServiceSpec, AiServiceError> {
         Ok(ProviderServiceSpec {
             kind: ProviderServiceKind::ClaudeProvider,
@@ -645,6 +745,7 @@ impl AIServiceFactory {
                 custom_headers,
                 provider_type,
                 enable_tool_call,
+                enable_claude_1h_prompt_cache,
             },
         })
     }

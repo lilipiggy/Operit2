@@ -10,27 +10,39 @@ import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/bridge/ProxyCoreRuntimeBridge.dart';
+import '../../core/errors/UnhandledErrorReporter.dart';
 import '../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../data/preferences/UserPreferencesManager.dart';
 import '../../l10n/generated/app_localizations.dart';
+import '../common/AppToastHost.dart';
 import '../common/RuntimeBootstrapScreen.dart';
+import '../common/layout/ApplicationZoom.dart';
+import '../common/layout/ApplicationZoomPreferences.dart';
 import '../features/chat/tts/TtsFloatingPanel.dart';
+import '../features/startup/PluginLoadingOverlay.dart';
 import '../../core/host/browser/RuntimeBrowserOwnerHost.dart';
 import '../features/chat/components/workspace/browser/automation/WorkspaceWebVisitHost.dart';
-import '../permissions/ToolApprovalHost.dart';
 import 'OperitThemeAssets.dart';
+import 'ThemeCircularRevealHost.dart';
 
 class OperitTheme extends StatefulWidget {
+  /// Creates one themed Flutter application root.
   const OperitTheme({
     super.key,
     required this.child,
+    required this.initialThemePreferenceSnapshot,
+    this.initialThemeMode,
+    required this.initialThemeIsReady,
     this.hostInteractionHostsEnabled = true,
     this.unconfiguredChildEnabled = false,
   });
 
   final Widget child;
+  final ThemePreferenceSnapshot initialThemePreferenceSnapshot;
+  final ThemeMode? initialThemeMode;
+  final bool initialThemeIsReady;
   final bool hostInteractionHostsEnabled;
   final bool unconfiguredChildEnabled;
 
@@ -50,6 +62,11 @@ class OperitTheme extends StatefulWidget {
 class _OperitThemeState extends State<OperitTheme> {
   final RuntimeBootstrapManager _runtimeManager =
       RuntimeBootstrapManager.instance;
+  final ApplicationZoomPreferences _zoomPreferences =
+      const ApplicationZoomPreferences();
+  double _zoom = 1.0;
+  Future<void> _zoomSave = Future<void>.value();
+  StreamSubscription<LongPastedTextInputSettings>? _longPasteSubscription;
   late final OperitThemeController _controller = OperitThemeController(
     onChanged: () {
       if (mounted) {
@@ -60,6 +77,7 @@ class _OperitThemeState extends State<OperitTheme> {
   Future<void>? _runtimeStartFuture;
   Object? _runtimeStartupError;
   bool _runtimeUiReady = false;
+  bool _runtimeStartCompleted = false;
   bool _preserveUnconfiguredChild = false;
   int _runtimeGeneration = 0;
   Timer? _runtimeStartupStatusTimer;
@@ -74,6 +92,11 @@ class _OperitThemeState extends State<OperitTheme> {
     _runtimeManager.addListener(_handleRuntimeBootstrapChanged);
     _preserveUnconfiguredChild =
         widget.unconfiguredChildEnabled && !_runtimeManager.runtimeConfigured;
+    _controller.setInitialThemePreferenceSnapshot(
+      widget.initialThemePreferenceSnapshot,
+    );
+    _runtimeUiReady =
+        widget.initialThemeIsReady && _runtimeManager.runtimeConfigured;
     if (_runtimeManager.runtimeConfigured) {
       unawaited(_startRuntimeUi());
     }
@@ -85,6 +108,7 @@ class _OperitThemeState extends State<OperitTheme> {
     _stopRuntimeStartupStatusPolling();
     _runtimeManager.removeListener(_handleRuntimeBootstrapChanged);
     _controller.dispose();
+    _cancelPreferenceSubscriptions();
     super.dispose();
   }
 
@@ -94,8 +118,10 @@ class _OperitThemeState extends State<OperitTheme> {
       _runtimeGeneration++;
       _stopRuntimeStartupStatusPolling();
       _controller.dispose();
+      _cancelPreferenceSubscriptions();
       setState(() {
         _runtimeUiReady = false;
+        _runtimeStartCompleted = false;
         _runtimeStartupError = null;
         _runtimeStartFuture = null;
         _preserveUnconfiguredChild = widget.unconfiguredChildEnabled;
@@ -108,7 +134,7 @@ class _OperitThemeState extends State<OperitTheme> {
 
   /// Starts core-backed theme state after the runtime is configured.
   Future<void> _startRuntimeUi() async {
-    if (_runtimeUiReady ||
+    if (_runtimeStartCompleted ||
         _runtimeStartFuture != null ||
         !_runtimeManager.runtimeConfigured) {
       return;
@@ -119,13 +145,24 @@ class _OperitThemeState extends State<OperitTheme> {
     _runtimeStartFuture = startFuture;
     try {
       await startFuture;
+      final zoom = await _zoomPreferences.load();
       if (!mounted ||
           generation != _runtimeGeneration ||
           !_runtimeManager.runtimeConfigured) {
         return;
       }
+      _longPasteSubscription = const UserPreferencesManager()
+          .longPastedTextInputSettingsFlow()
+          .listen((settings) {
+            if (!mounted || generation != _runtimeGeneration) {
+              return;
+            }
+            UserPreferencesManager.longPastedTextInputSettings.value = settings;
+          });
       setState(() {
+        _zoom = zoom;
         _runtimeUiReady = true;
+        _runtimeStartCompleted = true;
         _runtimeStartupError = null;
       });
     } catch (error, stackTrace) {
@@ -149,6 +186,12 @@ class _OperitThemeState extends State<OperitTheme> {
         _runtimeStartFuture = null;
       }
     }
+  }
+
+  /// Detaches application-level preference caches from the active runtime.
+  void _cancelPreferenceSubscriptions() {
+    unawaited(_longPasteSubscription?.cancel());
+    _longPasteSubscription = null;
   }
 
   /// Starts reading Android native runtime stages while Core-backed UI is starting.
@@ -187,6 +230,18 @@ class _OperitThemeState extends State<OperitTheme> {
     });
   }
 
+  /// Applies a keyboard-selected zoom and persists changes in input order.
+  void _changeZoom(double zoom) {
+    if (_zoom == zoom) {
+      return;
+    }
+    setState(() {
+      _zoom = zoom;
+    });
+    _zoomSave = _zoomSave.then((_) => _zoomPreferences.save(zoom));
+    unawaited(_zoomSave);
+  }
+
   /// Builds the bootstrap or fully initialized application theme.
   @override
   Widget build(BuildContext context) {
@@ -195,7 +250,10 @@ class _OperitThemeState extends State<OperitTheme> {
     final themeSnapshot = runtimeReady
         ? _controller.themePreferenceSnapshot
         : UserPreferencesManager.defaultThemePreferenceSnapshot;
-    final themeMode = runtimeReady ? _controller.themeMode : ThemeMode.system;
+    final themeMode = runtimeReady
+        ? _controller.themeMode
+        : widget.initialThemeMode ??
+              widget.initialThemePreferenceSnapshot.themeMode;
     final Widget appChild;
     if (_preserveUnconfiguredChild) {
       appChild = Stack(
@@ -228,6 +286,9 @@ class _OperitThemeState extends State<OperitTheme> {
         themePreferenceSnapshot: themeSnapshot,
         hostInteractionHostsEnabled:
             runtimeReady && widget.hostInteractionHostsEnabled,
+        zoom: _zoom,
+        zoomShortcutsEnabled: runtimeReady && _runtimeStartCompleted,
+        onZoomChanged: _changeZoom,
         child: appChild,
       ),
     );
@@ -239,12 +300,18 @@ class _OperitMaterialApp extends StatelessWidget {
     required this.themeMode,
     required this.themePreferenceSnapshot,
     required this.hostInteractionHostsEnabled,
+    required this.zoom,
+    required this.zoomShortcutsEnabled,
+    required this.onZoomChanged,
     required this.child,
   });
 
   final ThemeMode themeMode;
   final ThemePreferenceSnapshot themePreferenceSnapshot;
   final bool hostInteractionHostsEnabled;
+  final double zoom;
+  final bool zoomShortcutsEnabled;
+  final ValueChanged<double> onZoomChanged;
   final Widget child;
 
   /// Builds the themed application and process-wide host overlays.
@@ -266,25 +333,42 @@ class _OperitMaterialApp extends StatelessWidget {
       theme: _themeData(lightColorScheme, themePreferenceSnapshot),
       darkTheme: _themeData(darkColorScheme, themePreferenceSnapshot),
       themeMode: themeMode,
+      themeAnimationDuration: OperitTheme.of(context).suppressThemeAnimation
+          ? Duration.zero
+          : kThemeAnimationDuration,
       builder: (context, materialChild) {
-        return AnnotatedRegion<SystemUiOverlayStyle>(
-          value: _systemUiOverlayStyle(Theme.of(context).colorScheme),
-          child: _OperitThemeBackground(
-            themePreferenceSnapshot: themePreferenceSnapshot,
-            child: materialChild!,
+        final appContent = ThemeCircularRevealHost(
+          child: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: _systemUiOverlayStyle(Theme.of(context).colorScheme),
+            child: OperitThemeBackground(
+              themePreferenceSnapshot: themePreferenceSnapshot,
+              child: materialChild!,
+            ),
           ),
         );
+        return ApplicationZoomHost(
+          zoom: zoom,
+          shortcutsEnabled: zoomShortcutsEnabled,
+          onZoomChanged: onZoomChanged,
+          child: appContent,
+        );
       },
-      home: RuntimeBrowserOwnerHost(
-        enabled: hostInteractionHostsEnabled,
-        child: WorkspaceWebVisitHost(
-          child: ToolApprovalHost(
-            child: Stack(
-              fit: StackFit.expand,
-              children: <Widget>[
-                Positioned.fill(child: child),
-                const TtsFloatingPanel(),
-              ],
+      home: UnhandledErrorHost(
+        child: RuntimeBrowserOwnerHost(
+          enabled: hostInteractionHostsEnabled,
+          child: WorkspaceWebVisitHost(
+            child: AppToastHost(
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  Positioned.fill(child: child),
+                  const TtsFloatingPanel(),
+                  PluginLoadingOverlay(
+                    key: const ValueKey<String>('plugin-loading-overlay'),
+                    enabled: hostInteractionHostsEnabled,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -294,30 +378,40 @@ class _OperitMaterialApp extends StatelessWidget {
 }
 
 class OperitThemeController {
+  /// Creates the controller that owns the effective application theme.
   OperitThemeController({
     required VoidCallback onChanged,
+    Future<void> Function(ThemeMode)? saveStartupThemeMode,
     UserPreferencesManager preferencesManager = const UserPreferencesManager(),
     GeneratedCoreProxyClients clients = const GeneratedCoreProxyClients(
       ProxyCoreRuntimeBridge(),
     ),
   }) : _onChanged = onChanged,
+       _saveStartupThemeMode =
+           saveStartupThemeMode ?? _saveStartupThemeModeDefault,
        _preferencesManager = preferencesManager,
        _clients = clients;
 
   final VoidCallback _onChanged;
+  final Future<void> Function(ThemeMode) _saveStartupThemeMode;
   final UserPreferencesManager _preferencesManager;
   final GeneratedCoreProxyClients _clients;
   StreamSubscription<Object?>? _activePromptSubscription;
+  StreamSubscription<Map<String, String>>? _themePreferencesSubscription;
   ThemePreferenceSnapshot _themePreferenceSnapshot =
       UserPreferencesManager.defaultThemePreferenceSnapshot;
   String? _activeCharacterCardId;
   String? _activeCharacterGroupId;
   String? _activeThemeTargetName;
   int _activePromptRevision = 0;
+  int _themePreferenceRevision = 0;
+  int _lifecycleRevision = 0;
+  bool _suppressThemeAnimation = false;
 
   ThemeMode get themeMode => _themePreferenceSnapshot.themeMode;
   ThemePreferenceSnapshot get themePreferenceSnapshot =>
       _themePreferenceSnapshot;
+  bool get suppressThemeAnimation => _suppressThemeAnimation;
   String get activeThemeTargetName {
     final name = _activeThemeTargetName;
     if (name == null || name.trim().isEmpty) {
@@ -330,12 +424,36 @@ class OperitThemeController {
       _activeCharacterGroupId != null || _activeCharacterCardId != null;
   bool get isActiveThemeTargetGroup => _activeCharacterGroupId != null;
 
+  /// Returns the currently active character card or group theme target.
+  core_proxy.ActivePrompt get activeThemeTarget {
+    final groupId = _activeCharacterGroupId;
+    if (groupId != null) {
+      return core_proxy.ActivePrompt.characterGroup(id: groupId);
+    }
+    final cardId = _activeCharacterCardId;
+    if (cardId != null) {
+      return core_proxy.ActivePrompt.characterCard(id: cardId);
+    }
+    throw StateError('No active theme target');
+  }
+
+  /// Applies the known first-frame theme state before asynchronous startup.
+  void setInitialThemePreferenceSnapshot(ThemePreferenceSnapshot snapshot) {
+    _themePreferenceSnapshot = snapshot;
+  }
+
   /// Starts core-backed theme preferences and active prompt subscriptions.
   Future<void> start() async {
+    final lifecycleRevision = ++_lifecycleRevision;
+    await _themePreferencesSubscription?.cancel();
+    _themePreferencesSubscription = null;
     await _activePromptSubscription?.cancel();
     _activePromptSubscription = null;
     final activePrompt = await _clients.preferencesActivePromptManager
         .getActivePrompt();
+    if (lifecycleRevision != _lifecycleRevision) {
+      return;
+    }
     _applyActivePrompt(activePrompt);
     final revision = ++_activePromptRevision;
     _activePromptSubscription = _clients.preferencesActivePromptManager
@@ -344,11 +462,21 @@ class OperitThemeController {
           unawaited(_handleActivePromptChange(activePrompt));
         });
     await _loadActiveThemeTarget(revision);
+    if (lifecycleRevision != _lifecycleRevision) {
+      return;
+    }
+    _themePreferencesSubscription = _preferencesManager
+        .preferencesFlow()
+        .listen((_) => unawaited(_reloadThemePreferenceSnapshot()));
   }
 
-  /// Cancels the active prompt subscription.
+  /// Cancels active prompt and theme preference subscriptions.
   void dispose() {
+    _lifecycleRevision++;
     _activePromptRevision++;
+    _themePreferenceRevision++;
+    unawaited(_themePreferencesSubscription?.cancel());
+    _themePreferencesSubscription = null;
     unawaited(_activePromptSubscription?.cancel());
     _activePromptSubscription = null;
   }
@@ -360,7 +488,27 @@ class OperitThemeController {
 
   /// Toggles directly between explicit light and dark modes.
   void toggle(BuildContext context) {
-    unawaited(setThemeMode(isDark(context) ? ThemeMode.light : ThemeMode.dark));
+    final nextMode = isDark(context) ? ThemeMode.light : ThemeMode.dark;
+    final reveal = ThemeCircularRevealHost.maybeOf(context);
+    if (reveal == null) {
+      unawaited(setThemeMode(nextMode));
+      return;
+    }
+    unawaited(
+      reveal.switchTheme(
+        originContext: context,
+        applyTheme: () async {
+          _suppressThemeAnimation = true;
+          try {
+            await setThemeMode(nextMode);
+            // Paint the target theme before revealing it through the circle.
+            await WidgetsBinding.instance.endOfFrame;
+          } finally {
+            _suppressThemeAnimation = false;
+          }
+        },
+      ),
+    );
   }
 
   /// Persists and applies one theme mode for the active target.
@@ -552,6 +700,42 @@ class OperitThemeController {
     await _reloadThemePreferenceSnapshot();
   }
 
+  /// Loads every character card available as a theme target.
+  Future<List<core_proxy.CharacterCard>> loadThemeCharacterCards() {
+    return _clients.preferencesCharacterCardManager.getAllCharacterCards();
+  }
+
+  /// Loads every character group available as a theme target.
+  Future<List<core_proxy.CharacterGroupCard>> loadThemeCharacterGroups() {
+    return _clients.preferencesCharacterGroupCardManager
+        .getAllCharacterGroupCards();
+  }
+
+  /// Activates the selected character card or group as the current theme target.
+  Future<void> setActiveThemeTarget(core_proxy.ActivePrompt prompt) async {
+    final id = prompt.id.trim();
+    if (id.isEmpty) {
+      throw ArgumentError.value(
+        prompt.id,
+        'prompt.id',
+        'empty theme target id',
+      );
+    }
+    final normalizedPrompt = switch (prompt.tag) {
+      'CharacterCard' => core_proxy.ActivePrompt.characterCard(id: id),
+      'CharacterGroup' => core_proxy.ActivePrompt.characterGroup(id: id),
+      _ => throw ArgumentError.value(
+        prompt.tag,
+        'prompt.tag',
+        'invalid theme target tag',
+      ),
+    };
+    await _clients.preferencesActivePromptManager.setActivePrompt(
+      prompt: normalizedPrompt,
+    );
+    await _handleActivePromptChange(normalizedPrompt);
+  }
+
   /// Persists the global user avatar shown by the active theme.
   Future<void> saveActiveThemeUserAvatarSettings({
     required String customUserAvatarUri,
@@ -576,11 +760,22 @@ class OperitThemeController {
 
   /// Reloads and commits the latest snapshot for the active target.
   Future<void> _reloadThemePreferenceSnapshot() async {
+    final targetRevision = _activePromptRevision;
+    final preferenceRevision = ++_themePreferenceRevision;
     final snapshot = await _preferencesManager.resolveThemePreferenceSnapshot(
       characterCardId: _activeCharacterCardId,
       characterGroupId: _activeCharacterGroupId,
     );
     await _loadCustomFontIfNeeded(snapshot);
+    if (targetRevision != _activePromptRevision ||
+        preferenceRevision != _themePreferenceRevision) {
+      return;
+    }
+    await _saveStartupThemeMode(snapshot.themeMode);
+    if (targetRevision != _activePromptRevision ||
+        preferenceRevision != _themePreferenceRevision) {
+      return;
+    }
     _themePreferenceSnapshot = snapshot;
     _onChanged();
   }
@@ -630,17 +825,11 @@ class OperitThemeController {
       characterCardId: cardId,
       characterGroupId: groupId,
     );
-    final snapshot = await _preferencesManager.resolveThemePreferenceSnapshot(
-      characterCardId: cardId,
-      characterGroupId: groupId,
-    );
-    await _loadCustomFontIfNeeded(snapshot);
     if (revision != _activePromptRevision) {
       return;
     }
     _activeThemeTargetName = targetName;
-    _themePreferenceSnapshot = snapshot;
-    _onChanged();
+    await _reloadThemePreferenceSnapshot();
   }
 
   /// Resolves the display name for one explicit theme target.
@@ -682,6 +871,11 @@ class OperitThemeController {
     _activeCharacterGroupId = nextGroupId;
     return true;
   }
+}
+
+/// Persists the first-frame theme mode through the existing bootstrap host.
+Future<void> _saveStartupThemeModeDefault(ThemeMode themeMode) {
+  return RuntimeBootstrapManager.instance.saveStartupThemeMode(themeMode);
 }
 
 class _OperitThemeScope extends InheritedWidget {
@@ -773,7 +967,6 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
     bubbleAiSystemFontName: snapshot.bubbleAiSystemFontName,
     bubbleAiCustomFontPath: snapshot.bubbleAiCustomFontPath,
     showThinkingProcess: snapshot.showThinkingProcess,
-    toolCollapseMode: snapshot.toolCollapseMode,
     showModelProvider: snapshot.showModelProvider,
     showModelName: snapshot.showModelName,
     showRoleName: snapshot.showRoleName,
@@ -785,6 +978,7 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
   );
 }
 
+/// Builds Material theme data for the effective user theme state.
 ThemeData _themeData(
   ColorScheme colorScheme,
   ThemePreferenceSnapshot themePreferenceSnapshot,
@@ -792,6 +986,14 @@ ThemeData _themeData(
   final typography = Typography.material2021();
   final fontFamily = _fontFamily(themePreferenceSnapshot);
   final fontFamilyFallback = _fontFamilyFallback(themePreferenceSnapshot);
+  final backgroundVisible =
+      themePreferenceSnapshot.useBackgroundImage &&
+      themePreferenceSnapshot.backgroundImageUri != null &&
+      themePreferenceSnapshot.backgroundImageUri!.isNotEmpty;
+  final appBarBackgroundColor =
+      backgroundVisible || themePreferenceSnapshot.transparentSurfaceEnabled
+      ? Colors.transparent
+      : colorScheme.surface;
   final textTheme =
       (colorScheme.brightness == Brightness.dark
               ? typography.white
@@ -808,13 +1010,18 @@ ThemeData _themeData(
     textTheme: textTheme,
     inputDecorationTheme: _inputDecorationTheme(colorScheme, textTheme),
     dropdownMenuTheme: _dropdownMenuTheme(colorScheme, textTheme),
+    menuTheme: _menuTheme(colorScheme, textTheme),
+    menuButtonTheme: _menuButtonTheme(colorScheme, textTheme),
+    popupMenuTheme: _popupMenuTheme(colorScheme, textTheme),
+    buttonTheme: _buttonTheme(colorScheme),
     dialogTheme: _dialogTheme(colorScheme, textTheme),
     // ignore: deprecated_member_use
     progressIndicatorTheme: const ProgressIndicatorThemeData(year2023: false),
     appBarTheme: AppBarTheme(
-      backgroundColor: colorScheme.surface,
+      backgroundColor: appBarBackgroundColor,
       foregroundColor: colorScheme.onSurface,
       surfaceTintColor: Colors.transparent,
+      systemOverlayStyle: _systemUiOverlayStyle(colorScheme),
       elevation: 0,
       scrolledUnderElevation: 0,
       centerTitle: false,
@@ -832,13 +1039,87 @@ ThemeData _themeData(
   );
 }
 
+/// Builds the shared theme for Material 3 DropdownMenu widgets.
 DropdownMenuThemeData _dropdownMenuTheme(
   ColorScheme colorScheme,
   TextTheme textTheme,
 ) {
+  final menuShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(8),
+  );
   return DropdownMenuThemeData(
     textStyle: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurface),
+    menuStyle: MenuStyle(
+      backgroundColor: WidgetStatePropertyAll(colorScheme.surfaceContainerHigh),
+      shadowColor: WidgetStatePropertyAll(
+        colorScheme.shadow.withValues(alpha: 0.18),
+      ),
+      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      elevation: const WidgetStatePropertyAll(3),
+      padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(vertical: 4)),
+      shape: WidgetStatePropertyAll(menuShape),
+    ),
   );
+}
+
+/// Builds the shared menu theme used by MenuAnchor and MenuItemButton.
+MenuThemeData _menuTheme(ColorScheme colorScheme, TextTheme textTheme) {
+  final menuShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(8),
+  );
+  return MenuThemeData(
+    style: MenuStyle(
+      backgroundColor: WidgetStatePropertyAll(colorScheme.surfaceContainerHigh),
+      shadowColor: WidgetStatePropertyAll(
+        colorScheme.shadow.withValues(alpha: 0.18),
+      ),
+      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      elevation: const WidgetStatePropertyAll(3),
+      padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(vertical: 4)),
+      shape: WidgetStatePropertyAll(menuShape),
+    ),
+  );
+}
+
+/// Builds the shared item style used inside MenuAnchor menus.
+MenuButtonThemeData _menuButtonTheme(
+  ColorScheme colorScheme,
+  TextTheme textTheme,
+) {
+  return MenuButtonThemeData(
+    style: ButtonStyle(
+      foregroundColor: WidgetStatePropertyAll(colorScheme.onSurface),
+      textStyle: WidgetStatePropertyAll(textTheme.bodyMedium),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      minimumSize: const WidgetStatePropertyAll(Size(0, 40)),
+      shape: WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+      ),
+    ),
+  );
+}
+
+/// Builds the shared popup menu theme used by PopupMenuButton.
+PopupMenuThemeData _popupMenuTheme(
+  ColorScheme colorScheme,
+  TextTheme textTheme,
+) {
+  return PopupMenuThemeData(
+    color: colorScheme.surfaceContainerHigh,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    menuPadding: const EdgeInsets.symmetric(vertical: 4),
+    elevation: 3,
+    shadowColor: colorScheme.shadow.withValues(alpha: 0.18),
+    surfaceTintColor: Colors.transparent,
+    textStyle: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurface),
+  );
+}
+
+/// Builds the legacy button theme values still used by DropdownButton.
+ButtonThemeData _buttonTheme(ColorScheme colorScheme) {
+  return ButtonThemeData(alignedDropdown: true, colorScheme: colorScheme);
 }
 
 DialogThemeData _dialogTheme(ColorScheme colorScheme, TextTheme textTheme) {
@@ -924,8 +1205,12 @@ InputDecorationTheme _inputDecorationTheme(
   );
 }
 
-class _OperitThemeBackground extends StatelessWidget {
-  const _OperitThemeBackground({
+/// The shared image/video background used by the app and appearance preview.
+class OperitThemeBackground extends StatelessWidget {
+  const OperitThemeBackground({
+    super.key,
+    this.fit = StackFit.expand,
+    this.muteVideo = false,
     required this.themePreferenceSnapshot,
     required this.child,
   });
@@ -936,6 +1221,10 @@ class _OperitThemeBackground extends StatelessWidget {
 
   final ThemePreferenceSnapshot themePreferenceSnapshot;
   final Widget child;
+  final StackFit fit;
+
+  /// Keeps embedded previews from playing a second copy of background audio.
+  final bool muteVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -947,7 +1236,7 @@ class _OperitThemeBackground extends StatelessWidget {
         mediaPath.isNotEmpty;
     return LiquidGlassScope(
       child: Stack(
-        fit: StackFit.expand,
+        fit: fit,
         children: <Widget>[
           Positioned.fill(
             child: GlassBackgroundSource(
@@ -973,7 +1262,9 @@ class _OperitThemeBackground extends StatelessWidget {
                                 themePreferenceSnapshot.backgroundMediaType,
                             opacity:
                                 themePreferenceSnapshot.backgroundImageOpacity,
-                            muted: themePreferenceSnapshot.videoBackgroundMuted,
+                            muted:
+                                muteVideo ||
+                                themePreferenceSnapshot.videoBackgroundMuted,
                             loop: themePreferenceSnapshot.videoBackgroundLoop,
                             blurEnabled:
                                 themePreferenceSnapshot.useBackgroundBlur,
@@ -1030,7 +1321,7 @@ class _ThemeBackgroundMedia extends StatelessWidget {
           )
         : media;
     return AnimatedOpacity(
-      duration: _OperitThemeBackground._backgroundAnimationDuration,
+      duration: OperitThemeBackground._backgroundAnimationDuration,
       curve: Curves.easeOutCubic,
       opacity: opacity.clamp(0, 1),
       child: blurred,
@@ -1328,6 +1619,7 @@ ColorScheme _seedColorScheme(
   );
 }
 
+/// Keeps system bars transparent so inset surfaces remain visible beneath them.
 SystemUiOverlayStyle _systemUiOverlayStyle(ColorScheme colorScheme) {
   final iconBrightness = colorScheme.brightness == Brightness.dark
       ? Brightness.light
@@ -1336,7 +1628,10 @@ SystemUiOverlayStyle _systemUiOverlayStyle(ColorScheme colorScheme) {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: iconBrightness,
     statusBarBrightness: colorScheme.brightness,
-    systemNavigationBarColor: colorScheme.surface,
+    systemStatusBarContrastEnforced: false,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
     systemNavigationBarIconBrightness: iconBrightness,
+    systemNavigationBarContrastEnforced: false,
   );
 }

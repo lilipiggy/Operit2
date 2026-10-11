@@ -1,0 +1,110 @@
+PODS:
+  - audioplayers_darwin (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - desktop_drop (0.0.1):
+    - FlutterMacOS
+  - desktop_multi_window (0.0.1):
+    - FlutterMacOS
+  - desktop_widgets_macos (0.1.0):
+    - FlutterMacOS
+  - dynamic_color (0.0.3):
+    - FlutterMacOS
+  - file_selector_macos (0.0.1):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+  - geolocator_apple (1.2.0):
+    - Flutter
+    - FlutterMacOS
+  - image_picker_macos (0.0.1):
+    - FlutterMacOS
+  - operit_folder_access (0.1.0):
+    - FlutterMacOS
+  - package_info_plus (0.0.1):
+    - FlutterMacOS
+  - printing (1.0.0):
+    - FlutterMacOS
+  - record_macos (1.2.1):
+    - FlutterMacOS
+  - url_launcher_macos (0.0.1):
+    - FlutterMacOS
+  - video_player_avfoundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - webview_flutter_wkwebview (0.0.1):
+    - Flutter
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - audioplayers_darwin (from `Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin`)
+  - desktop_drop (from `Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos`)
+  - desktop_multi_window (from `Flutter/ephemeral/.symlinks/plugins/desktop_multi_window/macos`)
+  - desktop_widgets_macos (from `Flutter/ephemeral/.symlinks/plugins/desktop_widgets_macos/macos`)
+  - dynamic_color (from `Flutter/ephemeral/.symlinks/plugins/dynamic_color/macos`)
+  - file_selector_macos (from `Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - geolocator_apple (from `Flutter/ephemeral/.symlinks/plugins/geolocator_apple/darwin`)
+  - image_picker_macos (from `Flutter/ephemeral/.symlinks/plugins/image_picker_macos/macos`)
+  - operit_folder_access (from `Flutter/ephemeral/.symlinks/plugins/operit_folder_access/macos`)
+  - package_info_plus (from `Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos`)
+  - printing (from `Flutter/ephemeral/.symlinks/plugins/printing/macos`)
+  - record_macos (from `Flutter/ephemeral/.symlinks/plugins/record_macos/macos`)
+  - url_launcher_macos (from `Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos`)
+  - video_player_avfoundation (from `Flutter/ephemeral/.symlinks/plugins/video_player_avfoundation/darwin`)
+  - webview_flutter_wkwebview (from `Flutter/ephemeral/.symlinks/plugins/webview_flutter_wkwebview/darwin`)
+
+EXTERNAL SOURCES:
+  audioplayers_darwin:
+    :path: Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin
+  desktop_drop:
+    :path: Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos
+  desktop_multi_window:
+    :path: Flutter/ephemeral/.symlinks/plugins/desktop_multi_window/macos
+  desktop_widgets_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/desktop_widgets_macos/macos
+  dynamic_color:
+    :path: Flutter/ephemeral/.symlinks/plugins/dynamic_color/macos
+  file_selector_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  geolocator_apple:
+    :path: Flutter/ephemeral/.symlinks/plugins/geolocator_apple/darwin
+  image_picker_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/image_picker_macos/macos
+  operit_folder_access:
+    :path: Flutter/ephemeral/.symlinks/plugins/operit_folder_access/macos
+  package_info_plus:
+    :path: Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos
+  printing:
+    :path: Flutter/ephemeral/.symlinks/plugins/printing/macos
+  record_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/record_macos/macos
+  url_launcher_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/url_launcher_macos/macos
+  video_player_avfoundation:
+    :path: Flutter/ephemeral/.symlinks/plugins/video_player_avfoundation/darwin
+  webview_flutter_wkwebview:
+    :path: Flutter/ephemeral/.symlinks/plugins/webview_flutter_wkwebview/darwin
+
+SPEC CHECKSUMS:
+  audioplayers_darwin: f15e209a3e856d1a7edcf98dc029f484fead2242
+  desktop_drop: 1eeeb9484299585770b6461e4f3d60950e99efa2
+  desktop_multi_window: d3d11c0c355f438e201de7c57569f95826ff97ba
+  desktop_widgets_macos: 9b54eff81606e0ecbddd972d1dd1044bb3b193fe
+  dynamic_color: b0b28f4bc541eb1a011f49579adedf0ff836adee
+  file_selector_macos: 3e56eaea051180007b900eacb006686fd54da150
+  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  geolocator_apple: 66b711889fd333205763b83c9dcf0a57a28c7afd
+  image_picker_macos: 2506ff19cb68903beebc6327ce4024277de6faa8
+  operit_folder_access: e49c215aae854e85a2c736a3105f8992373a9768
+  package_info_plus: 12f1c5c2cfe8727ca46cbd0b26677728972d9a5b
+  printing: 1dd6a1fce2209ec240698e2439a4adbb9b427637
+  record_macos: ccd7864c9922136e50c2937b21384f0b175922f2
+  url_launcher_macos: 175a54c831f4375a6cf895875f716ee5af3888ce
+  video_player_avfoundation: e54d03b3b19f64f2c557354f72ce538387541ba6
+  webview_flutter_wkwebview: 29eb20d43355b48fe7d07113835b9128f84e3af4
+
+PODFILE CHECKSUM: e2fc82dac137dd48666364415e889af5af164465
+
+COCOAPODS: 1.16.2

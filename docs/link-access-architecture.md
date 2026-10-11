@@ -31,6 +31,24 @@ CoreNodeRouter
 Space 的调用、同步和跨端流全部从 CoreNodeRouter 接出。PeerLink 是节点之间的
 双向数据载体，Flutter/CLI Proxy 不参与这条链路。
 
+设备 Edge 节点属于目标 Core 对象的一种实现：
+
+```text
+CoreNodeRouter / PeerLink carrier
+  -> Edge Node transport adapter
+  -> operit-node-edge
+  -> Edge Service
+  -> Host API capability
+```
+
+`operit-proxy-edge` 只提供类型化的 Edge Service 投影。Edge 地址由
+`operit-edge-contract` 共享；Proxy 不依赖本地 Edge Node 实现，传输 carrier 也不进入
+app 层。
+
+这里的 Edge Node 不是完整架构中的 `CoreNode`。完整 `CoreNode` 仍由
+`OperitApplication + LocalCoreProxy + HostManager` 组成，并拥有身份、Space、持久化和
+Agent/Chat 运行时；Edge Node 只提供设备侧服务对象，作为完整 CoreNode 的设备能力端点。
+
 ## 2. Link Access 的职责
 
 Link Access 只提供控制面和 PeerLink carrier：
@@ -54,9 +72,13 @@ Link Access 只提供控制面和 PeerLink carrier：
 
 | 模块 | 负责 | 不负责 |
 | --- | --- | --- |
-| `operit-proxy-local` | 生成本地 Proxy、对象 id 和本地 dispatch | Space 路由、设备信任、远程 session |
+| `operit-proxy-local` | 生成本地 Proxy、字符串 target 和本地 dispatch | Space 路由、设备信任、远程 session |
 | `operit-node-runtime` | `CoreNodeRouter`、Space 路由、Binding 同步和本地 Core 目标解析 | Flutter/CLI 入口协议 |
-| `operit-access-runtime` | 配对控制面、session、签名验证、PeerLink HTTP/WebSocket carrier | 本地 Proxy 调用投影 |
+| `operit-node-runtime::remote` | 节点配对、session、签名验证、连接管理及服务端接入 | 本地 Proxy 调用投影 |
+| `operit-peer-link`（`node/peer-link`） | 共用 PeerLink 引擎和 HTTP/WebSocket/TCP/serial transport | 配对策略、存储、业务运行时 |
+| `operit-edge-contract` | Edge Service object/property address contract | Host implementation、Link dispatch、Access session |
+| `operit-node-edge` | 设备侧 Edge Node、Edge Service、Host capability dispatch | 桌面 runtime、Provider、ToolPkg、Chat、Access 控制面 |
+| `operit-proxy-edge` | Edge Service 的类型化 Proxy facade | 本地 Node 实现、Host implementation、Access session |
 | `operit-link` | Core 值、调用/观察/反向流类型和通用错误模型 | 设备配对、session 存储和业务路由 |
 | `operit-runtime` | Holder、Slot、ChatServiceCore 和运行时状态 | 节点间传输和配对 |
 | Flutter / CLI | 调用生成的本地 Proxy、展示 Access 状态 | 自行拼装远程路由或 PeerFrame |
@@ -70,7 +92,7 @@ RoutedCoreRequest<T> {
   spaceId
   targetNodeId
   ttl
-  routeKind: ObjectId | SpaceRoute
+  routeKind: Target | SpaceRoute
   payload: T
 }
 ```
@@ -89,8 +111,9 @@ PeerRequest::PushItem(CorePushItem)
 PeerRequest::PushClose(PeerPushCloseRequest)
 ```
 
-`targetObjectId` 是生成器分配的对象地址。SpaceRoute 由 route 注解生成的注册表
-解析；本地 Proxy 的对象 id 不会被当成远程链路入口。不存在分段对象路径或手写对象路径。
+`target` 是稳定字符串地址：本地 Proxy/SDK 使用 `core/<schema_key>`，SpaceRoute 使用
+`space/<target_type>/<method>`。两者都不再按声明顺序分配编号。路由名属于公共协议，
+新增声明不改变已有地址；改名属于破坏性变更。Peer 协议版本为 4，不接受旧数字寻址。
 
 ## 5. PeerFrame 载体
 

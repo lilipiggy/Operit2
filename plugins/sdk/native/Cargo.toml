@@ -1,0 +1,17 @@
+[package]
+name = "operit-plugin-sdk-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "operit_plugin_sdk"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+operit-plugin-sdk-host = { path = "../../../hosts/plugin-sdk-client" }
+operit-host-api = { path = "../../../core/crates/foundation/host-api" }
+jni = "0.21"
+
+[dev-dependencies]
+operit-host-native-plugin-sdk-ipc = { path = "../../../hosts/common/operit-host-native-plugin-sdk-ipc" }

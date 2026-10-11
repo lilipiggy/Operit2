@@ -25,7 +25,7 @@ pub struct ToolPkgMessageProcessingHookRegistration {
 }
 
 /// Registration for one XML render plugin.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(non_snake_case)]
 pub struct ToolPkgXmlRenderHookRegistration {
     pub containerPackageName: String,
@@ -69,6 +69,49 @@ pub struct ToolPkgChatViewHookRegistration {
 #[derive(Clone, Debug)]
 #[allow(non_snake_case)]
 pub struct ToolPkgChatMessageHookRegistration {
+    pub containerPackageName: String,
+    pub hookId: String,
+    pub functionName: String,
+    pub functionSource: Option<String>,
+}
+
+/// Registration for one manifest extension handler owned by a ToolPkg.
+#[derive(Clone, Debug)]
+#[allow(non_snake_case)]
+pub struct ToolPkgManifestExtensionRegistration {
+    pub containerPackageName: String,
+    pub extensionKey: String,
+    pub functionName: String,
+    pub functionSource: Option<String>,
+}
+
+/// Registration for one chat message context-menu item.
+#[derive(Clone, Debug)]
+#[allow(non_snake_case)]
+pub struct ToolPkgChatMessageMenuDialogRegistration {
+    pub screen: String,
+    pub title: crate::package::LocalizedText,
+}
+
+/// Registration for one chat message context-menu item.
+#[derive(Clone, Debug)]
+#[allow(non_snake_case)]
+pub struct ToolPkgChatMessageMenuItemRegistration {
+    pub containerPackageName: String,
+    pub itemId: String,
+    pub title: crate::package::LocalizedText,
+    pub icon: Option<String>,
+    pub order: i32,
+    pub senders: Vec<String>,
+    pub functionName: String,
+    pub functionSource: Option<String>,
+    pub dialog: Option<ToolPkgChatMessageMenuDialogRegistration>,
+}
+
+/// Registration for one chat runtime-state hook.
+#[derive(Clone, Debug)]
+#[allow(non_snake_case)]
+pub struct ToolPkgChatRuntimeHookRegistration {
     pub containerPackageName: String,
     pub hookId: String,
     pub functionName: String,
@@ -154,7 +197,7 @@ pub trait ToolPkgHookDispatcher: Send + Sync {
         &self,
         enabledPackageNames: &[String],
         invocation: ToolPkgHookInvocation,
-    ) -> Result<Option<String>, String>;
+    ) -> crate::javascript::JsExecutionCompletion<Result<Option<String>, String>>;
 }
 
 /// Decodes a hook output as JSON when the output contains valid JSON.

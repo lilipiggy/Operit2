@@ -40,7 +40,8 @@ public class WebViewProxyApi extends PigeonApiWebView {
     private WebChromeClientProxyApi.SecureWebChromeClient currentWebChromeClient;
 
     WebViewPlatformView(@NonNull WebViewProxyApi api) {
-      super(api.getPigeonRegistrar().getContext());
+      super(WebViewTheme.createContext(api.getPigeonRegistrar().getContext()));
+      WebViewTheme.register(this);
       this.api = api;
       currentWebViewClient = new WebViewClient();
       currentWebChromeClient = new WebChromeClientProxyApi.SecureWebChromeClient();

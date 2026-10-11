@@ -245,12 +245,6 @@ impl SystemOperationHost for OhosSystemOperationHost {
         (self.languageReader)()
     }
 
-    /// Shows a toast through the OpenHarmony owner app.
-    fn toast(&self, message: &str) -> HostResult<()> {
-        self.execute("toast", json!({ "message": message }))?;
-        Ok(())
-    }
-
     /// Sends a notification through the OpenHarmony owner app.
     fn sendNotification(&self, request: &SystemNotificationRequest) -> HostResult<()> {
         self.execute(

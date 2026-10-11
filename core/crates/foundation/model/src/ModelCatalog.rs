@@ -5,45 +5,50 @@ use crate::BillingMode::BillingMode;
 use crate::ModelConfigData::{
     BuiltinToolExclusivity, BuiltinToolRequestFormat, BuiltinToolType, ModelBuiltinTool,
     ModelCapabilities, ModelCatalogEntry, ModelContextSpec, ModelPricing, ModelRequestSpec,
-    PricingCurrency, ProviderCatalogEntry, ProviderOperationResultSpec, ProviderOperationSpec,
+    PricingCurrency, ProviderCatalogEntry, ProviderEndpointOption, ProviderOperationResultSpec,
+    ProviderOperationSpec,
 };
 
 pub struct ModelCatalog;
 
 const MODEL_CATALOG_PROVIDER_ROWS: &str = r#"
-OPENAI|OpenAI|https://api.openai.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-OPENAI_RESPONSES|OpenAI Responses|https://api.openai.com/v1/responses|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-OPENAI_RESPONSES_GENERIC|OpenAI Responses Generic||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-OPENAI_GENERIC|OpenAI Generic||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-ANTHROPIC|Anthropic|https://api.anthropic.com/v1/messages|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-ANTHROPIC_GENERIC|Anthropic Generic||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-GOOGLE|Google Gemini|https://generativelanguage.googleapis.com/v1beta/models|list_models:GET:/v1beta/models:$.models:$.name:::::::::::::true
-GEMINI_GENERIC|Gemini Generic||list_models:GET:/v1beta/models:$.models:$.name:::::::::::::true
-BAIDU|Baidu|https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions|
-ALIYUN|Aliyun|https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions|list_models:GET:/compatible-mode/v1/models:$.data:$.id:::::::::::::true
-XUNFEI|Xunfei|https://spark-api-open.xf-yun.com/v2/chat/completions|
-ZHIPU|Zhipu AI|https://open.bigmodel.cn/api/paas/v4/chat/completions|list_models:GET:/api/paas/v4/models:$.data:$.id:::::::::::::true
-BAICHUAN|Baichuan|https://api.baichuan-ai.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-MOONSHOT|Moonshot|https://api.moonshot.cn/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-MIMO|MiMo|https://api.xiaomimimo.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-DEEPSEEK|DeepSeek|https://api.deepseek.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true,balance:GET:/user/balance:$.balance_infos[0].total_balance:$.balance_infos[0].currency:true
-MISTRAL|Mistral|https://codestral.mistral.ai/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-SILICONFLOW|SiliconFlow|https://api.siliconflow.cn/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true,balance:GET:/v1/user/info:$.data.balance::true
-IFLOW|iFlow|https://apis.iflow.cn/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-OPENROUTER|OpenRouter|https://openrouter.ai/api/v1/chat/completions|list_models:GET:/api/v1/models:$.data:$.id:$.pricing.prompt:$.pricing.input_cache_read:$.pricing.completion::USD:$.context_length:$.architecture.input_modalities~image:$.architecture.input_modalities~audio:$.architecture.input_modalities~video::$.supported_parameters~tools:$.supported_parameters~tools:true,balance:GET:/api/v1/credits:$.data.total_credits::true
-FOUR_ROUTER|4Router|https://4router.net/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-NOUS_PORTAL|Nous Portal|https://inference-api.nousresearch.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-INFINIAI|InfiniAI|https://cloud.infini-ai.com/maas/v1/chat/completions|list_models:GET:/maas/v1/models:$.data:$.id:::::::::::::true
-ALIPAY_BAILING|Alipay Bailing|https://api.tbox.cn/api/llm/v1/chat/completions|list_models:GET:/api/llm/v1/models:$.data:$.id:::::::::::::true
-DOUBAO|Doubao|https://ark.cn-beijing.volces.com/api/v3/chat/completions|list_models:GET:/api/v3/models:$.data:$.id:::::::::::::true
-NVIDIA|NVIDIA|https://integrate.api.nvidia.com/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
-LMSTUDIO|LM Studio|http://localhost:1234/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::false
-OLLAMA|Ollama|http://localhost:11434/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::false
-OPENAI_LOCAL|OpenAI Local|http://localhost:8000/v1/chat/completions|list_models:GET:/v1/models:$.data:$.id:::::::::::::false
-LOCAL_MODEL|Local Models||
-PPINFRA|PPInfra|https://api.ppinfra.com/openai/v1/chat/completions|list_models:GET:/openai/v1/models:$.data:$.id:::::::::::::true
-NOVITA|Novita AI|https://api.novita.ai/openai/v1/chat/completions|list_models:GET:/openai/v1/models:$.data:$.id:::::::::::::true
-OTHER|Other||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OPENAI|OpenAI|https://api.openai.com/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+XAI|xAI|https://api.x.ai/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OPENAI_RESPONSES|OpenAI Responses|https://api.openai.com/v1/responses||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OPENAI_CODEX|OpenAI Codex|https://chatgpt.com/backend-api/codex/responses||
+OPENAI_RESPONSES_GENERIC|OpenAI Responses Generic|||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OPENAI_GENERIC|OpenAI Generic|||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+ANTHROPIC|Anthropic|https://api.anthropic.com/v1/messages||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+ANTHROPIC_GENERIC|Anthropic Generic|||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+GOOGLE|Google Gemini|https://generativelanguage.googleapis.com/v1beta/models||list_models:GET:/v1beta/models:$.models:$.name:::::::::::::true
+GEMINI_GENERIC|Gemini Generic|||list_models:GET:/v1beta/models:$.models:$.name:::::::::::::true
+BAIDU|Baidu|https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions||
+ALIYUN|Aliyun|https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions||list_models:GET:/compatible-mode/v1/models:$.data:$.id:::::::::::::true
+XUNFEI|Xunfei|https://spark-api-open.xf-yun.com/v2/chat/completions||
+ZHIPU|Zhipu AI|https://open.bigmodel.cn/api/paas/v4/chat/completions|https://open.bigmodel.cn/api/paas/v4/chat/completions~CN standard;https://open.bigmodel.cn/api/coding/paas/v4/chat/completions~CN coding;https://api.z.ai/api/paas/v4/chat/completions~International standard;https://api.z.ai/api/coding/paas/v4/chat/completions~International coding|list_models:GET:/api/paas/v4/models:$.data:$.id:::::::::::::true
+BAICHUAN|Baichuan|https://api.baichuan-ai.com/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+MOONSHOT|Moonshot|https://api.moonshot.cn/v1/chat/completions|https://api.moonshot.cn/v1/chat/completions~China (moonshot.cn);https://api.moonshot.ai/v1/chat/completions~International (moonshot.ai);https://api.kimi.com/coding/v1/chat/completions~Kimi Code (api.kimi.com)|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+MIMO|MiMo|https://api.xiaomimimo.com/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+DEEPSEEK|DeepSeek|https://api.deepseek.com/v1/chat/completions|https://api.deepseek.com/v1/chat/completions~Chat Completions;https://api.deepseek.com/v1/responses~Responses|list_models:GET:/v1/models:$.data:$.id:::::::::::::true,balance:GET:/user/balance:$.balance_infos[0].total_balance:$.balance_infos[0].currency:true
+MISTRAL|Mistral|https://codestral.mistral.ai/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+SILICONFLOW|SiliconFlow|https://api.siliconflow.cn/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true,balance:GET:/v1/user/info:$.data.balance::true
+IFLOW|iFlow|https://apis.iflow.cn/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OPENROUTER|OpenRouter|https://openrouter.ai/api/v1/chat/completions||list_models:GET:/api/v1/models:$.data:$.id:$.pricing.prompt:$.pricing.input_cache_read:$.pricing.completion::USD:$.context_length:$.architecture.input_modalities~image:$.architecture.input_modalities~audio:$.architecture.input_modalities~video::$.supported_parameters~tools:$.supported_parameters~tools:true,balance:GET:/api/v1/credits:$.data.total_credits::true
+OPENCODE|OpenCode|https://opencode.ai/zen|https://opencode.ai/zen~Zen;https://opencode.ai/zen/go~Go|list_models:GET:/v1/models:$.data:$.id:::::::::::::false
+FOUR_ROUTER|4Router|https://4router.net/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+NOUS_PORTAL|Nous Portal|https://inference-api.nousresearch.com/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+INFINIAI|InfiniAI|https://cloud.infini-ai.com/maas/v1/chat/completions||list_models:GET:/maas/v1/models:$.data:$.id:::::::::::::true
+ALIPAY_BAILING|Alipay Bailing|https://api.tbox.cn/api/llm/v1/chat/completions||list_models:GET:/api/llm/v1/models:$.data:$.id:::::::::::::true
+DOUBAO|Doubao|https://ark.cn-beijing.volces.com/api/v3/chat/completions|https://ark.cn-beijing.volces.com/api/v3/chat/completions~CN standard;https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions~CN coding|list_models:GET:/api/v3/models:$.data:$.id:::::::::::::true
+NVIDIA|NVIDIA|https://integrate.api.nvidia.com/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+LMSTUDIO|LM Studio|http://localhost:1234/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::false
+OLLAMA|Ollama|http://localhost:11434/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::false
+OPENAI_LOCAL|OpenAI Local|http://localhost:8000/v1/chat/completions||list_models:GET:/v1/models:$.data:$.id:::::::::::::false
+LOCAL_MODEL|Local Models|||
+PPINFRA|PPInfra|https://api.ppinfra.com/openai/v1/chat/completions||list_models:GET:/openai/v1/models:$.data:$.id:::::::::::::true
+NOVITA|Novita AI|https://api.novita.ai/openai/v1/chat/completions|https://api.novita.ai/openai/v1/chat/completions~OpenAI-compatible;https://api.novita.ai/anthropic/v1/messages~Anthropic-compatible|list_models:GET:/openai/v1/models:$.data:$.id:::::::::::::true
+MINIMAX|MiniMax|https://api.minimaxi.com/v1/chat/completions|https://api.minimaxi.com/v1/chat/completions~China (minimaxi.com);https://api.minimax.io/v1/chat/completions~International (minimax.io)|list_models:GET:/v1/models:$.data:$.id:::::::::::::true
+OTHER|Other|||list_models:GET:/v1/models:$.data:$.id:::::::::::::true
 "#;
 
 impl ModelCatalog {
@@ -72,7 +77,7 @@ impl ModelCatalog {
         let mut providers = Vec::new();
         for line in dataLines(MODEL_CATALOG_PROVIDER_ROWS) {
             let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() != 4 {
+            if parts.len() != 5 {
                 return Err(format!("invalid provider catalog row: {line}"));
             }
             let providerTypeId = parts[0].trim().to_string();
@@ -85,7 +90,8 @@ impl ModelCatalog {
                 providerTypeId,
                 displayName: parts[1].trim().to_string(),
                 defaultEndpoint: parts[2].trim().to_string(),
-                operations: parseOperations(parts[3])?,
+                endpointOptions: parseEndpointOptions(parts[3])?,
+                operations: parseOperations(parts[4])?,
                 models: providerModels,
             });
         }
@@ -106,6 +112,33 @@ fn dataLines(rows: &str) -> impl Iterator<Item = &str> {
     rows.lines().map(str::trim).filter(|line| !line.is_empty())
 }
 
+/// Parses selectable endpoint entries from a provider catalog row.
+#[allow(non_snake_case)]
+fn parseEndpointOptions(value: &str) -> Result<Vec<ProviderEndpointOption>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    trimmed.split(';').map(parseEndpointOption).collect()
+}
+
+/// Parses one selectable endpoint entry from endpoint and label text.
+#[allow(non_snake_case)]
+fn parseEndpointOption(value: &str) -> Result<ProviderEndpointOption, String> {
+    let Some((endpoint, label)) = value.split_once('~') else {
+        return Err(format!("invalid provider endpoint option: {value}"));
+    };
+    let endpoint = endpoint.trim();
+    let label = label.trim();
+    if endpoint.is_empty() || label.is_empty() {
+        return Err(format!("invalid provider endpoint option: {value}"));
+    }
+    Ok(ProviderEndpointOption {
+        endpoint: endpoint.to_string(),
+        label: label.to_string(),
+    })
+}
+
 #[allow(non_snake_case)]
 fn terminalModelId(modelId: &str) -> &str {
     modelId.rsplit('/').next().unwrap_or(modelId)
@@ -119,7 +152,7 @@ fn parseModelRows(rows: &str) -> Result<Vec<ModelCatalogEntry>, String> {
 #[allow(non_snake_case)]
 fn parseModelRow(line: &str) -> Result<ModelCatalogEntry, String> {
     let parts: Vec<&str> = line.split('|').collect();
-    if parts.len() != 16 {
+    if parts.len() != 15 {
         return Err(format!("invalid model catalog row: {line}"));
     }
     let billingMode = BillingMode::fromString(parts[2])?;
@@ -136,37 +169,58 @@ fn parseModelRow(line: &str) -> Result<ModelCatalogEntry, String> {
             billingMode,
             inputPricePerMillion,
             cachedInputPricePerMillion,
+            cacheWritePricePerMillion: None,
             outputPricePerMillion,
             pricePerRequest,
             currency,
         }),
         context: Some(ModelContextSpec {
             maxContextLength: parseF32(parts[8], "max context length", line)?,
-            enableMaxContextMode: parseBool(parts[9], "enable max context mode", line)?,
         }),
         capabilities: Some(ModelCapabilities {
-            directImage: parseBool(parts[10], "direct image", line)?,
-            directAudio: parseBool(parts[11], "direct audio", line)?,
-            directVideo: parseBool(parts[12], "direct video", line)?,
-            toolCall: parseBool(parts[14], "tool call", line)?,
+            directImage: parseBool(parts[9], "direct image", line)?,
+            directAudio: parseBool(parts[10], "direct audio", line)?,
+            directVideo: parseBool(parts[11], "direct video", line)?,
+            toolCall: parseBool(parts[13], "tool call", line)?,
         }),
-        builtinTools: parseCatalogBuiltinTools(parts[13], line)?,
+        builtinTools: parseCatalogBuiltinTools(parts[0], parts[12], line)?,
         request: Some(ModelRequestSpec {
-            supportsStructuredTools: parseBool(parts[15], "structured tools", line)?,
+            supportsStructuredTools: parseBool(parts[14], "structured tools", line)?,
+            ..ModelRequestSpec::default()
         }),
     })
 }
 
 #[allow(non_snake_case)]
-fn parseCatalogBuiltinTools(value: &str, line: &str) -> Result<Vec<ModelBuiltinTool>, String> {
+/// Parses the provider-specific built-in web-search capability.
+fn parseCatalogBuiltinTools(
+    providerTypeId: &str,
+    value: &str,
+    line: &str,
+) -> Result<Vec<ModelBuiltinTool>, String> {
     if !parseBool(value, "builtin web search", line)? {
         return Ok(Vec::new());
     }
+    let (requestFormat, exclusivity) = match providerTypeId.trim() {
+        "OPENAI_RESPONSES" | "OPENAI_RESPONSES_GENERIC" | "DEEPSEEK" | "OPENAI_CODEX" => (
+            BuiltinToolRequestFormat::OpenAiWebSearch,
+            BuiltinToolExclusivity::CanMixWithExternalTools,
+        ),
+        "GOOGLE" | "GEMINI_GENERIC" => (
+            BuiltinToolRequestFormat::GeminiGoogleSearch,
+            BuiltinToolExclusivity::ExclusiveWithExternalTools,
+        ),
+        provider => {
+            return Err(format!(
+                "provider {provider} declares unsupported builtin web search: {line}"
+            ));
+        }
+    };
     Ok(vec![ModelBuiltinTool::disabled(
         BuiltinToolType::WebSearch,
         "内置联网搜索".to_string(),
-        BuiltinToolRequestFormat::GeminiGoogleSearch,
-        BuiltinToolExclusivity::ExclusiveWithExternalTools,
+        requestFormat,
+        exclusivity,
     )])
 }
 
@@ -340,6 +394,21 @@ mod tests {
         assert!(model.request.is_some());
     }
 
+    /// Verifies cc-switch catalog rows carry seed pricing.
+    #[test]
+    fn ccswitch_catalog_row_has_pricing() {
+        let model = ModelCatalog::model("MIMO", "mimo-v2.5-pro").expect("MiMo catalog entry");
+        let pricing = model.pricing.expect("MiMo pricing");
+        let context = model.context.expect("MiMo context");
+        let capabilities = model.capabilities.expect("MiMo capabilities");
+
+        assert_eq!(model.providerTypeId, "MIMO");
+        assert!((pricing.inputPricePerMillion - 0.435).abs() < 0.001);
+        assert!((pricing.outputPricePerMillion - 0.87).abs() < 0.001);
+        assert!((context.maxContextLength - 1048.576).abs() < 0.001);
+        assert!(!capabilities.directImage);
+    }
+
     /// Verifies the generic provider can fetch OpenAI-compatible model lists.
     #[test]
     fn other_provider_has_model_list_operation() {
@@ -355,5 +424,17 @@ mod tests {
         assert!(operation.requiresApiKey);
         assert_eq!(operation.result.itemsJsonPath.as_deref(), Some("$.data"));
         assert_eq!(operation.result.itemIdJsonPath.as_deref(), Some("$.id"));
+    }
+
+    #[test]
+    fn openai_codex_provider_has_catalog_models_with_fast_variants() {
+        let provider = ModelCatalog::provider("OPENAI_CODEX").expect("OPENAI_CODEX catalog entry");
+        assert!(!provider.models.is_empty());
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-5.5"));
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-5.5-fast"));
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-5.4"));
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-5.4-fast"));
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-6-astra"));
+        assert!(provider.models.iter().any(|model| model.modelId == "gpt-6-astra-fast"));
     }
 }

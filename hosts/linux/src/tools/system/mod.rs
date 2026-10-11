@@ -28,24 +28,6 @@ impl SystemOperationHost for LinuxSystemOperationHost {
         get_linux_system_language_code()
     }
 
-    fn toast(&self, message: &str) -> HostResult<()> {
-        if message.trim().is_empty() {
-            return Err(HostError::new("Must provide message parameter"));
-        }
-        let status = Command::new("notify-send")
-            .arg("Operit")
-            .arg(message)
-            .status()
-            .map_err(|error| HostError::new(format!("Toast failed: {error}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(HostError::new(format!(
-                "Toast command exited with {status}"
-            )))
-        }
-    }
-
     fn sendNotification(&self, request: &SystemNotificationRequest) -> HostResult<()> {
         let title = if request.title.trim().is_empty() {
             "Notification"
@@ -921,9 +903,9 @@ fn linux_battery_info() -> HostResult<(i32, bool)> {
             return Ok((level, charging));
         }
     }
-    Err(HostError::new(
-        "Linux battery information was not found in /sys/class/power_supply",
-    ))
+    // Battery-less machines (desktops) expose no Battery entry; report the
+    // same 0/false default as the Windows host instead of failing device info.
+    Ok((0, false))
 }
 
 fn linux_network_type() -> HostResult<String> {

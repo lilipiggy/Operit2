@@ -24,7 +24,7 @@ impl SourceRoot {
 
 #[derive(Clone, Debug)]
 pub struct ObjectSpec {
-    pub object_id: u32,
+    pub object_id: String,
     pub schema_key: String,
     pub dispatch_name: String,
     pub type_name: String,
@@ -138,7 +138,7 @@ impl TypeRegistry {
 
 #[derive(Clone, Debug)]
 pub struct SourceObject {
-    pub object_id: u32,
+    pub object_id: String,
     pub schema_key: String,
     pub dispatch_name: String,
     pub full_type: String,
@@ -162,6 +162,13 @@ impl SourceObject {
         self.methods
             .iter()
             .any(|method| !method.is_async && method.call_protocol().is_some())
+    }
+
+    /// Returns whether generated async call dispatch has direct async calls.
+    pub fn has_async_call_dispatch(&self) -> bool {
+        self.methods
+            .iter()
+            .any(|method| method.is_async && method.call_protocol().is_some())
     }
 
     /// Returns whether generated proxy calls need the typed value helper.
@@ -203,6 +210,7 @@ impl SourceObject {
 #[derive(Clone, Debug)]
 pub struct SourceMethod {
     pub name: String,
+    pub sdk_exposed: bool,
     pub args: Vec<SourceArg>,
     pub rust_return_type: String,
     pub is_async: bool,
@@ -247,6 +255,7 @@ pub struct SerializableField {
     pub name: String,
     pub json_name: String,
     pub ty: String,
+    pub has_serde_default: bool,
 }
 
 #[derive(Clone, Debug)]

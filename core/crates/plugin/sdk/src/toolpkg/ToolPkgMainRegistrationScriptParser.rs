@@ -4,29 +4,39 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::javascript::{JsExecutionEngine, ToolPkgMainRegistrationCapture};
+use crate::javascript::{JsExecutionEngine, ToolPkgConfigScope, ToolPkgMainRegistrationCapture};
 use crate::package::LocalizedText;
 use crate::toolpkg::ToolPkgCommonPluginConstants::*;
 use crate::toolpkg::ToolPkgParser::{
     ToolPkgMainRegistration, ToolPkgMainRegistrationParseResult, ToolPkgMarketOrigin,
-    ToolPkgRegisteredAiProvider, ToolPkgRegisteredAppLifecycleHook, ToolPkgRegisteredDesktopWidget,
-    ToolPkgRegisteredFunctionHook, ToolPkgRegisteredHostEventHook,
+    ToolPkgRegisteredAiProvider, ToolPkgRegisteredAppLifecycleHook,
+    ToolPkgRegisteredChatComposerSlot,
+    ToolPkgRegisteredChatMessageMenuItem, ToolPkgRegisteredCoreCommand,
+    ToolPkgRegisteredDesktopWidget, ToolPkgRegisteredFunctionHook, ToolPkgRegisteredHostEventHook,
     ToolPkgRegisteredNavigationEntry, ToolPkgRegisteredTagFunctionHook, ToolPkgRegisteredUiModule,
-    ToolPkgRegisteredUiRoute,
+    ToolPkgRegisteredUiRoute, ToolPkgRegisteredManifestExtension,
 };
 
 /// Executes and validates the `registerToolPkg` declaration exported by a main script.
 pub struct ToolPkgMainRegistrationScriptParser;
 
 impl ToolPkgMainRegistrationScriptParser {
-    /// Parses ToolPkg main-script registrations without preloaded text resources.
+    /// Parses a device-scope ToolPkg main script without preloaded text resources.
     pub fn parse(
         script: &str,
         toolPkgId: &str,
         mainScriptPath: &str,
         jsEngine: &dyn JsExecutionEngine,
     ) -> ToolPkgMainRegistrationParseResult {
-        Self::parseWithTextResources(script, toolPkgId, mainScriptPath, jsEngine, None)
+        Self::parseWithTextResources(
+            script,
+            toolPkgId,
+            mainScriptPath,
+            crate::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION,
+            ToolPkgConfigScope::Device,
+            jsEngine,
+            None,
+        )
     }
 
     /// Parses ToolPkg main-script registrations with archive text resources available to JavaScript.
@@ -35,6 +45,8 @@ impl ToolPkgMainRegistrationScriptParser {
         script: &str,
         toolPkgId: &str,
         mainScriptPath: &str,
+        apiVersion: &str,
+        configScope: ToolPkgConfigScope,
         jsEngine: &dyn JsExecutionEngine,
         textResources: Option<Arc<BTreeMap<String, String>>>,
     ) -> ToolPkgMainRegistrationParseResult {
@@ -52,9 +64,18 @@ impl ToolPkgMainRegistrationScriptParser {
             Value::String(format!("registerToolPkg:{toolPkgId}")),
         );
         params.insert("__operit_registration_mode".to_string(), Value::Bool(true));
+        // The scope is fixed before module evaluation, not looked up through the loading manager.
+        params.insert(
+            "__operit_registration_config_scope".to_string(),
+            Value::String(configScope.as_str().to_string()),
+        );
         params.insert(
             "__operit_script_screen".to_string(),
             Value::String(mainScriptPath.to_string()),
+        );
+        params.insert(
+            "__operit_toolpkg_api_version".to_string(),
+            Value::String(apiVersion.to_string()),
         );
 
         let capturedResult = jsEngine
@@ -104,6 +125,7 @@ fn parseCapturedRegistration(
 ) -> Result<ToolPkgMainRegistration, String> {
     Ok(ToolPkgMainRegistration {
         marketOrigin: parseMarketOrigin(captured.marketOrigin, toolPkgId)?,
+        publicApis: parseRegisteredItems(&captured.publicApis, "public_api", toolPkgId)?,
         toolboxUiModules: parseRegisteredItems(
             &captured.toolboxUiModules,
             TOOLPKG_REGISTRATION_TOOLBOX_UI_MODULE,
@@ -112,6 +134,11 @@ fn parseCapturedRegistration(
         uiRoutes: parseRegisteredItems(
             &captured.uiRoutes,
             TOOLPKG_REGISTRATION_UI_ROUTE,
+            toolPkgId,
+        )?,
+        chatComposerSlots: parseRegisteredItems(
+            &captured.chatComposerSlots,
+            TOOLPKG_REGISTRATION_CHAT_COMPOSER_SLOT,
             toolPkgId,
         )?,
         navigationEntries: parseRegisteredItems(
@@ -157,6 +184,16 @@ fn parseCapturedRegistration(
         chatMessageHooks: parseRegisteredItems(
             &captured.chatMessageHooks,
             TOOLPKG_REGISTRATION_CHAT_MESSAGE_HOOK,
+            toolPkgId,
+        )?,
+        chatMessageMenuItems: parseRegisteredItems(
+            &captured.chatMessageMenuItems,
+            TOOLPKG_REGISTRATION_CHAT_MESSAGE_MENU_ITEM,
+            toolPkgId,
+        )?,
+        chatRuntimeHooks: parseRegisteredItems(
+            &captured.chatRuntimeHooks,
+            TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK,
             toolPkgId,
         )?,
         hostEventHooks: parseRegisteredItems(
@@ -209,9 +246,19 @@ fn parseCapturedRegistration(
             TOOLPKG_REGISTRATION_SUMMARY_GENERATE_HOOK,
             toolPkgId,
         )?,
+        coreCommands: parseRegisteredItems(
+            &captured.coreCommands,
+            TOOLPKG_REGISTRATION_CORE_COMMAND,
+            toolPkgId,
+        )?,
         aiProviders: parseRegisteredItems(
             &captured.aiProviders,
             TOOLPKG_REGISTRATION_AI_PROVIDER,
+            toolPkgId,
+        )?,
+        manifestExtensions: parseRegisteredItems(
+            &captured.manifestExtensions,
+            TOOLPKG_REGISTRATION_MANIFEST_EXTENSION,
             toolPkgId,
         )?,
     })
@@ -338,6 +385,18 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredUiRoute {
     }
 }
 
+impl ValidateToolPkgRegistration for ToolPkgRegisteredChatComposerSlot {
+    /// Preserves explicitly declared chat composer slot metadata.
+    fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {}
+
+    /// Validates one chat composer slot contribution.
+    fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
+        requireNotBlank(&self.id, "id", registryName, index)?;
+        requireNotBlank(&self.slot, "slot", registryName, index)?;
+        requireNotBlank(&self.screen, "screen", registryName, index)
+    }
+}
+
 impl ValidateToolPkgRegistration for ToolPkgRegisteredNavigationEntry {
     /// Generates a title from the navigation entry identifier when omitted.
     fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {
@@ -407,6 +466,40 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredFunctionHook {
     }
 }
 
+impl ValidateToolPkgRegistration for ToolPkgRegisteredCoreCommand {
+    /// Leaves a Core command unchanged before validation.
+    fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {}
+
+    /// Validates all required metadata and the callback of a Core command.
+    fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
+        requireNotBlank(&self.id, "id", registryName, index)?;
+        requireNotBlank(&self.name, "name", registryName, index)?;
+        if !hasLocalizedTextContent(&self.title) {
+            return Err(format!("{registryName}[{index}].title is required"));
+        }
+        if !hasLocalizedTextContent(&self.description) {
+            return Err(format!("{registryName}[{index}].description is required"));
+        }
+        requireNotBlank(&self.usage, "usage", registryName, index)?;
+        requireNotBlank(&self.function, "function", registryName, index)
+    }
+}
+
+impl ValidateToolPkgRegistration for ToolPkgRegisteredChatMessageMenuItem {
+    /// Generates a title from the menu item identifier when omitted.
+    fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {
+        if !hasLocalizedTextContent(&self.title) {
+            self.title = localizedTextOf(self.id.trim());
+        }
+    }
+
+    /// Validates the id and function of a chat message menu item.
+    fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
+        requireNotBlank(&self.id, "id", registryName, index)?;
+        requireNotBlank(&self.function, "function", registryName, index)
+    }
+}
+
 impl ValidateToolPkgRegistration for ToolPkgRegisteredHostEventHook {
     /// Leaves a host event hook unchanged before validation.
     fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {}
@@ -427,6 +520,19 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredTagFunctionHook {
     fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
         requireNotBlank(&self.id, "id", registryName, index)?;
         requireNotBlank(&self.tag, "tag", registryName, index)?;
+        requireNotBlank(&self.function, "function", registryName, index)
+    }
+}
+
+impl ValidateToolPkgRegistration for ToolPkgRegisteredManifestExtension {
+    /// Normalizes manifest extension keys before validation.
+    fn normalize(&mut self, _registryName: &str, _index: usize, _toolPkgId: &str) {
+        self.key = self.key.trim().to_string();
+    }
+
+    /// Validates one manifest extension handler registration.
+    fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
+        requireNotBlank(&self.key, "key", registryName, index)?;
         requireNotBlank(&self.function, "function", registryName, index)
     }
 }
@@ -487,6 +593,15 @@ mod tests {
                 r#"{"id":"nav","route":"main_route","surface":"toolbox"}"#.to_string()
             ],
             desktopWidgets: vec![r#"{"id":"widget","route":"main_route"}"#.to_string()],
+            coreCommands: vec![r#"{
+                    "id":"hello_command",
+                    "name":"hello",
+                    "title":{"en":"Hello","zh":"你好"},
+                    "description":{"en":"Greets the user","zh":"问候用户"},
+                    "usage":"/hello <name>",
+                    "function":"runHello"
+                }"#
+            .to_string()],
             aiProviders: vec![r#"{
                     "id":"provider",
                     "listModels":{"function":"listModels"},
@@ -528,6 +643,10 @@ mod tests {
 
         assert_eq!(registration.desktopWidgets[0].renderRouteId, "main_route");
         assert_eq!(registration.desktopWidgets[0].title.resolve(true), "widget");
+
+        assert_eq!(registration.coreCommands[0].name, "hello");
+        assert_eq!(registration.coreCommands[0].title.resolve(true), "Hello");
+        assert_eq!(registration.coreCommands[0].function, "runHello");
 
         assert_eq!(registration.aiProviders[0].displayName, "provider");
         assert_eq!(

@@ -1,0 +1,38 @@
+name: desktop_widgets
+description: Content-only desktop widget windows with a platform-neutral Flutter API.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+  flutter: '>=3.32.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  desktop_widgets_platform_interface:
+    path: ../desktop_widgets_platform_interface
+  desktop_widgets_windows:
+    path: ../desktop_widgets_windows
+  desktop_widgets_macos:
+    path: ../desktop_widgets_macos
+  desktop_widgets_linux:
+    path: ../desktop_widgets_linux
+  desktop_widgets_android:
+    path: ../desktop_widgets_android
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        default_package: desktop_widgets_android
+      windows:
+        default_package: desktop_widgets_windows
+      macos:
+        default_package: desktop_widgets_macos
+      linux:
+        default_package: desktop_widgets_linux

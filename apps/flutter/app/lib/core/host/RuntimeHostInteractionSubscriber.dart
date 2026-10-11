@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../bridge/PlatformCoreProxy.dart';
 import '../bridge/ProxyCoreRuntimeBridge.dart';
@@ -15,6 +16,7 @@ import '../proxy/generated/CoreProxyClients.g.dart';
 import '../proxy/generated/CoreProxyModels.g.dart';
 import '../web_visit/WebVisitBridge.dart';
 import '../web_visit/WebVisitModels.dart';
+import 'AppToastController.dart';
 import 'ComposeDslFilePickerService.dart';
 import 'ComposeWebViewControllerBridge.dart';
 import 'browser/RuntimeBrowserSessionRegistry.dart';
@@ -83,16 +85,21 @@ class RuntimeHostInteractionSubscriber {
   static _BrowserInteractHostStats _browserInteractHostStats =
       _BrowserInteractHostStats();
 
+  /// Returns whether the owner host interaction stream is currently subscribed.
+  static bool get isInstalled => _subscription != null;
+
   /// Installs the owner host interaction stream listener.
   static void install() {
     if (_subscription != null) {
       return;
     }
-    _subscription = _clients.servicesRuntimeHostInteractionService
+    late final StreamSubscription<RuntimeHostInteractionRequest> subscription;
+    subscription = _clients.servicesRuntimeHostInteractionService
         .ownerHostInteractionEvents(kinds: _ownerKinds)
         .listen(
           (event) => unawaited(_handleEvent(event)),
           onError: (Object error, StackTrace stackTrace) {
+            _releaseSubscription(subscription);
             FlutterError.reportError(
               FlutterErrorDetails(
                 exception: error,
@@ -104,7 +111,16 @@ class RuntimeHostInteractionSubscriber {
               ),
             );
           },
+          onDone: () {
+            _releaseSubscription(subscription);
+            ClientLogger.d(
+              'owner host interaction stream closed',
+              tag: 'RuntimeHostInteraction',
+            );
+          },
+          cancelOnError: true,
         );
+    _subscription = subscription;
   }
 
   /// Stops the owner host interaction stream listener.
@@ -114,6 +130,16 @@ class RuntimeHostInteractionSubscriber {
     await subscription?.cancel();
   }
 
+  /// Clears the active subscription when the matching stream terminates.
+  static void _releaseSubscription(
+    StreamSubscription<RuntimeHostInteractionRequest> subscription,
+  ) {
+    if (identical(_subscription, subscription)) {
+      _subscription = null;
+    }
+  }
+
+  /// Handles one owner-host interaction request.
   static Future<void> _handleEvent(
     RuntimeHostInteractionRequest request,
   ) async {
@@ -232,12 +258,6 @@ class RuntimeHostInteractionSubscriber {
       ),
       RuntimeHostInteractionKind.localInference => _handleLocalInference(
         _requirePayload(request.localInference, request.kind),
-      ),
-      RuntimeHostInteractionKind.toolPermission => throw StateError(
-        'tool permission is handled by the approval bridge',
-      ),
-      RuntimeHostInteractionKind.webAccessPairing => throw StateError(
-        'web access pairing is handled by the app dialog host',
       ),
       RuntimeHostInteractionKind.appNotification => throw StateError(
         'application notification is handled by the app notification service',
@@ -410,7 +430,9 @@ class RuntimeHostInteractionSubscriber {
   static Future<RuntimeHostInteractionResponse> _handleComposeFilePicker(
     RuntimeHostInteractionComposeFilePickerPayload payload,
   ) async {
-    final resultJson = await ComposeDslFilePickerService.open(payload.requestJson);
+    final resultJson = await ComposeDslFilePickerService.open(
+      payload.requestJson,
+    );
     return _response(
       composeFilePicker: RuntimeHostInteractionComposeFilePickerResponse(
         resultJson: resultJson,
@@ -461,6 +483,12 @@ class RuntimeHostInteractionSubscriber {
   static Future<RuntimeHostInteractionResponse> _handleSystemOperation(
     RuntimeHostInteractionSystemOperationPayload payload,
   ) async {
+    if (payload.operation == 'toast') {
+      return _handleToastOperation(payload);
+    }
+    if (payload.operation == 'get_device_location_foreground') {
+      return _handleForegroundLocationOperation(payload);
+    }
     final rawResponse = await _channel.invokeMethod<Object?>(
       'ownerSystemOperation',
       payload.toJson(),
@@ -469,6 +497,100 @@ class RuntimeHostInteractionSubscriber {
       _requireMethodResponseMap(rawResponse, 'ownerSystemOperation'),
     );
     return _response(systemOperation: response);
+  }
+
+  /// Reads one foreground location through the Flutter geolocation plugin.
+  static Future<RuntimeHostInteractionResponse> _handleForegroundLocationOperation(
+    RuntimeHostInteractionSystemOperationPayload payload,
+  ) async {
+    final decoded = jsonDecode(payload.paramsJson);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException(
+        'get_device_location_foreground paramsJson must be an object',
+      );
+    }
+    final timeout = decoded['timeout'];
+    final highAccuracy = decoded['highAccuracy'];
+    final includeAddress = decoded['includeAddress'];
+    if (timeout is! int || timeout <= 0) {
+      throw const FormatException(
+        'get_device_location_foreground timeout must be a positive integer',
+      );
+    }
+    if (highAccuracy is! bool || includeAddress is! bool) {
+      throw const FormatException(
+        'get_device_location_foreground parameters have invalid types',
+      );
+    }
+
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      throw StateError('Windows location service is disabled');
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied) {
+      throw StateError('Windows location permission was denied');
+    }
+    if (permission == LocationPermission.deniedForever) {
+      throw StateError('Windows location permission is permanently denied');
+    }
+
+    final position = await Geolocator.getCurrentPosition(
+      locationSettings: LocationSettings(
+        accuracy: highAccuracy
+            ? LocationAccuracy.best
+            : LocationAccuracy.medium,
+        timeLimit: Duration(seconds: timeout),
+      ),
+    );
+    final result = <String, Object?>{
+      'latitude': position.latitude,
+      'longitude': position.longitude,
+      'accuracy': position.accuracy,
+      'provider': 'flutter-geolocator',
+      'timestamp': position.timestamp.millisecondsSinceEpoch,
+      'rawData': jsonEncode(<String, Object?>{
+        'altitude': position.altitude,
+        'altitudeAccuracy': position.altitudeAccuracy,
+        'heading': position.heading,
+        'headingAccuracy': position.headingAccuracy,
+        'speed': position.speed,
+        'speedAccuracy': position.speedAccuracy,
+        'isMocked': position.isMocked,
+      }),
+      'address': '',
+      'city': '',
+      'province': '',
+      'country': '',
+    };
+    return _response(
+      systemOperation: RuntimeHostInteractionSystemOperationResponse(
+        resultJson: jsonEncode(result),
+      ),
+    );
+  }
+
+  /// Presents one system-operation toast inside the Flutter application.
+  static RuntimeHostInteractionResponse _handleToastOperation(
+    RuntimeHostInteractionSystemOperationPayload payload,
+  ) {
+    final decoded = jsonDecode(payload.paramsJson);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('toast paramsJson must be an object');
+    }
+    final message = decoded['message'];
+    if (message is! String || message.trim().isEmpty) {
+      throw const FormatException('toast message must be a non-empty string');
+    }
+    AppToastController.instance.show(message);
+    return _response(
+      systemOperation: RuntimeHostInteractionSystemOperationResponse(
+        resultJson: jsonEncode(<String, Object?>{'success': true}),
+      ),
+    );
   }
 
   static Future<RuntimeHostInteractionResponse> _handleAudioPlay(
@@ -664,7 +786,6 @@ class RuntimeHostInteractionSubscriber {
     RuntimeHostInteractionTtsSynthesisResponse? ttsSynthesis,
     RuntimeHostInteractionTtsPlaybackResponse? ttsPlayback,
     RuntimeHostInteractionLocalInferenceResponse? localInference,
-    RuntimeHostInteractionToolPermissionResponse? toolPermission,
   }) {
     return RuntimeHostInteractionResponse(
       error: error,
@@ -685,7 +806,6 @@ class RuntimeHostInteractionSubscriber {
       ttsSynthesis: ttsSynthesis,
       ttsPlayback: ttsPlayback,
       localInference: localInference,
-      toolPermission: toolPermission,
     );
   }
 }

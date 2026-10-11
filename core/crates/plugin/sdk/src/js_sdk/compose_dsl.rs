@@ -1928,11 +1928,6 @@ pub struct ComposeModifierOp {
     /// Positional arguments encoded for the selected operation.
     pub args: Option<Vec<serde_json::Value>>,
 }
-/// Serializable sequence of modifier operations attached to a Compose node.
-pub struct ComposeModifierValue {
-    /// Operations applied in chain order by the host renderer.
-    pub __modifierOps: Vec<ComposeModifierOp>,
-}
 /// Stores a dynamically dispatched Compose modifier implementation.
 pub type ComposeModifierProxy = Arc<dyn ComposeModifierProxyApi>;
 /// Chainable layout, drawing, input, and positioning operations for Compose nodes.
@@ -2182,8 +2177,6 @@ pub trait ComposeModifierProxyApi: Send + Sync {
     fn align(&self, alignment: ComposeModifierAlign) -> ComposeModifierProxy;
     /// Matches the final size of the containing box without affecting its measurement.
     fn matchParentSize(&self) -> ComposeModifierProxy;
-    /// Serializes the accumulated modifier operations for transport to the host.
-    fn toJSON(&self) -> ComposeModifierValue;
 }
 /// Typography and color overrides applied to editable text.
 pub struct ComposeTextFieldStyle {
@@ -2205,7 +2198,7 @@ pub struct ComposeCommonProps {
     /// Content presented as the host screen's top-bar title.
     pub topBarTitle: Option<ComposeChildren>,
     /// Ordered modifier operations applied to layout, drawing, and input.
-    pub modifier: Option<ComposeModifierValue>,
+    pub modifier: Option<ComposeModifierProxy>,
     /// Sibling draw order, with larger values rendered above smaller ones.
     pub zIndex: Option<f64>,
     /// Share of remaining main-axis space inside a row or column.
@@ -2274,6 +2267,21 @@ pub struct RowProps {
     pub verticalAlignment: Option<ComposeAlignment>,
     /// Optional click action for the row as one interactive target.
     pub onClick: Option<Arc<dyn Fn() -> RowPropsOnClickOutput + Send + Sync>>,
+}
+/// Properties for laying out child nodes horizontally across multiple lines.
+pub struct FlowRowProps {
+    /// Shared node layout, drawing, identity, and lifecycle properties.
+    pub base_compose_common_props: ComposeCommonProps,
+    /// Child nodes placed from start to end and continued on a new line when needed.
+    pub content: Option<ComposeChildren>,
+    /// Distribution of children across each horizontal line.
+    pub horizontalArrangement: Option<ComposeArrangement>,
+    /// Distribution of completed lines within the flow row height.
+    pub verticalArrangement: Option<ComposeArrangement>,
+    /// Vertical alignment of children within each horizontal line.
+    pub itemVerticalAlignment: Option<ComposeAlignment>,
+    /// Gap inserted between completed horizontal lines.
+    pub runSpacing: Option<f64>,
 }
 /// Properties for stacking child nodes in the same layout bounds.
 pub struct BoxProps {
@@ -2416,6 +2424,28 @@ pub struct ButtonProps {
     pub contentPadding: Option<ComposePadding>,
     /// Outline used for button background, border, and clipping.
     pub shape: Option<ComposeShape>,
+    /// Foreground color used by the shared Material button renderer.
+    pub contentColor: Option<ComposeColor>,
+}
+/// Host popup menu with a labeled anchor and indexed selection callback.
+pub struct DropdownMenuProps {
+    /// Shared node layout, drawing, identity, and lifecycle properties.
+    pub base_compose_common_props: ComposeCommonProps,
+    /// Label displayed above the selected value.
+    pub label: String,
+    /// Currently selected text displayed inside the anchor.
+    pub text: String,
+    /// Whether the popup accepts interaction.
+    pub enabled: Option<bool>,
+    /// Action receiving the selected zero-based item index.
+    pub onClick: Arc<dyn Fn(f64) -> () + Send + Sync>,
+}
+/// Material floating action with a named icon and standard button properties.
+pub struct FloatingActionButtonProps {
+    /// Shared button properties including action and colors.
+    pub base_button_props: ButtonProps,
+    /// Material icon displayed inside the floating button.
+    pub icon: String,
 }
 /// Icon or custom content rendered as a compact clickable control.
 pub struct IconButtonProps {
@@ -2717,12 +2747,123 @@ pub enum ComposeChildren {
 /// Factory that encodes component properties and children as a Compose node.
 pub type ComposeNodeFactory<TProps = BTreeMap<String, serde_json::Value>> =
     Arc<dyn Fn(Option<TProps>, Option<ComposeChildren>) -> ComposeNode + Send + Sync>;
+/// Completion returned by dialog actions.
+pub enum ComposeDialogActionOutput {
+    /// Completes immediately.
+    Variant1(()),
+    /// Completes asynchronously.
+    Variant2(JsFuture<()>),
+}
+/// Dialog text supplied as a literal or a node slot.
+pub enum ComposeDialogText {
+    /// Displays a text literal.
+    Variant1(String),
+    /// Renders child nodes.
+    Variant2(ComposeChildren),
+}
+/// Modal dismissal and window layout policies.
+pub struct DialogProperties {
+    /// Allows dismissal requests from the back button.
+    pub dismissOnBackPress: Option<bool>,
+    /// Allows dismissal requests from the modal barrier.
+    pub dismissOnClickOutside: Option<bool>,
+    /// Applies the platform's preferred dialog width.
+    pub usePlatformDefaultWidth: Option<bool>,
+    /// Insets dialog content around system UI.
+    pub decorFitsSystemWindows: Option<bool>,
+}
+/// Properties for a custom modal dialog.
+pub struct DialogProps {
+    /// Shared node properties.
+    pub base_compose_common_props: ComposeCommonProps,
+    /// Custom modal content.
+    pub content: Option<ComposeChildren>,
+    /// Receives back-button and outside-click dismissal requests.
+    pub onDismissRequest: Option<Arc<dyn Fn() -> ComposeDialogActionOutput + Send + Sync>>,
+    /// Closes the modal after a dismissal request; defaults to true.
+    pub closeOnDismissRequest: Option<bool>,
+    /// Modal background color.
+    pub containerColor: Option<ComposeColor>,
+    /// Modal foreground color.
+    pub contentColor: Option<ComposeColor>,
+    /// Modal elevation.
+    pub tonalElevation: Option<f64>,
+    /// Modal surface shape.
+    pub shape: Option<ComposeShape>,
+    /// Modal window policies.
+    pub properties: Option<DialogProperties>,
+}
+/// Properties for a modal confirmation dialog.
+pub struct AlertDialogProps {
+    /// Shared node properties.
+    pub base_compose_common_props: ComposeCommonProps,
+    /// Dialog heading as text or child nodes.
+    pub title: Option<ComposeDialogText>,
+    /// Dialog body as text or child nodes.
+    pub text: Option<ComposeDialogText>,
+    /// Markdown body content.
+    pub markdown: Option<String>,
+    /// Custom body content.
+    pub content: Option<ComposeChildren>,
+    /// Leading dialog icon.
+    pub icon: Option<ComposeChildren>,
+    /// Custom confirmation control.
+    pub confirmButton: Option<ComposeChildren>,
+    /// Custom dismissal control.
+    pub dismissButton: Option<ComposeChildren>,
+    /// Confirmation button label.
+    pub confirmText: Option<String>,
+    /// Dismissal button label.
+    pub dismissText: Option<String>,
+    /// Receives confirmation button actions.
+    pub onConfirm: Option<Arc<dyn Fn() -> ComposeDialogActionOutput + Send + Sync>>,
+    /// Receives dismissal button actions.
+    pub onDismiss: Option<Arc<dyn Fn() -> ComposeDialogActionOutput + Send + Sync>>,
+    /// Receives back-button and outside-click dismissal requests.
+    pub onDismissRequest: Option<Arc<dyn Fn() -> ComposeDialogActionOutput + Send + Sync>>,
+    /// Closes after confirmation; defaults to true.
+    pub closeOnConfirm: Option<bool>,
+    /// Closes after dismissal; defaults to true.
+    pub closeOnDismiss: Option<bool>,
+    /// Closes after a dismissal request; defaults to true.
+    pub closeOnDismissRequest: Option<bool>,
+    /// Modal background color.
+    pub containerColor: Option<ComposeColor>,
+    /// Icon foreground color.
+    pub iconContentColor: Option<ComposeColor>,
+    /// Title foreground color.
+    pub titleContentColor: Option<ComposeColor>,
+    /// Body foreground color.
+    pub textContentColor: Option<ComposeColor>,
+    /// Modal elevation.
+    pub tonalElevation: Option<f64>,
+    /// Modal surface shape.
+    pub shape: Option<ComposeShape>,
+    /// Modal window policies.
+    pub properties: Option<DialogProperties>,
+}
 /// Core component factories available through `ComposeDslContext::UI`.
 pub struct ComposeUiFactoryRegistry {
+    /// Creates a text-only Material button.
+    pub TextButton: ComposeNodeFactory<ButtonProps>,
+    /// Creates a filled tonal Material button.
+    pub FilledTonalButton: ComposeNodeFactory<ButtonProps>,
+    /// Creates an anchored popup with indexed item selection.
+    pub DropdownMenu: ComposeNodeFactory<DropdownMenuProps>,
+    /// Creates a floating action button with a named icon.
+    pub FloatingActionButton: ComposeNodeFactory<FloatingActionButtonProps>,
+    /// Creates a compact floating action button with a named icon.
+    pub SmallFloatingActionButton: ComposeNodeFactory<FloatingActionButtonProps>,
+    /// Creates a custom modal dialog.
+    pub Dialog: ComposeNodeFactory<DialogProps>,
+    /// Creates a modal confirmation dialog.
+    pub AlertDialog: ComposeNodeFactory<AlertDialogProps>,
     /// Creates a vertical layout container.
     pub Column: ComposeNodeFactory<ColumnProps>,
     /// Creates a horizontal layout container.
     pub Row: ComposeNodeFactory<RowProps>,
+    /// Creates a horizontal layout container that wraps child nodes across lines.
+    pub FlowRow: ComposeNodeFactory<FlowRowProps>,
     /// Creates a stacking layout container.
     pub Box: ComposeNodeFactory<BoxProps>,
     /// Creates an empty element that reserves layout space.
@@ -2807,12 +2948,18 @@ pub enum ComposeFilePickerMode {
     /// Opens the platform photo selector.
     #[serde(rename = "photo")]
     Photo,
+    /// Opens the image selector using the v1 mode name.
+    #[serde(rename = "image")]
+    Image,
     /// Opens the platform video selector.
     #[serde(rename = "video")]
     Video,
     /// Opens the platform photo and video selector.
     #[serde(rename = "media")]
     Media,
+    /// Opens the platform directory selector.
+    #[serde(rename = "directory")]
+    Directory,
 }
 /// Selection behavior for the host file picker.
 pub struct ComposeFilePickerOptions {
@@ -2820,6 +2967,8 @@ pub struct ComposeFilePickerOptions {
     pub picker: Option<ComposeFilePickerMode>,
     /// Whether the user may select more than one document or visual-media item.
     pub allowMultiple: Option<bool>,
+    /// MIME types accepted by the document selector.
+    pub mimeTypes: Option<Vec<String>>,
 }
 /// File metadata returned by the host picker.
 pub struct ComposePickedFile {
@@ -2854,8 +3003,36 @@ pub struct ComposeRouteInfo {
     /// Tool-package UI module rendered by the destination.
     pub toolPkgUiModuleId: JsOptional<String>,
 }
+/// Resolved colors and brightness supplied by the current UI host.
+pub struct ComposeThemeSnapshot {
+    /// Effective host brightness, either light or dark.
+    pub brightness: String,
+    /// Resolved Material color roles encoded as CSS RRGGBBAA hex strings.
+    pub colors: BTreeMap<String, String>,
+}
+/// Completion returned by a theme change listener.
+pub enum ComposeThemeListenerOutput {
+    /// Completes a synchronous theme update.
+    Variant1(()),
+    /// Completes an asynchronous theme update.
+    Variant2(JsFuture<()>),
+}
+/// Host theme service independent of any WebView or rendering framework.
+pub struct ComposeTheme;
+/// Public theme operations scoped to the current UI execution context.
+pub trait ComposeThemeMethods: Send + Sync {
+    /// Returns the current resolved theme; throws when no UI host supplied a theme.
+    fn getCurrent(&self) -> ComposeThemeSnapshot;
+    /// Observes later theme changes and returns an unsubscribe function.
+    fn subscribe(
+        &self,
+        listener: Arc<dyn Fn(ComposeThemeSnapshot) -> ComposeThemeListenerOutput + Send + Sync>,
+    ) -> Arc<dyn Fn() -> () + Send + Sync>;
+}
 /// Theme, modifier builder, and component factories supplied to a screen renderer.
 pub struct ComposeDslContext {
+    /// Reads and observes the resolved theme of the current plugin UI host.
+    pub Theme: ComposeTheme,
     /// Active Material theme values resolved by the host.
     pub MaterialTheme: ComposeMaterialTheme,
     /// Empty modifier chain from which node modifiers are built.

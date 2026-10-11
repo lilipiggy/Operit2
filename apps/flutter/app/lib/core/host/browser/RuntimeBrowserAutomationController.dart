@@ -9,6 +9,8 @@ import 'package:flutter/gestures.dart';
 import 'package:webview_all/webview_all.dart';
 import 'package:webview_all_windows/webview_all_windows.dart';
 
+import 'RuntimeBrowserFileUpload.dart';
+
 class RuntimeBrowserAutomationController {
   RuntimeBrowserAutomationController({
     required this.controller,
@@ -16,6 +18,9 @@ class RuntimeBrowserAutomationController {
   });
 
   final WebViewController controller;
+  late final RuntimeBrowserFileUpload _fileUpload = RuntimeBrowserFileUpload(
+    controller,
+  );
   final Future<void> Function() onSurfaceFrameRequested;
   final List<Map<String, Object?>> _consoleMessages = <Map<String, Object?>>[];
   final List<Map<String, Object?>> _networkRequests = <Map<String, Object?>>[];
@@ -160,14 +165,6 @@ class RuntimeBrowserAutomationController {
     final intent = _decodeSurfaceIntent(intentJson);
     final requestedTransport = _readString(intent, 'transport');
     switch (requestedTransport) {
-      case 'localTexture':
-        final platform = _requireWindowsController();
-        final textureId = await platform.browserSurfaceTextureId();
-        return jsonEncode(<String, Object?>{
-          'transport': 'localTexture',
-          'platform': 'windows',
-          'textureId': textureId,
-        });
       case 'encodedStream':
         _encodedStreamAttached = true;
         final size = _surfaceSize;
@@ -191,25 +188,31 @@ class RuntimeBrowserAutomationController {
     return jsonEncode(<String, Object?>{'url': url, 'title': title});
   }
 
-  Future<Object> evaluate(String expression) {
-    return controller.runJavaScriptReturningResult(expression);
+  /// Evaluates page JavaScript while capturing automation-opened file choosers.
+  Future<Object?> evaluate(String expression) {
+    return _fileUpload.evaluate(expression);
   }
 
-  Future<Object> evaluateFunction(String function, {String? selector}) {
+  /// Evaluates a page function while capturing its file chooser requests.
+  Future<Object?> evaluateFunction(String function, {String? selector}) {
     final target = selector?.trim();
     if (target == null || target.isEmpty) {
-      return controller.runJavaScriptReturningResult('($function)()');
+      return evaluate('($function)()');
     }
-    return controller.runJavaScriptReturningResult(
-      '($function)(${_resolverScript(target)})',
-    );
+    return evaluate('($function)(${_resolverScript(target)})');
   }
 
-  Future<Object> runCode(String code) {
-    return controller.runJavaScriptReturningResult(code);
+  /// Executes automation code with the same chooser lifecycle as page actions.
+  Future<Object?> runCode(String code) {
+    return evaluate(code);
   }
 
-  Future<Object> snapshot() {
+  /// Uploads host-provided files or cancels the active page file chooser.
+  Future<void> fileUpload(String filesJson) {
+    return _fileUpload.upload(filesJson);
+  }
+
+  Future<Object?> snapshot() {
     return controller.runJavaScriptReturningResult(r'''
 JSON.stringify((function() {
   const selector = 'a,button,input,textarea,select,[role]';
@@ -245,8 +248,9 @@ JSON.stringify((function() {
 ''');
   }
 
+  /// Clicks the exact target and captures any file chooser it opens.
   Future<void> click(String selector) {
-    return controller.runJavaScript("${_resolverScript(selector)}?.click();");
+    return _fileUpload.run("${_resolverScript(selector)}?.click();");
   }
 
   Future<void> type(String selector, String text) {
@@ -383,7 +387,7 @@ if (start && end) {
     }
   }
 
-  Future<Object> waitForText(String text) {
+  Future<Object?> waitForText(String text) {
     return controller.runJavaScriptReturningResult('''
 new Promise(function(resolve) {
   const target = ${jsonEncode(text)};
@@ -402,7 +406,7 @@ new Promise(function(resolve) {
 ''');
   }
 
-  Future<Object> waitForTextGone(String text) {
+  Future<Object?> waitForTextGone(String text) {
     return controller.runJavaScriptReturningResult('''
 new Promise(function(resolve) {
   const target = ${jsonEncode(text)};

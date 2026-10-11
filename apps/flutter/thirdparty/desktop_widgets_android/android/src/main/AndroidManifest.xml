@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver android:name=".DesktopWidgetProvider" android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/desktop_widget_info" />
+        </receiver>
+        <activity android:name=".DesktopWidgetConfigureActivity" android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.Dialog.Alert">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

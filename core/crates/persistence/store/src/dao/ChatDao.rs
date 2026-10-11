@@ -49,7 +49,7 @@ impl ChatDao {
             r#"
                 INSERT OR REPLACE INTO chats (
                     id, title, createdAt, updatedAt, inputTokens, outputTokens,
-                    currentWindowSize, "group", displayOrder, workspace,
+                    currentWindowSize, "group", displayOrder, workspaceId,
                     parentChatId, characterCardName, characterGroupId, locked, pinned
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
@@ -64,7 +64,7 @@ impl ChatDao {
                 chat.currentWindowSize,
                 chat.group,
                 chat.displayOrder,
-                chat.workspace,
+                chat.workspaceId,
                 chat.parentChatId,
                 chat.characterCardName,
                 chat.characterGroupId,
@@ -106,28 +106,28 @@ impl ChatDao {
         )
     }
 
-    pub fn updateChatWorkspace(
+    pub fn updateChatWorkspaceId(
         &self,
         chatId: &str,
-        workspace: Option<String>,
+        workspaceId: Option<String>,
         timestamp: i64,
     ) -> Result<(), SqliteStoreError> {
         self.execute(
-            "UPDATE chats SET workspace = ?2, updatedAt = ?3 WHERE id = ?1",
-            sqliteParams![chatId, workspace, timestamp],
+            "UPDATE chats SET workspaceId = ?2, updatedAt = ?3 WHERE id = ?1",
+            sqliteParams![chatId, workspaceId, timestamp],
         )
     }
 
-    pub fn updateChatTitleAndWorkspace(
+    pub fn updateChatTitleAndWorkspaceId(
         &self,
         chatId: &str,
         title: String,
-        workspace: Option<String>,
+        workspaceId: Option<String>,
         timestamp: i64,
     ) -> Result<(), SqliteStoreError> {
         self.execute(
-            "UPDATE chats SET title = ?2, workspace = ?3, updatedAt = ?4 WHERE id = ?1",
-            sqliteParams![chatId, title, workspace, timestamp],
+            "UPDATE chats SET title = ?2, workspaceId = ?3, updatedAt = ?4 WHERE id = ?1",
+            sqliteParams![chatId, title, workspaceId, timestamp],
         )
     }
 
@@ -204,6 +204,14 @@ impl ChatDao {
         )
     }
 
+    /// Promotes an active chat without changing its pin, group, or bindings.
+    pub fn moveChatToFront(&self, chatId: &str, timestamp: i64) -> Result<(), SqliteStoreError> {
+        self.execute(
+            "UPDATE chats SET displayOrder = MIN(-?2, (SELECT MIN(displayOrder) FROM chats) - 1), updatedAt = ?2 WHERE id = ?1",
+            sqliteParams![chatId, timestamp],
+        )
+    }
+
     pub fn updateChatOrderAndGroup(
         &self,
         chatId: &str,
@@ -231,7 +239,7 @@ impl ChatDao {
                         currentWindowSize = ?7,
                         "group" = ?8,
                         displayOrder = ?9,
-                        workspace = ?10,
+                        workspaceId = ?10,
                         parentChatId = ?11,
                         characterCardName = ?12,
                         characterGroupId = ?13,
@@ -249,7 +257,7 @@ impl ChatDao {
                         chat.currentWindowSize,
                         chat.group,
                         chat.displayOrder,
-                        chat.workspace,
+                        chat.workspaceId,
                         chat.parentChatId,
                         chat.characterCardName,
                         chat.characterGroupId,
@@ -696,7 +704,7 @@ pub fn mapChatEntity(row: &SqliteRow) -> Result<ChatEntity, SqliteStoreError> {
         currentWindowSize: row.get("currentWindowSize")?,
         group: row.get("group")?,
         displayOrder: row.get("displayOrder")?,
-        workspace: row.get("workspace")?,
+        workspaceId: row.get("workspaceId")?,
         parentChatId: row.get("parentChatId")?,
         characterCardName: row.get("characterCardName")?,
         characterGroupId: row.get("characterGroupId")?,

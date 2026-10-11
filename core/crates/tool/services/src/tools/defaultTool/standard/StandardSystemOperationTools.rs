@@ -5,7 +5,7 @@ use operit_host_api::{
     AppUsageTimeResultData as HostAppUsageTimeResultData, DeviceInfoData as HostDeviceInfoData,
     LocationData as HostLocationData, NotificationData as HostNotificationData,
     SystemNotificationActivation, SystemNotificationRequest, SystemOperationHost,
-    SystemSettingData as HostSystemSettingData,
+    SystemSettingData as HostSystemSettingData, ToastHost,
 };
 
 use operit_tools::tools::ToolResultDataClasses::{
@@ -22,6 +22,7 @@ use operit_tools::ToolExecutionManager::{
 /// Defines built-in host system-operation tools.
 pub struct StandardSystemOperationTools {
     pub systemOperationHost: Option<Arc<dyn SystemOperationHost>>,
+    pub toastHost: Option<Arc<dyn ToastHost>>,
 }
 
 #[derive(Clone, Copy)]
@@ -52,9 +53,13 @@ pub struct SystemOperationToolExecutor {
 
 impl StandardSystemOperationTools {
     /// Creates a system-operation tool set from an optional host bridge.
-    pub fn new(systemOperationHost: Option<Arc<dyn SystemOperationHost>>) -> Self {
+    pub fn new(
+        systemOperationHost: Option<Arc<dyn SystemOperationHost>>,
+        toastHost: Option<Arc<dyn ToastHost>>,
+    ) -> Self {
         Self {
             systemOperationHost,
+            toastHost,
         }
     }
 
@@ -65,7 +70,7 @@ impl StandardSystemOperationTools {
         if message.is_empty() {
             return toolError(tool, "Must provide message parameter".to_string());
         }
-        match self.host().and_then(|host| host.toast(&message)) {
+        match self.toastHost().and_then(|host| host.toast(&message)) {
             Ok(()) => toolSuccess(tool, "OK".to_string()),
             Err(error) => toolError(tool, format!("Toast failed: {}", error.message)),
         }
@@ -356,6 +361,13 @@ impl StandardSystemOperationTools {
             operit_host_api::HostError::new(
                 "SystemOperationHost is not registered for this runtime.",
             )
+        })
+    }
+
+    /// Returns the frontend toast host registered for this runtime.
+    fn toastHost(&self) -> Result<&dyn ToastHost, operit_host_api::HostError> {
+        self.toastHost.as_deref().ok_or_else(|| {
+            operit_host_api::HostError::new("ToastHost is not registered for this runtime.")
         })
     }
 }

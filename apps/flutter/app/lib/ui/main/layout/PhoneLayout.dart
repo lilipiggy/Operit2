@@ -3,16 +3,21 @@
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/rendering.dart';
 
 import '../components/DrawerConversationState.dart';
 import '../components/DrawerContent.dart';
 import '../components/NavigationDrawerAppearance.dart';
 import '../navigation/AppNavigationModels.dart';
+import 'DrawerMotionScope.dart';
 import '../../theme/OperitGlassSurface.dart';
+import '../../common/interactions/DrawerGestureExclusion.dart';
 
 class PhoneLayout extends StatefulWidget {
+  /// Creates the retained phone content and its animated navigation drawer.
   const PhoneLayout({
     super.key,
     required this.content,
@@ -42,6 +47,7 @@ class PhoneLayout extends StatefulWidget {
   final ValueChanged<NavigationEntrySpec> onNavigationEntrySelected;
   final VoidCallback onConversationActivated;
 
+  /// Creates the state that drives drawer motion independently of page content.
   @override
   State<PhoneLayout> createState() => _PhoneLayoutState();
 }
@@ -54,9 +60,12 @@ class _PhoneLayoutState extends State<PhoneLayout>
   static const double _dragThreshold = 40;
 
   late final AnimationController _drawerProgressController;
+  final ValueNotifier<bool> _drawerIsAnimating = ValueNotifier<bool>(false);
+  final ValueNotifier<int> _contentActivation = ValueNotifier<int>(0);
   double _currentDrag = 0;
   double _verticalDrag = 0;
 
+  /// Connects the drawer state to its spring animation and motion lifecycle.
   @override
   void initState() {
     super.initState();
@@ -64,9 +73,11 @@ class _PhoneLayoutState extends State<PhoneLayout>
       vsync: this,
       value: widget.drawerOpenState.value ? 1.0 : 0.0,
     );
+    _drawerProgressController.addStatusListener(_handleDrawerAnimationStatus);
     widget.drawerOpenState.addListener(_animateDrawerProgress);
   }
 
+  /// Rebinds drawer state changes while retaining the animation controller.
   @override
   void didUpdateWidget(covariant PhoneLayout oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -77,13 +88,25 @@ class _PhoneLayoutState extends State<PhoneLayout>
     }
   }
 
+  /// Releases the animation and its page-local motion notification source.
   @override
   void dispose() {
     widget.drawerOpenState.removeListener(_animateDrawerProgress);
+    _drawerProgressController.removeStatusListener(
+      _handleDrawerAnimationStatus,
+    );
     _drawerProgressController.dispose();
+    _drawerIsAnimating.dispose();
+    _contentActivation.dispose();
     super.dispose();
   }
 
+  /// Notifies page owners when a drawer motion starts or finishes.
+  void _handleDrawerAnimationStatus(AnimationStatus status) {
+    _drawerIsAnimating.value = _drawerProgressController.isAnimating;
+  }
+
+  /// Retargets the drawer spring from its current position and velocity.
   void _animateDrawerProgress() {
     final target = widget.drawerOpenState.value ? 1.0 : 0.0;
     final dampingRatio = widget.drawerOpenState.value
@@ -102,11 +125,25 @@ class _PhoneLayoutState extends State<PhoneLayout>
     _drawerProgressController.animateWith(simulation);
   }
 
+  /// Releases current-page freezing after a drawer navigation action begins.
+  void _handleNavigationEntrySelected(NavigationEntrySpec entry) {
+    widget.onNavigationEntrySelected(entry);
+    _contentActivation.value++;
+  }
+
+  /// Keeps in-page conversation loading live when the drawer closes.
+  void _handleConversationActivated() {
+    widget.onConversationActivated();
+    _contentActivation.value++;
+  }
+
+  /// Resets accumulated movement for a new drawer gesture.
   void _handleHorizontalDragStart(DragStartDetails details) {
     _currentDrag = 0;
     _verticalDrag = 0;
   }
 
+  /// Opens or closes the drawer after a deliberate horizontal gesture.
   void _handleHorizontalDragUpdate(DragUpdateDetails details) {
     _currentDrag += details.primaryDelta ?? 0;
     _verticalDrag += details.delta.dy;
@@ -124,49 +161,73 @@ class _PhoneLayoutState extends State<PhoneLayout>
     }
   }
 
+  /// Clears gesture movement after the pointer is released.
   void _handleHorizontalDragEnd(DragEndDetails details) {
     _currentDrag = 0;
     _verticalDrag = 0;
   }
 
+  /// Builds retained content layers and animates their drawer presentation.
   @override
   Widget build(BuildContext context) {
     final appearance = navigationDrawerAppearanceOf(context);
     final animatedChild = _PhoneLayoutAnimatedChild(
-      content: RepaintBoundary(child: widget.content),
+      content: RepaintBoundary(
+        child: DrawerMotionScope(
+          isAnimating: _drawerIsAnimating,
+          contentActivation: _contentActivation,
+          child: widget.content,
+        ),
+      ),
       drawerContent: RepaintBoundary(
-        child: ValueListenableBuilder<DrawerConversationState>(
-          valueListenable: widget.drawerConversationState,
-          builder: (context, drawerState, _) {
-            return DrawerContent(
-              key: const ValueKey<String>('phoneDrawerContent'),
-              navigationEntries: widget.navigationEntries,
-              pluginEntries: widget.pluginSidebarEntries,
-              selectedRouteId: widget.selectedRouteId,
-              appearance: appearance,
-              histories: drawerState.histories,
-              characterGroupNamesById: drawerState.characterGroupNamesById,
-              characterCardAvatarUrisByName:
-                  drawerState.characterCardAvatarUrisByName,
-              currentChatId: drawerState.currentChatId,
-              errorMessage: drawerState.errorMessage,
-              loading: drawerState.loading,
-              onNavigationEntrySelected: widget.onNavigationEntrySelected,
-              onConversationActivated: widget.onConversationActivated,
-            );
-          },
+        // Keep drawer controls within the system insets while its background
+        // extends beneath both system bars.
+        child: SafeArea(
+          left: false,
+          right: false,
+          child: ValueListenableBuilder<DrawerConversationState>(
+            valueListenable: widget.drawerConversationState,
+            builder: (context, drawerState, _) {
+              return DrawerContent(
+                key: const ValueKey<String>('phoneDrawerContent'),
+                navigationEntries: widget.navigationEntries,
+                pluginEntries: widget.pluginSidebarEntries,
+                selectedRouteId: widget.selectedRouteId,
+                appearance: appearance,
+                histories: drawerState.histories,
+                activeStreamingChatIds: drawerState.activeStreamingChatIds,
+                characterGroupNamesById: drawerState.characterGroupNamesById,
+                characterCardAvatarUrisByName:
+                    drawerState.characterCardAvatarUrisByName,
+                currentChatId: drawerState.currentChatId,
+                errorMessage: drawerState.errorMessage,
+                loading: drawerState.loading,
+                onNavigationEntrySelected: _handleNavigationEntrySelected,
+                onConversationActivated: _handleConversationActivated,
+              );
+            },
+          ),
         ),
       ),
     );
 
-    return GestureDetector(
+    return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
-      onHorizontalDragStart: _handleHorizontalDragStart,
-      onHorizontalDragUpdate: _handleHorizontalDragUpdate,
-      onHorizontalDragEnd: _handleHorizontalDragEnd,
-      onHorizontalDragCancel: () {
-        _currentDrag = 0;
-        _verticalDrag = 0;
+      gestures: <Type, GestureRecognizerFactory>{
+        _DrawerHorizontalDragGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<
+              _DrawerHorizontalDragGestureRecognizer
+            >(_DrawerHorizontalDragGestureRecognizer.new, (recognizer) {
+              recognizer
+                ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context)
+                ..onStart = _handleHorizontalDragStart
+                ..onUpdate = _handleHorizontalDragUpdate
+                ..onEnd = _handleHorizontalDragEnd
+                ..onCancel = () {
+                  _currentDrag = 0;
+                  _verticalDrag = 0;
+                };
+            }),
       },
       child: AnimatedBuilder(
         animation: _drawerProgressController,
@@ -189,13 +250,15 @@ class _PhoneLayoutState extends State<PhoneLayout>
           final contentCornerRadius = widget.enableNavigationAnimation
               ? 24.0 * drawerProgress
               : 0.0;
-          final contentShadowElevation = widget.enableNavigationAnimation
-              ? 18.0 * drawerProgress
-              : 0.0;
           final drawerOffset = -widget.drawerWidth * (1.0 - drawerProgress);
-          final sidebarElevation = widget.enableNavigationAnimation
-              ? 16.0 * drawerProgress
-              : 3.0 * drawerProgress;
+          // Keep blur kernels stable while the transform layer moves.
+          final contentShadowVisible = drawerProgress > 0.001;
+          final contentShadowBlur = widget.enableNavigationAnimation
+              ? 18.0
+              : 0.0;
+          final sidebarShadowBlur = widget.enableNavigationAnimation
+              ? 16.0
+              : 3.0;
           final drawerScale = widget.enableNavigationAnimation
               ? 0.92 + (0.08 * drawerProgress)
               : 1.0;
@@ -231,9 +294,9 @@ class _PhoneLayoutState extends State<PhoneLayout>
                             clampedContentCornerRadius,
                           ),
                           boxShadow: <BoxShadow>[
-                            if (contentShadowElevation > 0)
+                            if (contentShadowVisible && contentShadowBlur > 0)
                               BoxShadow(
-                                blurRadius: contentShadowElevation,
+                                blurRadius: contentShadowBlur,
                                 color: Colors.black.withValues(alpha: 0.16),
                               ),
                           ],
@@ -251,6 +314,7 @@ class _PhoneLayoutState extends State<PhoneLayout>
               ),
               if (isDrawerOpen)
                 Positioned.fill(
+                  key: const ValueKey<String>('phoneDrawerDismissBarrier'),
                   left: widget.drawerWidth,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -259,35 +323,41 @@ class _PhoneLayoutState extends State<PhoneLayout>
                   ),
                 ),
               Positioned(
-                left: drawerOffset,
-                top: MediaQuery.paddingOf(context).top,
+                // Preserve the drawer subtree when the dismiss barrier changes.
+                key: const ValueKey<String>('phoneDrawerLayer'),
+                left: 0,
+                top: 0,
                 bottom: 0,
                 width: widget.drawerWidth,
-                child: Opacity(
-                  opacity: clampedDrawerContentAlpha,
-                  child: Transform.scale(
-                    alignment: Alignment.centerLeft,
-                    scale: drawerScale,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        boxShadow: <BoxShadow>[
-                          if (sidebarElevation > 0)
-                            BoxShadow(
-                              blurRadius: sidebarElevation,
-                              color: Colors.black.withValues(alpha: 0.12),
-                            ),
-                        ],
-                      ),
-                      child: OperitGlassSurface(
-                        color: appearance.containerColor,
-                        layer: OperitGlassSurfaceLayer.panel,
-                        transparentAlpha: 0.035,
-                        enableBackdropFilter: false,
-                        borderRadius: const BorderRadiusDirectional.only(
-                          topEnd: Radius.circular(16),
-                          bottomEnd: Radius.circular(16),
-                        ).resolve(Directionality.of(context)),
-                        child: animatedChild.drawerContent,
+                child: Transform.translate(
+                  // A fixed Stack slot keeps drag frames in the paint phase.
+                  offset: Offset(drawerOffset, 0),
+                  child: Opacity(
+                    opacity: clampedDrawerContentAlpha,
+                    child: Transform.scale(
+                      alignment: Alignment.centerLeft,
+                      scale: drawerScale,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          boxShadow: <BoxShadow>[
+                            if (drawerProgress > 0.001)
+                              BoxShadow(
+                                blurRadius: sidebarShadowBlur,
+                                color: Colors.black.withValues(alpha: 0.12),
+                              ),
+                          ],
+                        ),
+                        child: OperitGlassSurface(
+                          color: appearance.containerColor,
+                          layer: OperitGlassSurfaceLayer.panel,
+                          transparentAlpha: 0.035,
+                          enableBackdropFilter: false,
+                          borderRadius: const BorderRadiusDirectional.only(
+                            topEnd: Radius.circular(16),
+                            bottomEnd: Radius.circular(16),
+                          ).resolve(Directionality.of(context)),
+                          child: animatedChild.drawerContent,
+                        ),
                       ),
                     ),
                   ),
@@ -301,7 +371,45 @@ class _PhoneLayoutState extends State<PhoneLayout>
   }
 }
 
+class _DrawerHorizontalDragGestureRecognizer
+    extends HorizontalDragGestureRecognizer {
+  /// Keeps gestures beginning in editable or excluded content out of the arena.
+  @override
+  bool isPointerAllowed(PointerEvent event) {
+    if (!super.isPointerAllowed(event)) {
+      return false;
+    }
+    return !_startsInExcludedRegion(event);
+  }
+
+  /// Applies the same exclusion policy to pointer pan and zoom gestures.
+  @override
+  bool isPointerPanZoomAllowed(PointerPanZoomStartEvent event) {
+    return super.isPointerPanZoomAllowed(event) &&
+        !_startsInExcludedRegion(event);
+  }
+
+  /// Resolves gesture exclusions using the transformed hit-test path.
+  bool _startsInExcludedRegion(PointerEvent event) {
+    // Reject before entering the arena, not in onUpdate: winning the arena
+    // would already cancel the text field's cursor/selection recognizers.
+    // Use the actual hit-test path so zoom and animated transforms are honored.
+    final result = HitTestResult();
+    RendererBinding.instance.hitTestInView(
+      result,
+      event.position,
+      event.viewId,
+    );
+    return result.path.any(
+      (entry) =>
+          entry.target is RenderEditable ||
+          DrawerGestureExclusion.containsTarget(entry.target),
+    );
+  }
+}
+
 class _PhoneLayoutAnimatedChild extends StatelessWidget {
+  /// Retains the drawer and content widgets between presentation frames.
   const _PhoneLayoutAnimatedChild({
     required this.content,
     required this.drawerContent,
@@ -310,6 +418,7 @@ class _PhoneLayoutAnimatedChild extends StatelessWidget {
   final Widget content;
   final Widget drawerContent;
 
+  /// Provides an inert animation child while its retained fields are reused.
   @override
   Widget build(BuildContext context) {
     return const SizedBox.shrink();

@@ -90,8 +90,6 @@ operit2-cli-linux-aarch64.tar.gz
 operit2-cli-macos-x86_64.tar.gz
 operit2-cli-macos-aarch64.tar.gz
 operit2-app-android-arm64-v8a.apk
-operit2-app-android-armeabi-v7a.apk
-operit2-app-android-x86_64.apk
 operit2-app-ohos-arm64.hap
 operit2-app-windows-x86_64.zip
 operit2-app-linux-x86_64.tar.gz
@@ -233,9 +231,9 @@ and command-line tools. Do not treat it as an available cloud build until that
 external toolchain source and the signing secrets are configured.
 
 ```powershell
-gh workflow run "Apple Release Build" -f products=all -f include_ios=true -f build_web_assets=false
-gh workflow run "macOS Flutter Build" -f products=all -f build_web_assets=false
-gh workflow run "iOS Flutter Build" -f build_web_assets=false
+gh workflow run "Apple Release Build" -f products=all -f include_ios=true
+gh workflow run "macOS Flutter Build" -f products=all
+gh workflow run "iOS Flutter Build"
 gh workflow run "Windows Release Build" -f products=all -f cli_arches=all
 gh workflow run "Linux Release Build" -f products=all -f cli_arches=all
 gh workflow run "Android Flutter Build"
@@ -254,12 +252,19 @@ platform component is installed:
 ```bash
 python3 tools/build_scripts/build_local.py --products all --cli-arches host
 python3 tools/build_scripts/build_local.py --products app --include-ios
+python3 tools/build_scripts/build_local.py --products esp32
 ```
 
-The script reads GitHub credentials from:
+The ESP32 local build requires the ESP-IDF Rust toolchain, `espflash`, `ldproxy`,
+and an `EMSDK` environment variable. It writes the board-specific ZIP bundle to
+`tools/release/dist/operit2-esp32-esp32-2432s028.zip`. The bundle contains the
+full 4 MiB initial-flash image, split flash images, `partitions.csv`, and a
+manifest with verified offsets and SHA-256 digests.
+
+The release scripts read GitHub credentials from:
 
 ```text
-d:\Code\prog\assistance\tools\github\.env
+tools/release/secrets/github.env
 ```
 
 Required keys:

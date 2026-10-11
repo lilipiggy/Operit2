@@ -169,7 +169,6 @@ class WorkspaceBrowserSurfaceDescriptor {
   const WorkspaceBrowserSurfaceDescriptor({
     required this.transport,
     required this.platform,
-    this.textureId,
     this.streamId,
     this.codec,
     this.width,
@@ -183,7 +182,6 @@ class WorkspaceBrowserSurfaceDescriptor {
     return WorkspaceBrowserSurfaceDescriptor(
       transport: json['transport'] as String,
       platform: json['platform'] as String,
-      textureId: json['textureId'] as int?,
       streamId: json['streamId'] as String?,
       codec: json['codec'] as String?,
       width: (json['width'] as num?)?.toDouble(),
@@ -193,7 +191,6 @@ class WorkspaceBrowserSurfaceDescriptor {
 
   final String transport;
   final String platform;
-  final int? textureId;
   final String? streamId;
   final String? codec;
   final double? width;

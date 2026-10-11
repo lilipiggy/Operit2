@@ -133,6 +133,8 @@ pub struct MarketEntryVersion {
     pub project_id: Option<String>,
     #[serde(rename = "runtimePackageId", default)]
     pub runtime_package_id: Option<String>,
+    #[serde(rename = "apiVersion", default)]
+    pub api_version: Option<String>,
     #[serde(rename = "installConfig", default)]
     pub install_config: Option<String>,
     #[serde(default)]
@@ -800,6 +802,7 @@ impl MarketStatsApiService {
         gh_release_tag: &str,
         asset_name: &str,
         sha256: &str,
+        api_version: Option<String>,
     ) -> Result<MarketPublishResponse, String> {
         let version_json = market_artifact_version_json(
             version,
@@ -809,6 +812,7 @@ impl MarketStatsApiService {
             changelog,
             project_id,
             runtime_package_id,
+            api_version,
         );
         self.decode_v2(
             "POST",
@@ -931,6 +935,7 @@ impl MarketStatsApiService {
         entry_detail: Option<String>,
         entry_category_id: Option<String>,
         entry_allow_public_updates: Option<bool>,
+        api_version: Option<String>,
     ) -> Result<MarketPublishResponse, String> {
         let body = market_new_version_body(
             Some(market_entry_patch_json(
@@ -948,6 +953,7 @@ impl MarketStatsApiService {
                 changelog,
                 project_id,
                 runtime_package_id,
+                api_version,
             ),
             None,
             Some(serde_json::json!({
@@ -1031,6 +1037,30 @@ impl MarketStatsApiService {
                 summarize_body(&body_text(&resp.body))
             ))
         }
+    }
+
+    /// Streams a marketplace asset to a caller-owned file without buffering it in the UI.
+    pub fn download_asset_to_file(&self, asset_id: &str, target_path: &str) -> Result<u64, String> {
+        let asset_id = asset_id.trim();
+        if asset_id.is_empty() {
+            return Err("asset id is empty".to_string());
+        }
+        let url = self.v2_url(&["assets", asset_id, "download"])?;
+        let result = self.http_host.downloadToFile(HttpRequestData {
+            url: url.to_string(),
+            method: "GET".to_string(),
+            headers: vec![("User-Agent".to_string(), USER_AGENT.to_string())],
+            body: Vec::new(),
+            formFields: Vec::new(),
+            fileParts: Vec::new(),
+            connectTimeoutSeconds: TIMEOUT_SECONDS,
+            readTimeoutSeconds: TIMEOUT_SECONDS,
+            followRedirects: true,
+            ignoreSsl: false,
+            proxyHost: String::new(),
+            proxyPort: 0,
+        }, target_path.to_string()).map_err(|error| error.to_string())?;
+        Ok(result.downloadedBytes)
     }
 
     // ── Internal: HTTP helpers ─────────────────────────────
@@ -1259,31 +1289,36 @@ fn now_iso() -> String {
         .to_string()
 }
 
+/// Client version recorded as the minimum for all marketplace publications.
+pub const MARKET_MIN_APP_VERSION: &str = "2.0.0";
+/// Client version recorded as the maximum for all marketplace publications.
+pub const MARKET_MAX_APP_VERSION: &str = "2.99.99";
+
 fn entry_downloads(entry: &MarketEntrySummary) -> i32 {
     entry.download_count.max(entry.downloads)
 }
 
+/// Builds published marketplace version metadata with the fixed client range.
 fn market_base_version_json(
     version: &str,
     format_ver: &str,
-    min_app_ver: &str,
-    max_app_ver: Option<String>,
+    _min_app_ver: &str,
+    _max_app_ver: Option<String>,
     changelog: Option<String>,
 ) -> serde_json::Value {
     let mut json = serde_json::json!({
         "version": version,
         "formatVer": format_ver,
-        "minAppVer": min_app_ver,
+        "minAppVer": MARKET_MIN_APP_VERSION,
+        "maxAppVer": MARKET_MAX_APP_VERSION,
     });
-    if let Some(max) = max_app_ver.filter(|value| !value.trim().is_empty()) {
-        json["maxAppVer"] = serde_json::Value::String(max);
-    }
     if let Some(text) = changelog.filter(|value| !value.trim().is_empty()) {
         json["changelog"] = serde_json::Value::String(text);
     }
     json
 }
 
+/// Builds the JSON version record for an artifact-backed marketplace entry.
 fn market_artifact_version_json(
     version: &str,
     format_ver: &str,
@@ -1292,11 +1327,15 @@ fn market_artifact_version_json(
     changelog: Option<String>,
     project_id: &str,
     runtime_package_id: &str,
+    api_version: Option<String>,
 ) -> serde_json::Value {
     let mut json =
         market_base_version_json(version, format_ver, min_app_ver, max_app_ver, changelog);
     json["projectId"] = serde_json::Value::String(project_id.to_string());
     json["runtimePackageId"] = serde_json::Value::String(runtime_package_id.to_string());
+    if let Some(value) = api_version.filter(|value| !value.trim().is_empty()) {
+        json["apiVersion"] = serde_json::Value::String(value);
+    }
     json
 }
 
@@ -1420,6 +1459,11 @@ mod tests {
     }
 
     impl HttpHost for ReqwestTestHttpHost {
+        /// Declares the image delivery supported by this HTTP host.
+        fn imageDelivery(&self) -> operit_host_api::HttpImageDelivery {
+            operit_host_api::HttpImageDelivery::Bytes
+        }
+
         /// Executes one test HTTP request through reqwest.
         fn executeHttpRequest(&self, request: HttpRequestData) -> HostResult<HttpResponseData> {
             let method = reqwest::Method::from_bytes(request.method.as_bytes())

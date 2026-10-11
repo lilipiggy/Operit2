@@ -45,6 +45,9 @@ class WorkspaceBrowserBookmarkSheet extends StatelessWidget {
                 },
                 icon: const Icon(Icons.close, size: 17),
                 visualDensity: VisualDensity.compact,
+                style: const ButtonStyle(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
                 constraints: const BoxConstraints.tightFor(
                   width: 30,
                   height: 30,

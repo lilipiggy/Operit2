@@ -1,4 +1,6 @@
+use operit_host_api::AtomicCounter::AtomicU64;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,7 @@ impl Default for PoolState {
 }
 
 static STATE: OnceLock<Mutex<PoolState>> = OnceLock::new();
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn state() -> &'static Mutex<PoolState> {
     STATE.get_or_init(|| Mutex::new(PoolState::default()))
@@ -41,6 +44,7 @@ fn state() -> &'static Mutex<PoolState> {
 pub struct MediaPoolManager;
 
 impl MediaPoolManager {
+    /// Sets the maximum number of media entries retained in memory.
     pub fn set_max_pool_size(value: usize) {
         if value > 0 {
             state()
@@ -53,6 +57,10 @@ impl MediaPoolManager {
 
     /// Registers media bytes for model input.
     pub fn add_media_bytes(bytes: &[u8], mime_type: &str) -> String {
+        if bytes.is_empty() {
+            AppLogger::e(TAG, "media bytes must not be empty");
+            return "error".to_string();
+        }
         if bytes.len() > MAX_INPUT_BYTES {
             AppLogger::e(
                 TAG,
@@ -68,6 +76,10 @@ impl MediaPoolManager {
 
     pub fn add_media_from_base64(base64: &str, mime_type: &str) -> String {
         let bytes = decode_base64(base64);
+        if bytes.is_empty() {
+            AppLogger::e(TAG, "media base64 must decode to non-empty bytes");
+            return "error".to_string();
+        }
         if bytes.len() > MAX_INPUT_BYTES {
             AppLogger::e(
                 TAG,
@@ -127,5 +139,6 @@ fn trim_locked(state: &mut PoolState) {
 
 fn new_id() -> String {
     let millis = operit_host_api::TimeUtils::currentTimeMillisU128();
-    format!("{millis:x}")
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{millis:x}-{sequence:x}")
 }

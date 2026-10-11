@@ -4,7 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use operit_host_api::HostEnvironmentDescriptor;
+use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatTurnOptions::ChatTurnOptions;
+use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_model::ToolPrompt::SystemToolPromptCategory;
 use operit_plugin_sdk::javascript::JsExecutionProvider;
 
@@ -13,9 +15,36 @@ use crate::tools::packTool::RuntimePackageManager::RuntimePackageManager;
 /// Future returned by runtime support async boundaries.
 pub type ToolRuntimeSupportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// Carries the exact AI turn state required to continue after a Core route change.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[allow(non_snake_case)]
+pub struct CoreRouteResumeContext {
+    pub runtimeChatHistory: Vec<ChatMessage>,
+    pub workspacePath: Option<String>,
+    pub promptFunctionType: PromptFunctionType,
+    pub enableThinking: bool,
+    pub enableMemoryAutoUpdate: bool,
+    pub roleCardId: String,
+    pub roleName: String,
+    pub groupOrchestrationMode: bool,
+    pub groupParticipantNamesText: Option<String>,
+    pub proxySenderName: Option<String>,
+    pub notifyReplyOverride: Option<bool>,
+    pub chatProviderIdOverride: Option<String>,
+    pub chatModelIdOverride: Option<String>,
+    pub turnOptions: ChatTurnOptions,
+}
+
 /// Handles one completed Core route change and its target-side continuation.
-pub type CoreRouteChangeHandler =
-    Arc<dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), String>>>> + Send + Sync>;
+pub type CoreRouteChangeHandler = Arc<
+    dyn Fn(
+            String,
+            String,
+            CoreRouteResumeContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>>>>
+        + Send
+        + Sync,
+>;
 
 /// Runtime-owned character card tool-access result consumed by tools.
 #[derive(Clone, Debug, Default)]
@@ -156,6 +185,16 @@ pub struct RuntimeChatSendRequest {
     pub turnOptions: ChatTurnOptions,
 }
 
+/// Carries one functional model request from the tool layer to the owning runtime.
+#[derive(Clone, Debug)]
+#[allow(non_snake_case)]
+pub struct RuntimeChatCallRequest {
+    pub functionType: operit_model::FunctionType::FunctionType,
+    pub turns: Vec<operit_model::PromptTurn::PromptTurn>,
+    pub recordTokenUsage: bool,
+    pub enableThinking: bool,
+}
+
 /// Describes one device exposed to Core routing tools.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(non_snake_case)]
@@ -166,6 +205,10 @@ pub struct RuntimeCoreNodeStatus {
     pub platform: String,
     pub model: String,
     pub reachable: bool,
+    /// Peer Links one routed request traverses, reported only for multi-hop members.
+    pub relayHops: Option<u32>,
+    /// Hop node ids from the first hop through the member, reported only for multi-hop members.
+    pub relayPath: Option<Vec<String>>,
 }
 
 /// Describes the current device and every member of its device space.
@@ -183,8 +226,25 @@ pub trait CoreNodeToolRuntime: Send + Sync {
     fn coreNodeRouteState(&self) -> Result<RuntimeCoreNodeRouteState, String>;
 }
 
+/// Authenticated explicit-node port capability injected by the owning Core tree.
+/// Implementations must drain dispatched Link calls even if the plugin stops awaiting.
+pub trait EdgeToolRuntime: Send + Sync {
+    fn execute(&self, nodeId: String, request: operit_link::CoreCallRequest)
+        -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<serde_json::Value, String>>;
+}
+
 /// Provides runtime-owned services that the tools crate must not own.
 pub trait ToolRuntimeSupport: Send + Sync {
+    /// Installs the Core-owned Edge port router, never a process-global client.
+    fn bindEdgeToolRuntime(&self, _runtime: Arc<dyn EdgeToolRuntime>) -> Result<(), String> {
+        Err("Edge tool routing is not supported by this runtime".into())
+    }
+    /// Dispatches an already validated port call through that router.
+    fn executeEdgeTool(&self, _nodeId: String, _request: operit_link::CoreCallRequest)
+        -> operit_plugin_sdk::javascript::JsExecutionCompletion<Result<serde_json::Value, String>> {
+        Box::pin(async { Err("Edge tool routing is not initialized".into()) })
+    }
+
     /// Installs the live Core routing capability owned by the outer proxy.
     #[allow(non_snake_case)]
     fn bindCoreNodeToolRuntime(&self, runtime: Arc<dyn CoreNodeToolRuntime>) -> Result<(), String>;
@@ -203,6 +263,7 @@ pub trait ToolRuntimeSupport: Send + Sync {
         &'a self,
         chatId: String,
         targetNodeId: String,
+        resumeContext: CoreRouteResumeContext,
     ) -> ToolRuntimeSupportFuture<'a, Result<(), String>>;
 
     /// Resolves role-card tool access for the active invocation context.
@@ -310,6 +371,13 @@ pub trait ToolRuntimeSupport: Send + Sync {
         request: RuntimeChatSendRequest,
     ) -> ToolRuntimeSupportFuture<'a, Result<(), String>>;
 
+    /// Calls a functional model without adding messages to chat history.
+    #[allow(non_snake_case)]
+    fn callChatModel<'a>(
+        &'a self,
+        request: RuntimeChatCallRequest,
+    ) -> ToolRuntimeSupportFuture<'a, Result<String, String>>;
+
     /// Lists character cards through parent-owned preferences.
     #[allow(non_snake_case)]
     fn listCharacterCards(&self) -> Result<Vec<RuntimeCharacterCardInfo>, String>;
@@ -322,6 +390,10 @@ pub trait ToolRuntimeSupport: Send + Sync {
     #[allow(non_snake_case)]
     fn characterMemoryBinding(&self, cardId: &str)
         -> Result<RuntimeCharacterMemoryBinding, String>;
+
+    /// Rejects memory owner keys that are not a registered character card or shared store.
+    #[allow(non_snake_case)]
+    fn assertMemoryOwnerExists(&self, ownerKey: &str) -> Result<(), String>;
 
     /// Loads memory search settings for an owner scope.
     #[allow(non_snake_case)]

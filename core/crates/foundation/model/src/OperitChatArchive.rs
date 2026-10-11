@@ -5,15 +5,17 @@ use super::ChatHistory::ChatHistory;
 use super::ChatMessage::ChatMessage;
 use super::MessagePart::MessagePart;
 use super::MessageVariantEntity::MessageVariantEntity;
+use super::Workspace::Workspace;
 
 pub const ARCHIVE_TYPE: &str = "operit_chat_archive";
-pub const CURRENT_FORMAT_VERSION: i32 = 3;
+pub const CURRENT_FORMAT_VERSION: i32 = 4;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OperitChatArchive {
     pub archiveType: String,
     pub formatVersion: i32,
     pub exportedAt: i64,
+    pub workspaces: Vec<Workspace>,
     pub chats: Vec<OperitArchivedChat>,
 }
 
@@ -29,7 +31,7 @@ pub struct OperitArchivedChat {
     pub currentWindowSize: i64,
     pub group: Option<String>,
     pub displayOrder: i64,
-    pub workspace: Option<String>,
+    pub workspaceId: Option<String>,
     pub parentChatId: Option<String>,
     pub characterCardName: Option<String>,
     pub characterGroupId: Option<String>,
@@ -55,7 +57,7 @@ impl OperitArchivedChat {
             currentWindowSize: history.currentWindowSize,
             group: history.group,
             displayOrder: history.displayOrder,
-            workspace: history.workspace,
+            workspaceId: history.workspaceId,
             parentChatId: history.parentChatId,
             characterCardName: history.characterCardName,
             characterGroupId: history.characterGroupId,
@@ -82,7 +84,9 @@ impl OperitArchivedChat {
             currentWindowSize: self.currentWindowSize,
             group: self.group.clone(),
             displayOrder: self.displayOrder,
-            workspace: self.workspace.clone(),
+            workspaceId: self.workspaceId.clone(),
+            workspaceName: None,
+            workspacePrimaryPath: None,
             parentChatId: self.parentChatId.clone(),
             characterCardName: self.characterCardName.clone(),
             characterGroupId: self.characterGroupId.clone(),

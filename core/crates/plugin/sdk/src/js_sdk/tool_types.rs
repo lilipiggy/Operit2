@@ -4,6 +4,8 @@ use super::results::*;
 
 /// Maps every built-in tool name to its concrete public result type.
 pub struct ToolResultMap {
+    pub edge_execute: EdgePortResultData,
+    pub io_execute: EdgePortResultData,
     pub list_files: DirectoryListingData,
     pub read_file: FileContentData,
     pub read_file_part: FilePartContentData,
@@ -121,9 +123,12 @@ pub struct ToolResultMap {
     pub delete_chat: ChatDeleteResultData,
     pub send_message_to_ai: MessageSendResultData,
     pub send_message_to_ai_streaming: MessageSendResultData,
+    pub call_chat_model: ChatCallResultData,
     pub list_character_cards: CharacterCardListResultData,
     pub get_chat_messages: ChatMessagesResultData,
+    pub get_chat_messages_range: ChatMessagesResultData,
     pub query_memory: MemoryQueryResultData,
+    pub get_memory_owner_key: String,
     pub get_memory_by_title: MemoryQueryResultData,
     pub create_memory: String,
     pub update_memory: String,

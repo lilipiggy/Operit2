@@ -18,6 +18,8 @@ pub const TOOLPKG_EVENT_INPUT_MENU_TOGGLE: &str = "toolpkg_input_menu_toggle";
 pub const TOOLPKG_EVENT_CHAT_INPUT: &str = "toolpkg_chat_input";
 pub const TOOLPKG_EVENT_CHAT_VIEW: &str = "toolpkg_chat_view";
 pub const TOOLPKG_EVENT_CHAT_MESSAGE: &str = "toolpkg_chat_message";
+pub const TOOLPKG_EVENT_CHAT_MESSAGE_MENU_ITEM: &str = "toolpkg_chat_message_menu_item";
+pub const TOOLPKG_EVENT_CHAT_RUNTIME: &str = "toolpkg_chat_runtime";
 pub const TOOLPKG_EVENT_NAVIGATION_ENTRY_ACTION: &str = "toolpkg_navigation_entry_action";
 pub const TOOLPKG_EVENT_HOST_EVENT: &str = "toolpkg_host_event";
 pub const TOOLPKG_EVENT_TOOL_LIFECYCLE: &str = "toolpkg_tool_lifecycle";
@@ -29,6 +31,8 @@ pub const TOOLPKG_EVENT_TOOL_PROMPT_COMPOSE: &str = "toolpkg_tool_prompt_compose
 pub const TOOLPKG_EVENT_PROMPT_FINALIZE: &str = "toolpkg_prompt_finalize";
 pub const TOOLPKG_EVENT_PROMPT_ESTIMATE_FINALIZE: &str = "toolpkg_prompt_estimate_finalize";
 pub const TOOLPKG_EVENT_SUMMARY_GENERATE: &str = "toolpkg_summary_generate";
+pub const TOOLPKG_EVENT_EDGE_EVENT: &str = "toolpkg_edge_event";
+pub const TOOLPKG_EVENT_CORE_COMMAND: &str = "toolpkg_core_command";
 pub const TOOLPKG_EVENT_AI_PROVIDER_LIST_MODELS: &str = "toolpkg_ai_provider_list_models";
 pub const TOOLPKG_EVENT_AI_PROVIDER_SEND_MESSAGE: &str = "toolpkg_ai_provider_send_message";
 pub const TOOLPKG_EVENT_AI_PROVIDER_TEST_CONNECTION: &str = "toolpkg_ai_provider_test_connection";
@@ -37,6 +41,7 @@ pub const TOOLPKG_EVENT_AI_PROVIDER_CALCULATE_INPUT_TOKENS: &str =
 
 pub const TOOLPKG_REGISTRATION_TOOLBOX_UI_MODULE: &str = "registerToolPkgToolboxUiModule";
 pub const TOOLPKG_REGISTRATION_UI_ROUTE: &str = "registerToolPkgUiRoute";
+pub const TOOLPKG_REGISTRATION_CHAT_COMPOSER_SLOT: &str = "registerToolPkgChatComposerSlot";
 pub const TOOLPKG_REGISTRATION_NAVIGATION_ENTRY: &str = "registerToolPkgNavigationEntry";
 pub const TOOLPKG_REGISTRATION_DESKTOP_WIDGET: &str = "registerToolPkgDesktopWidget";
 pub const TOOLPKG_REGISTRATION_APP_LIFECYCLE_HOOK: &str = "registerToolPkgAppLifecycleHook";
@@ -48,6 +53,8 @@ pub const TOOLPKG_REGISTRATION_INPUT_MENU_TOGGLE_PLUGIN: &str =
 pub const TOOLPKG_REGISTRATION_CHAT_INPUT_HOOK: &str = "registerToolPkgChatInputHook";
 pub const TOOLPKG_REGISTRATION_CHAT_VIEW_HOOK: &str = "registerToolPkgChatViewHook";
 pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_HOOK: &str = "registerToolPkgChatMessageHook";
+pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_MENU_ITEM: &str = "registerToolPkgChatMessageMenuItem";
+pub const TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK: &str = "registerToolPkgChatRuntimeHook";
 pub const TOOLPKG_REGISTRATION_HOST_EVENT_HOOK: &str = "registerToolPkgHostEventHook";
 pub const TOOLPKG_REGISTRATION_TOOL_LIFECYCLE_HOOK: &str = "registerToolPkgToolLifecycleHook";
 pub const TOOLPKG_REGISTRATION_PROMPT_INPUT_HOOK: &str = "registerToolPkgPromptInputHook";
@@ -62,11 +69,15 @@ pub const TOOLPKG_REGISTRATION_PROMPT_FINALIZE_HOOK: &str = "registerToolPkgProm
 pub const TOOLPKG_REGISTRATION_PROMPT_ESTIMATE_FINALIZE_HOOK: &str =
     "registerToolPkgPromptEstimateFinalizeHook";
 pub const TOOLPKG_REGISTRATION_SUMMARY_GENERATE_HOOK: &str = "registerToolPkgSummaryGenerateHook";
+pub const TOOLPKG_REGISTRATION_CORE_COMMAND: &str = "registerToolPkgCoreCommand";
 pub const TOOLPKG_REGISTRATION_AI_PROVIDER: &str = "registerToolPkgAiProvider";
+pub const TOOLPKG_REGISTRATION_MANIFEST_EXTENSION: &str = "registerManifestExtension";
 
 pub const TOOLPKG_NAV_SURFACE_TOOLBOX: &str = "toolbox";
 pub const TOOLPKG_NAV_SURFACE_MAIN_SIDEBAR_PLUGINS: &str = "main_sidebar_plugins";
 pub const TOOLPKG_NAV_SURFACE_APP_BAR: &str = "app_bar";
+
+pub const TOOLPKG_CHAT_COMPOSER_SLOT_ABOVE_INPUT: &str = "above_input";
 
 /// Builds the globally unique route id used by a ToolPkg UI route.
 #[allow(non_snake_case)]

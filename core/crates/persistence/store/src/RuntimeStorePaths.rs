@@ -77,6 +77,11 @@ impl RuntimeStorePaths {
         self.runtime_storage_path(CHARACTER_GROUPS_PREFERENCES_PATH)
     }
 
+    /// Returns the named workspace preferences path.
+    pub fn workspaces_preferences_path(&self) -> PathBuf {
+        self.runtime_storage_path(WORKSPACES_PREFERENCES_PATH)
+    }
+
     /// Returns the prompt tag preferences path.
     pub fn prompt_tags_preferences_path(&self) -> PathBuf {
         self.runtime_storage_path(PROMPT_TAGS_PREFERENCES_PATH)

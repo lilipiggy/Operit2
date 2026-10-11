@@ -23,6 +23,20 @@ pub fn dart_default_value(dart_ty: &str) -> &'static str {
     }
 }
 
+/// Returns a Dart default expression for serde-defaulted fields when known.
+fn dart_field_default_expr(field: &SerializableField, dart_ty: &str) -> Option<&'static str> {
+    if !field.has_serde_default {
+        return None;
+    }
+    match dart_ty {
+        "String" | "int" | "double" | "bool" | "Uint8List" => Some(dart_default_value(dart_ty)),
+        ty if ty.starts_with("List<") || ty.starts_with("Map<") || ty.ends_with('?') => {
+            Some(dart_default_value(ty))
+        }
+        _ => None,
+    }
+}
+
 /// Writes generated Flutter Dart proxy models and clients from one proxy scan result.
 pub fn write_dart_proxy_artifacts(
     manifest_dir: &Path,
@@ -199,12 +213,18 @@ fn render_dart_clients(
         ));
         output.push_str(&format!(
             "  {class_name} get {getter_name} => {class_name}._(bridge, {});\n",
-            object.object_id
+            format!("{:?}", object.object_id)
         ));
+        if object.schema_key == "chatRuntimeHolderMain" {
+            output.push_str(&format!(
+                "  /// Returns the generated proxy for one detached chat runtime.\n  {class_name} chatRuntimeHolderMainForSlot(String slotId) => {class_name}._(bridge, {}, objectArgs: <String, Object?>{{'__core_instance_id': slotId}});\n",
+                format!("{:?}", object.object_id)
+            ));
+        }
         if object.schema_key == "repository.memoryRepository" {
             output.push_str(&format!(
                 "  /// Returns the generated proxy for one memory owner.\n  {class_name} repositoryMemoryRepositoryForOwner(String ownerKey) => {class_name}._(bridge, {}, objectArgs: <String, Object?>{{'__core_instance_id': ownerKey}});\n",
-                object.object_id
+                format!("{:?}", object.object_id)
             ));
         }
     }
@@ -306,7 +326,7 @@ fn render_dart_namespace_class(
             let proxy_class = dart_proxy_class_name(&object.schema_key);
             output.push_str(&format!(
                 "  /// Returns a generated proxy client for `{child_path}`.\n  {proxy_class} get {getter_name} => {proxy_class}._(bridge, {});\n",
-                object.object_id
+                format!("{:?}", object.object_id)
             ));
         }
     }
@@ -321,7 +341,7 @@ fn include_source_tree_model_types(
 ) {
     for type_name in serializable_types.keys() {
         let crate_name = type_name.split("::").next().unwrap_or_default();
-        if !matches!(crate_name, "operit_access_runtime" | "operit_node_runtime") {
+        if !matches!(crate_name, "operit_node_runtime") {
             continue;
         }
         collect_reachable_type(type_name, serializable_types, reachable);
@@ -340,7 +360,7 @@ fn render_dart_client_class(
         "  const {class_name}._(this.bridge, this.objectId, {{this.objectArgs = const <String, Object?>{{}}}});\n\n"
     ));
     output.push_str("  final OperitRuntimeBridge bridge;\n\n");
-    output.push_str("  final int objectId;\n\n");
+    output.push_str("  final String objectId;\n\n");
     output.push_str("  final Map<String, Object?> objectArgs;\n\n");
     for method in &object.methods {
         if method.factory_protocol().is_some() {
@@ -433,7 +453,7 @@ fn render_dart_reverse_stream_method(
     output.push_str("    final sink = await bridge.push(\n");
     output.push_str("      CorePushRequest(\n");
     output.push_str("        requestId: _coreProxyRequestId(),\n");
-    output.push_str("        targetObjectId: objectId,\n");
+    output.push_str("        target: objectId,\n");
     output.push_str(&format!("        methodName: '{}',\n", method.name));
     output.push_str(&format!(
         "        args: _coreProxyArgs(<String, Object?>{{{open_args}}}, objectArgs),\n"
@@ -482,7 +502,7 @@ fn render_dart_call_method(
     ));
     output.push_str("      CoreCallRequest(\n");
     output.push_str("        requestId: _coreProxyRequestId(),\n");
-    output.push_str("        targetObjectId: objectId,\n");
+    output.push_str("        target: objectId,\n");
     output.push_str(&format!("        methodName: '{}',\n", method.name));
     output.push_str(&format!(
         "        args: _coreProxyArgs({args}, objectArgs),\n"
@@ -493,7 +513,7 @@ fn render_dart_call_method(
         output.push_str("    decodeNativeCoreVoidResult(responseBytes);\n");
     } else {
         output.push_str(&format!(
-            "    return decodeNativeCoreResult<{}>(responseBytes, decode: (reader) => {}, targetObjectId: objectId, embeddedStreamFactory: bridge.openEmbeddedCoreStream);\n",
+            "    return decodeNativeCoreResult<{}>(responseBytes, decode: (reader) => {}, target: objectId, embeddedStreamFactory: bridge.openEmbeddedCoreStream);\n",
             return_type,
             dart_message_pack_decode_expr("reader", &return_type, serializable_types)
         ));
@@ -547,18 +567,19 @@ fn render_dart_factory_method(
     } else {
         format!("<String, Object?>{{{constructor_args}}}")
     };
-    let target_object_id = objects
+    let target_route = objects
         .iter()
         .find(|candidate| candidate.schema_key == factory.target_schema_key)
         .expect("factory target object must be generated")
-        .object_id;
+        .object_id.clone();
     let mut output = render_dart_doc_comments(method, "  ");
     output.push_str(&format!(
-        "  {class_name} {factory_method_name}({params}) {{\n    return {class_name}._(bridge, {target_object_id}, objectArgs: {object_args_expr});\n  }}\n\n"
+        "  {class_name} {factory_method_name}({params}) {{\n    return {class_name}._(bridge, {target_route:?}, objectArgs: {object_args_expr});\n  }}\n\n"
     ));
     output
 }
 
+/// Renders a typed watch, decoding list deltas at the element boundary.
 fn render_dart_watch_method(
     _object: &SourceObject,
     method: &SourceMethod,
@@ -574,20 +595,36 @@ fn render_dart_watch_method(
     output.push_str(&format!(
         "  Stream<{value_type}> {method_name}({params}) {{\n"
     ));
-    output.push_str("    final eventValueDecoder = CoreLinkEventValueDecoder();\n");
+    let list_item_type = value_type
+        .strip_prefix("List<")
+        .and_then(|inner| inner.strip_suffix('>'));
+    if let Some(item_type) = list_item_type {
+        output.push_str(&format!(
+            "    final eventValueDecoder = CoreLinkListEventDecoder<{item_type}>();\n"
+        ));
+    } else {
+        output.push_str("    final eventValueDecoder = CoreLinkEventValueDecoder();\n");
+    }
     output.push_str("    return bridge\n");
     output.push_str(&format!(
-        "        .watchStream(CoreWatchRequest(requestId: _coreProxyRequestId(), targetObjectId: objectId, propertyName: '{}', args: _coreProxyArgs({args}, objectArgs)))\n",
+        "        .watchStream(CoreWatchRequest(requestId: _coreProxyRequestId(), target: objectId, propertyName: '{}', args: _coreProxyArgs({args}, objectArgs)))\n",
         method.name
     ));
     output.push_str("        .where((event) => event.kind != 'Completed')\n");
     output.push_str("        .map((event) {\n");
-    output.push_str(&format!(
-            "          return eventValueDecoder.decode<{}>(event, decode: (valueBytes) => decodeCoreLink<{}>(valueBytes, decode: (reader) => {}, targetObjectId: event.targetObjectId, embeddedStreamFactory: bridge.openEmbeddedCoreStream));\n",
-        value_type,
-        value_type,
-        dart_message_pack_decode_expr("reader", &value_type, serializable_types)
-    ));
+    if let Some(item_type) = list_item_type {
+        output.push_str(&format!(
+            "          return eventValueDecoder.decode(event, decodeItem: (reader) => {}, embeddedStreamFactory: bridge.openEmbeddedCoreStream);\n",
+            dart_message_pack_decode_expr("reader", item_type, serializable_types)
+        ));
+    } else {
+        output.push_str(&format!(
+                "          return eventValueDecoder.decode<{}>(event, decode: (valueBytes) => decodeCoreLink<{}>(valueBytes, decode: (reader) => {}, target: event.target, embeddedStreamFactory: bridge.openEmbeddedCoreStream));\n",
+            value_type,
+            value_type,
+            dart_message_pack_decode_expr("reader", &value_type, serializable_types)
+        ));
+    }
     output.push_str("        });\n");
     output.push_str("  }\n\n");
     output
@@ -626,14 +663,24 @@ fn render_dart_struct(
         output.push_str(&format!("    return {class_name}(\n"));
         for field in fields {
             let field_type = dart_type(&field.ty, serializable_types);
+            let decoded = dart_decode_expr(
+                &format!("json['{}']", field.json_name),
+                &field_type,
+                serializable_types,
+            );
+            let value_expr = match dart_field_default_expr(field, &field_type) {
+                Some(default) => format!(
+                    "json.containsKey('{}') ? {} : {}",
+                    dart_string_literal(&field.json_name),
+                    decoded,
+                    default
+                ),
+                None => decoded,
+            };
             output.push_str(&format!(
                 "      {}: {},\n",
                 dart_identifier(&field.name),
-                dart_decode_expr(
-                    &format!("json['{}']", field.json_name),
-                    &field_type,
-                    serializable_types
-                )
+                value_expr
             ));
         }
         output.push_str("    );\n");
@@ -692,7 +739,7 @@ fn render_dart_message_pack_struct_decoder(
         output.push_str(&format!("    late {field_type} {field_name};\n"));
         output.push_str(&format!("    var has_{field_name} = false;\n"));
     }
-    output.push_str("    for (var index = 0; index < fieldCount; index += 1) {\n");
+    output.push_str("    for (var fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {\n");
     output.push_str("      switch (reader.readString()) {\n");
     for field in fields {
         let field_type = dart_type(&field.ty, serializable_types);
@@ -706,10 +753,17 @@ fn render_dart_message_pack_struct_decoder(
     output.push_str("        default:\n          reader.skipValue();\n      }\n    }\n");
     for field in fields {
         let field_name = dart_identifier(&field.name);
-        output.push_str(&format!(
-            "    if (!has_{field_name}) {{\n      throw FormatException('Missing {class_name}.{}');\n    }}\n",
-            dart_string_literal(&field.json_name),
-        ));
+        let field_type = dart_type(&field.ty, serializable_types);
+        if let Some(default) = dart_field_default_expr(field, &field_type) {
+            output.push_str(&format!(
+                "    if (!has_{field_name}) {{\n      {field_name} = {default};\n    }}\n"
+            ));
+        } else {
+            output.push_str(&format!(
+                "    if (!has_{field_name}) {{\n      throw FormatException('Missing {class_name}.{}');\n    }}\n",
+                dart_string_literal(&field.json_name),
+            ));
+        }
     }
     if fields.is_empty() {
         output.push_str(&format!("    return {class_name}();\n"));

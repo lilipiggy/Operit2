@@ -140,8 +140,7 @@ async fn rollback_chat_with_core(core: &mut CliCore, args: &[String]) -> Result<
 
 /// Reads the active chat id used by timestamp-scoped message commands.
 async fn current_chat_id_with_core(core: &mut CliCore) -> Result<String, String> {
-    core
-        .chat_runtime_holder_main()
+    core.chat_runtime_holder_main()
         .currentChatIdFlowSnapshot()
         .await
         .map_err(|error| error.to_string())?
@@ -203,7 +202,7 @@ async fn update_chat_locked_with_core(core: &mut CliCore, args: &[String]) -> Re
         .updateChatLocked(chatId.clone(), locked)
         .await
         .map_err(|error| error.to_string())?;
-    println!("chat locked={locked}: {chatId}");
+    println!("Chat {chatId} locked: {locked}");
     Ok(())
 }
 
@@ -213,7 +212,7 @@ async fn update_chat_pinned_with_core(core: &mut CliCore, args: &[String]) -> Re
         .updateChatPinned(chatId.clone(), pinned)
         .await
         .map_err(|error| error.to_string())?;
-    println!("chat pinned={pinned}: {chatId}");
+    println!("Chat {chatId} pinned: {pinned}");
     Ok(())
 }
 
@@ -563,7 +562,7 @@ async fn run_shell_command_with_core(core: &mut CliCore, args: &[String]) -> Res
     let mut queuedAttachmentPaths = Vec::<String>::new();
     let initialChatId = initialize_shell_chat_with_core(core, &shellArgs).await?;
     println!("interactive shell ready");
-    println!("chat={initialChatId}");
+    println!("Chat: {initialChatId}");
     println!("type /help for commands");
     loop {
         let currentChatId = current_shell_chat_id_with_core(core).await?;
@@ -779,7 +778,7 @@ async fn handle_shell_command_with_core(
                 .await
                 .map_err(|error| error.to_string())?;
             let chatId = current_shell_chat_id_with_core(core).await?;
-            println!("chat={chatId}");
+            println!("Chat: {chatId}");
         }
         "switch" => {
             let chatId = args
@@ -790,7 +789,7 @@ async fn handle_shell_command_with_core(
                 .switchChat(chatId.clone())
                 .await
                 .map_err(|error| error.to_string())?;
-            println!("chat={chatId}");
+            println!("Chat: {chatId}");
         }
         "resume" => {
             let currentChatId = current_shell_chat_id_with_core(core).await?;
@@ -821,7 +820,7 @@ async fn handle_shell_command_with_core(
                 .switchChat(target.id.clone())
                 .await
                 .map_err(|error| error.to_string())?;
-            println!("chat={}", target.id);
+            println!("Chat: {}", target.id);
         }
         "show" => {
             let chatId = current_shell_chat_id_with_core(core).await?;
@@ -837,7 +836,7 @@ async fn handle_shell_command_with_core(
         }
         "attachments" => {
             if queuedAttachmentPaths.is_empty() {
-                println!("attachments=none");
+                println!("Attachments: none");
             } else {
                 for path in queuedAttachmentPaths.iter() {
                     println!("{path}");
@@ -937,18 +936,32 @@ fn print_shell_usage() {
     println!("/send <message>");
 }
 
+/// Prints a completed chat send result in human-readable or explicit JSON form.
 fn print_chat_send_result(result: &ChatSendResult) {
-    print!("{}", result.aiMessage.displayText());
-    println!();
-    eprintln!(
-        "chat={} provider={} modelName={} inputTokens={} cachedInputTokens={} outputTokens={}",
-        result.chatId,
-        result.aiMessage.provider,
-        result.aiMessage.modelName,
-        result.aiMessage.inputTokens,
-        result.aiMessage.cachedInputTokens,
-        result.aiMessage.outputTokens
-    );
+    if crate::cli::cli_json_mode() {
+        crate::cli::emit_cli_json(serde_json::json!({
+            "chatId": result.chatId,
+            "message": result.aiMessage,
+            "text": result.aiMessage.displayText(),
+            "provider": result.aiMessage.provider,
+            "modelName": result.aiMessage.modelName,
+            "inputTokens": result.aiMessage.inputTokens,
+            "cachedInputTokens": result.aiMessage.cachedInputTokens,
+            "outputTokens": result.aiMessage.outputTokens,
+        }));
+    } else {
+        print!("{}", result.aiMessage.displayText());
+        println!();
+        eprintln!(
+            "chat={} provider={} modelName={} inputTokens={} cachedInputTokens={} outputTokens={}",
+            result.chatId,
+            result.aiMessage.provider,
+            result.aiMessage.modelName,
+            result.aiMessage.inputTokens,
+            result.aiMessage.cachedInputTokens,
+            result.aiMessage.outputTokens
+        );
+    }
 }
 
 /// Sends one chat message command through a CoreNode-aware CLI proxy.
@@ -1078,6 +1091,7 @@ async fn wait_for_committed_ai_message_with_core(
     }
 }
 
+/// Builds one attachment descriptor from a local filesystem path.
 pub(crate) fn build_attachment_info(path: &str) -> Result<AttachmentInfo, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("attachment metadata failed: {path}: {error}"))?;
@@ -1086,16 +1100,28 @@ pub(crate) fn build_attachment_info(path: &str) -> Result<AttachmentInfo, String
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("attachment file name invalid: {path}"))?
         .to_string();
-    let content = fs::read_to_string(path).unwrap_or_default();
+    let mimeType = guess_mime_type(path).to_string();
+    let content = attachment_text_content(path, &mimeType)?;
     Ok(AttachmentInfo {
+        nodeId: operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore::localNodeId(),
         filePath: path.to_string(),
         fileName,
-        mimeType: guess_mime_type(path).to_string(),
+        mimeType,
         fileSize: metadata.len() as i64,
         content,
     })
 }
 
+/// Reads text attachment content for MIME types carried inline by the CLI.
+fn attachment_text_content(path: &str, mimeType: &str) -> Result<String, String> {
+    match mimeType {
+        "text/plain" => fs::read_to_string(path)
+            .map_err(|error| format!("attachment text read failed: {path}: {error}")),
+        _ => Ok(String::new()),
+    }
+}
+
+/// Returns the MIME type associated with a local attachment path.
 pub(crate) fn guess_mime_type(path: &str) -> &'static str {
     match Path::new(path)
         .extension()
@@ -1119,16 +1145,19 @@ pub(crate) fn guess_mime_type(path: &str) -> &'static str {
 }
 
 fn print_chat_history_header(chat: &operit_model::ChatHistory::ChatHistory) {
-    println!("id={}", chat.id);
-    println!("title={}", chat.title);
-    println!("createdAt={}", chat.createdAt);
-    println!("updatedAt={}", chat.updatedAt);
-    println!("inputTokens={}", chat.inputTokens);
-    println!("outputTokens={}", chat.outputTokens);
-    println!("currentWindowSize={}", chat.currentWindowSize);
-    println!("group={}", chat.group.clone().unwrap_or_default());
-    println!("displayOrder={}", chat.displayOrder);
-    println!("workspace={}", chat.workspace.clone().unwrap_or_default());
+    println!("Chat {}", chat.id);
+    println!("Title: {}", chat.title);
+    println!("Created: {}", chat.createdAt);
+    println!("Updated: {}", chat.updatedAt);
+    println!("Input tokens: {}", chat.inputTokens);
+    println!("Output tokens: {}", chat.outputTokens);
+    println!("Context window: {}", chat.currentWindowSize);
+    println!("Group: {}", chat.group.clone().unwrap_or_default());
+    println!("Display order: {}", chat.displayOrder);
+    println!(
+        "Workspace: {}",
+        chat.workspacePrimaryPath.clone().unwrap_or_default()
+    );
     println!(
         "parentChatId={}",
         chat.parentChatId.clone().unwrap_or_default()
@@ -1141,29 +1170,29 @@ fn print_chat_history_header(chat: &operit_model::ChatHistory::ChatHistory) {
         "characterGroupId={}",
         chat.characterGroupId.clone().unwrap_or_default()
     );
-    println!("locked={}", chat.locked);
-    println!("pinned={}", chat.pinned);
+    println!("Locked: {}", chat.locked);
+    println!("Pinned: {}", chat.pinned);
 }
 
 fn print_chat_message(message: &operit_model::ChatMessage::ChatMessage) {
     println!("--- message ---");
-    println!("sender={}", message.sender);
-    println!("timestamp={}", message.timestamp);
-    println!("roleName={}", message.roleName);
-    println!("selectedVariantIndex={}", message.selectedVariantIndex);
-    println!("variantCount={}", message.variantCount);
-    println!("provider={}", message.provider);
-    println!("modelName={}", message.modelName);
-    println!("inputTokens={}", message.inputTokens);
-    println!("cachedInputTokens={}", message.cachedInputTokens);
-    println!("outputTokens={}", message.outputTokens);
-    println!("sentAt={}", message.sentAt);
-    println!("waitDurationMs={}", message.waitDurationMs);
-    println!("outputDurationMs={}", message.outputDurationMs);
-    println!("completedAt={}", message.completedAt);
-    println!("displayMode={:?}", message.displayMode);
-    println!("isFavorite={}", message.isFavorite);
-    println!("content={}", message.displayText());
+    println!("Sender: {}", message.sender);
+    println!("Timestamp: {}", message.timestamp);
+    println!("Role: {}", message.roleName);
+    println!("Selected variant: {}", message.selectedVariantIndex);
+    println!("Variants: {}", message.variantCount);
+    println!("Provider: {}", message.provider);
+    println!("Model: {}", message.modelName);
+    println!("Input tokens: {}", message.inputTokens);
+    println!("Cached input tokens: {}", message.cachedInputTokens);
+    println!("Output tokens: {}", message.outputTokens);
+    println!("Sent at: {}", message.sentAt);
+    println!("Wait duration: {} ms", message.waitDurationMs);
+    println!("Output duration: {} ms", message.outputDurationMs);
+    println!("Completed at: {}", message.completedAt);
+    println!("Display mode: {:?}", message.displayMode);
+    println!("Favorite: {}", message.isFavorite);
+    println!("Content: {}", message.displayText());
 }
 
 fn nonBlankString(value: String) -> Option<String> {

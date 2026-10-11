@@ -10,6 +10,190 @@ import 'package:operit2/core/link/CoreLinkProtocol.dart';
 
 /// Verifies Dart preserves MessagePack bin values as Uint8List.
 void main() {
+  /// Verifies arrays are growable at decode time without copying the decoded tree.
+  test('raw decoding creates independently growable nested arrays', () {
+    final bytes = encodeCoreLink([
+      {
+        'tokens': ['old'],
+      },
+      [],
+    ]);
+    final first = decodeCoreLink<List<Object?>>(bytes);
+    final second = decodeCoreLink<List<Object?>>(bytes);
+    final tokens = (first[0] as Map<String, Object?>)['tokens'] as List;
+    tokens.add('new');
+    tokens.removeAt(0);
+    (first[1] as List).add(1);
+    first.add('tail');
+    expect(first, [
+      {
+        'tokens': ['new'],
+      },
+      [1],
+      'tail',
+    ]);
+    expect(second, [
+      {
+        'tokens': ['old'],
+      },
+      [],
+    ]);
+    expect(encodeCoreLink(second), bytes);
+  });
+
+  test('snapshot and delta byte values cannot mutate the retained base', () {
+    final decoder = CoreLinkEventValueDecoder();
+    Map<String, Object?> read(CoreLinkValueReader reader) =>
+        reader.readValue() as Map<String, Object?>;
+    for (final kind in ['Snapshot', 'Changed']) {
+      final event = _rawCoreEvent(
+        kind: kind,
+        value: {
+          'bytes': Uint8List.fromList([1, 2]),
+          'count': 0,
+        },
+      );
+      final snapshot = decoder.decodeValue(event, decode: read);
+      (snapshot['bytes'] as Uint8List)[0] = 99;
+      for (var count = 1; count <= 2; count++) {
+        final result = decoder.decodeValue(
+          _rawCoreEvent(
+            kind: 'Delta',
+            value: {
+              r'$coreDelta': [
+                {
+                  'op': 'set',
+                  'path': ['count'],
+                  'value': count,
+                },
+              ],
+            },
+          ),
+          decode: read,
+        );
+        expect(result['bytes'], [1, 2]);
+        expect(result['count'], count);
+        (result['bytes'] as Uint8List)[0] = 88;
+      }
+    }
+  });
+
+  test('typed tree reader traverses nested empty arrays across deltas', () {
+    final decoder = CoreLinkEventValueDecoder();
+    List<List<int>> read(CoreLinkValueReader reader) => List.generate(
+      reader.readArrayLength(),
+      (_) => List.generate(reader.readArrayLength(), (_) => reader.readInt()),
+    );
+    expect(
+      decoder.decodeValue(
+        _rawCoreEvent(
+          kind: 'Snapshot',
+          value: [
+            [],
+            [1, 2],
+            [],
+            [3],
+          ],
+        ),
+        decode: read,
+      ),
+      [
+        [],
+        [1, 2],
+        [],
+        [3],
+      ],
+    );
+    expect(
+      decoder.decodeValue(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'set',
+                'path': [1, 0],
+                'value': 9,
+              },
+              {
+                'op': 'remove',
+                'path': [1, 1],
+              },
+              {
+                'op': 'set',
+                'path': [2, 0],
+                'value': 4,
+              },
+            ],
+          },
+        ),
+        decode: read,
+      ),
+      [
+        [],
+        [9],
+        [4],
+        [3],
+      ],
+    );
+    expect(
+      decoder.decodeValue(
+        _rawCoreEvent(kind: 'Delta', value: {r'$coreDelta': []}),
+        decode: read,
+      ),
+      [
+        [],
+        [9],
+        [4],
+        [3],
+      ],
+    );
+    expect(
+      () => CoreLinkEventValueDecoder().decodeValue(
+        _rawCoreEvent(kind: 'Delta', value: {r'$coreDelta': []}),
+        decode: read,
+      ),
+      throwsStateError,
+    );
+  });
+
+  test(
+    'error labels stay concise while diagnostics retain the full native trace',
+    () {
+      final trace = List.generate(
+        100,
+        (index) => '$index: <unknown>',
+      ).join('\n');
+      final error = CoreLinkError(
+        code: 'INTERNAL_ERROR',
+        message: 'watch request=42 object=4 property=progress',
+        backtrace: trace,
+      );
+      expect(
+        error.toString(),
+        'INTERNAL_ERROR: watch request=42 object=4 property=progress',
+      );
+      expect(error.toDiagnosticString(), contains(trace));
+      expect(error.backtrace, trace);
+    },
+  );
+  test('route permission errors expose structured client state', () {
+    const error = CoreLinkError(
+      code: 'ROUTE_PERMISSION_DENIED',
+      message: 'Space route chatMessagesFlow requires capability chat.read',
+      details: <String, Object?>{
+        'method': 'chatMessagesFlow',
+        'requiredCapability': 'chat.read',
+        'targetNodeId': 'windows-node',
+      },
+    );
+
+    expect(error.isRoutePermissionDenied, isTrue);
+    expect(error.requiredCapability, 'chat.read');
+    expect(error.targetNodeId, 'windows-node');
+    expect(error.deniedMethod, 'chatMessagesFlow');
+  });
+
   test('native bytes use MessagePack bin', () {
     final encoded = encodeCoreLink(Uint8List.fromList(<int>[1, 2, 3, 4]));
 
@@ -54,7 +238,7 @@ void main() {
   test('native core call uses a fixed MessagePack tuple', () {
     const request = CoreCallRequest(
       requestId: 'request-1',
-      targetObjectId: 15,
+      target: 'core/test15',
       methodName: 'getCards',
       args: <String, Object?>{'includeArchived': false},
     );
@@ -65,7 +249,7 @@ void main() {
     expect(encoded.first, 0x94);
     expect(decoded, <Object?>[
       'request-1',
-      15,
+      'core/test15',
       'getCards',
       <String, Object?>{'includeArchived': false},
     ]);
@@ -114,13 +298,13 @@ void main() {
   test('native push and watch requests use fixed MessagePack tuples', () {
     const request = CorePushRequest(
       requestId: 'push-1',
-      targetObjectId: 41,
+      target: 'core/test41',
       methodName: 'interact',
     );
 
     expect(decodeCoreLink(encodeNativeCorePushOpenRequest(request)), <Object?>[
       'push-1',
-      41,
+      'core/test41',
       'interact',
       <String, Object?>{},
     ]);
@@ -131,19 +315,19 @@ void main() {
 
     const watchRequest = CoreWatchRequest(
       requestId: 'watch-1',
-      targetObjectId: 15,
+      target: 'core/test15',
       propertyName: 'cards',
       args: null,
     );
     expect(
       decodeCoreLink(encodeNativeCoreWatchSnapshotRequest(watchRequest)),
-      <Object?>['watch-1', 15, 'cards', null],
+      <Object?>['watch-1', 'core/test15', 'cards', null],
     );
     expect(
       decodeCoreLink(
         encodeNativeCoreWatchStreamRequest('subscription-1', watchRequest),
       ),
-      <Object?>['subscription-1', 'watch-1', 15, 'cards', null],
+      <Object?>['subscription-1', 'watch-1', 'core/test15', 'cards', null],
     );
   });
 
@@ -174,7 +358,7 @@ void main() {
         0,
         <Object?>[
           'watch-1',
-          15,
+          'core/test15',
           'cards',
           'Snapshot',
           <Object?>['card-1'],
@@ -182,13 +366,13 @@ void main() {
       ]),
     );
     expect(snapshot.requestId, 'watch-1');
-    expect(snapshot.targetObjectId, 15);
+    expect(snapshot.target, 'core/test15');
     expect(snapshot.kind, 'Snapshot');
 
     final frame = decodeNativeCoreWatchFrame(
       encodeCoreLink(<Object?>[
         'subscription-1',
-        <Object?>[null, 15, 'cards', 'Completed', null],
+        <Object?>[null, 'core/test15', 'cards', 'Completed', null],
       ]),
     );
     expect(frame.subscriptionId, 'subscription-1');
@@ -228,13 +412,10 @@ void main() {
         ],
       );
 
-      final first = decoder.decode<List<Stream<String>?>>(
+      final first = decoder.decodeValue<List<Stream<String>?>>(
         snapshot,
-        decode: (bytes) => decodeCoreLink<List<Stream<String>?>>(
-          bytes,
-          decode: _decodeStreamList,
-          embeddedStreamFactory: factory.open,
-        ),
+        decode: _decodeStreamList,
+        embeddedStreamFactory: factory.open,
       );
 
       expect(first.single, isNull);
@@ -249,7 +430,7 @@ void main() {
               'value': <String, Object?>{
                 r'$coreStream': <String, Object?>{
                   'streamId': 'stream-ai',
-                  'targetObjectId': 64,
+                  'target': 'core/test64',
                   'propertyName': 'openCoreStream',
                   'args': <String, Object?>{'streamId': 'stream-ai'},
                 },
@@ -259,26 +440,450 @@ void main() {
         },
       );
 
-      final second = decoder.decode<List<Stream<String>?>>(
+      final second = decoder.decodeValue<List<Stream<String>?>>(
         delta,
-        decode: (bytes) => decodeCoreLink<List<Stream<String>?>>(
-          bytes,
-          decode: _decodeStreamList,
-          embeddedStreamFactory: factory.open,
-        ),
+        decode: _decodeStreamList,
+        embeddedStreamFactory: factory.open,
       );
 
       expect(factory.openedStreamIds, <String>['stream-ai']);
       expect(await second.single!.first, 'stream chunk');
     },
   );
+
+  test('list deltas decode only touched items and retain other identities', () {
+    final decoder = CoreLinkListEventDecoder<Map<String, Object?>>();
+    var decodedItems = 0;
+
+    /// Decodes one test item and records the number of typed decodes.
+    Map<String, Object?> readItem(CoreLinkValueReader reader) {
+      decodedItems += 1;
+      return reader.readValue() as Map<String, Object?>;
+    }
+
+    final first = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Snapshot',
+        value: [
+          {'text': 'old', 'other': 7},
+          {'text': 'unchanged'},
+        ],
+      ),
+      decodeItem: readItem,
+    );
+    expect(decodedItems, 2);
+    final second = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Delta',
+        value: {
+          r'$coreDelta': [
+            {
+              'op': 'set',
+              'path': [0, 'text'],
+              'value': 'new',
+            },
+            {
+              'op': 'set',
+              'path': [0, 'other'],
+              'value': 8,
+            },
+            {
+              'op': 'set',
+              'path': [2],
+              'value': {'text': 'appended'},
+            },
+          ],
+        },
+      ),
+      decodeItem: readItem,
+    );
+    expect(decodedItems, 4);
+    expect(second, [
+      {'text': 'new', 'other': 8},
+      {'text': 'unchanged'},
+      {'text': 'appended'},
+    ]);
+    expect(identical(first[1], second[1]), isTrue);
+    expect(first[0], {'text': 'old', 'other': 7});
+
+    final third = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Delta',
+        value: {
+          r'$coreDelta': [
+            {
+              'op': 'remove',
+              'path': [2],
+            },
+            {
+              'op': 'remove',
+              'path': [0, 'other'],
+            },
+          ],
+        },
+      ),
+      decodeItem: readItem,
+    );
+    expect(decodedItems, 5);
+    expect(third, [
+      {'text': 'new'},
+      {'text': 'unchanged'},
+    ]);
+    expect(identical(second[1], third[1]), isTrue);
+    final fourth = decoder.decode(
+      _rawCoreEvent(kind: 'Delta', value: {r'$coreDelta': []}),
+      decodeItem: readItem,
+    );
+    expect(decodedItems, 5);
+    expect(identical(third[0], fourth[0]), isTrue);
+    final changed = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Changed',
+        value: [
+          {'text': 'reset'},
+        ],
+      ),
+      decodeItem: readItem,
+    );
+    expect(changed, [
+      {'text': 'reset'},
+    ]);
+    expect(decodedItems, 6);
+  });
+
+  test(
+    'list deltas attach new embedded streams without reopening other items',
+    () async {
+      final decoder = CoreLinkListEventDecoder<Stream<String>?>();
+      final factory = _EmbeddedStreamFactoryRecorder();
+
+      /// Reads the embedded stream field of a single test item.
+      Stream<String>? readItem(CoreLinkValueReader reader) {
+        final fieldCount = reader.readMapLength();
+        Stream<String>? stream;
+        for (var index = 0; index < fieldCount; index += 1) {
+          final field = reader.readString();
+          if (field == 'contentStream') {
+            stream = reader.readNullable<Stream<String>>(
+              () => reader.readEmbeddedStream<String>(
+                (item) => item.readString(),
+              ),
+            );
+          } else {
+            reader.skipValue();
+          }
+        }
+        return stream;
+      }
+
+      final first = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Snapshot',
+          value: [
+            {'contentStream': null},
+            {'contentStream': null},
+          ],
+        ),
+        decodeItem: readItem,
+        embeddedStreamFactory: factory.open,
+      );
+      expect(first, [null, null]);
+      final second = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'set',
+                'path': [0, 'contentStream'],
+                'value': {
+                  r'$coreStream': {
+                    'streamId': 'stream-ai',
+                    'target': 'core/test64',
+                    'propertyName': 'openCoreStream',
+                    'args': {'streamId': 'stream-ai'},
+                  },
+                },
+              },
+            ],
+          },
+        ),
+        decodeItem: readItem,
+        embeddedStreamFactory: factory.open,
+      );
+      expect(factory.openedStreamIds, ['stream-ai']);
+      expect(await second.first!.first, 'stream chunk');
+      decoder.decode(
+        _rawCoreEvent(kind: 'Delta', value: {r'$coreDelta': []}),
+        decodeItem: readItem,
+        embeddedStreamFactory: factory.open,
+      );
+      expect(factory.openedStreamIds, ['stream-ai']);
+    },
+  );
+
+  test(
+    'long list decodes one changed message without decoding its history',
+    () {
+      final decoder = CoreLinkListEventDecoder<Map<String, Object?>>();
+      var decodedItems = 0;
+
+      /// Counts typed item decodes in the long-history transport test.
+      Map<String, Object?> readItem(CoreLinkValueReader reader) {
+        decodedItems += 1;
+        return reader.readValue() as Map<String, Object?>;
+      }
+
+      final history = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Snapshot',
+          value: List.generate(
+            1000,
+            (index) => {'id': index, 'content': 'text'},
+          ),
+        ),
+        decodeItem: readItem,
+      );
+      expect(decodedItems, 1000);
+      final updated = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'set',
+                'path': [999, 'content'],
+                'value': 'streaming',
+              },
+            ],
+          },
+        ),
+        decodeItem: readItem,
+      );
+      expect(decodedItems, 1001);
+      expect(identical(history.first, updated.first), isTrue);
+      expect(updated.last['content'], 'streaming');
+    },
+  );
+
+  /// Verifies nested append and removal preserve the optimized list's retained base.
+  test('list deltas mutate nested arrays across consecutive events', () {
+    for (final kind in ['Snapshot', 'Changed']) {
+      final decoder = CoreLinkListEventDecoder<Map<String, Object?>>();
+      var decodedItems = 0;
+
+      /// Counts typed decodes to ensure untouched history remains shared.
+      Map<String, Object?> readItem(CoreLinkValueReader reader) {
+        decodedItems += 1;
+        return reader.readValue() as Map<String, Object?>;
+      }
+
+      final original = decoder.decode(
+        _rawCoreEvent(
+          kind: kind,
+          value: [
+            {
+              'segments': [
+                {
+                  'tokens': ['old'],
+                },
+              ],
+              'bytes': Uint8List.fromList([1, 2]),
+            },
+            {'text': 'unchanged'},
+          ],
+        ),
+        decodeItem: readItem,
+      );
+      final appended = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'set',
+                'path': [0, 'segments', 0, 'tokens', 1],
+                'value': 'new',
+              },
+              {
+                'op': 'set',
+                'path': [0, 'segments', 1],
+                'value': {'tokens': []},
+              },
+            ],
+          },
+        ),
+        decodeItem: readItem,
+      );
+      expect(appended[0]['segments'], [
+        {
+          'tokens': ['old', 'new'],
+        },
+        {'tokens': []},
+      ]);
+      expect(original[0]['segments'], [
+        {
+          'tokens': ['old'],
+        },
+      ]);
+      expect(appended[0]['bytes'], isA<Uint8List>());
+      expect(appended[0]['bytes'], [1, 2]);
+      expect(identical(original[1], appended[1]), isTrue);
+      expect(decodedItems, 3);
+
+      final removed = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'remove',
+                'path': [0, 'segments', 0, 'tokens', 0],
+              },
+              {
+                'op': 'remove',
+                'path': [0, 'segments', 1],
+              },
+            ],
+          },
+        ),
+        decodeItem: readItem,
+      );
+      expect(removed[0]['segments'], [
+        {
+          'tokens': ['new'],
+        },
+      ]);
+      expect(appended[0]['segments'], [
+        {
+          'tokens': ['old', 'new'],
+        },
+        {'tokens': []},
+      ]);
+      expect(identical(original[1], removed[1]), isTrue);
+      expect(decodedItems, 4);
+    }
+  });
+
+  /// Verifies a root replacement can be patched further in the same delta batch.
+  test('list delta root replacements own mutable nested arrays', () {
+    final decoder = CoreLinkListEventDecoder<Map<String, Object?>>();
+
+    /// Reads one item without changing the wire tree's collection semantics.
+    Map<String, Object?> readItem(CoreLinkValueReader reader) =>
+        reader.readValue() as Map<String, Object?>;
+
+    decoder.decode(
+      _rawCoreEvent(
+        kind: 'Snapshot',
+        value: [
+          {'text': 'old'},
+        ],
+      ),
+      decodeItem: readItem,
+    );
+    final result = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Delta',
+        value: {
+          r'$coreDelta': [
+            {
+              'op': 'set',
+              'path': [],
+              'value': [
+                {'tokens': []},
+              ],
+            },
+            {
+              'op': 'set',
+              'path': [0, 'tokens', 0],
+              'value': 'new',
+            },
+          ],
+        },
+      ),
+      decodeItem: readItem,
+    );
+    expect(result, [
+      {
+        'tokens': ['new'],
+      },
+    ]);
+  });
+
+  /// Verifies replaced and appended elements are mutable before their first typed decode.
+  test('list delta pending elements support nested growth and shrinkage', () {
+    for (final index in [0, 1]) {
+      final decoder = CoreLinkListEventDecoder<Map<String, Object?>>();
+
+      /// Reads one item so the regression exercises raw MessagePack array decoding.
+      Map<String, Object?> readItem(CoreLinkValueReader reader) =>
+          reader.readValue() as Map<String, Object?>;
+
+      final original = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Snapshot',
+          value: [
+            {'text': 'original'},
+          ],
+        ),
+        decodeItem: readItem,
+      );
+      final result = decoder.decode(
+        _rawCoreEvent(
+          kind: 'Delta',
+          value: {
+            r'$coreDelta': [
+              {
+                'op': 'set',
+                'path': [index],
+                'value': {
+                  'tokens': ['old'],
+                },
+              },
+              {
+                'op': 'set',
+                'path': [index, 'tokens', 1],
+                'value': 'new',
+              },
+              {
+                'op': 'remove',
+                'path': [index, 'tokens', 0],
+              },
+            ],
+          },
+        ),
+        decodeItem: readItem,
+      );
+      expect(result[index], {
+        'tokens': ['new'],
+      });
+      expect(result.length, index + 1);
+      expect(original, [
+        {'text': 'original'},
+      ]);
+      if (index == 1) {
+        expect(identical(original[0], result[0]), isTrue);
+      }
+    }
+  });
+
+  test('list decoder rejects a delta before the first snapshot', () {
+    expect(
+      () => CoreLinkListEventDecoder<int>().decode(
+        _rawCoreEvent(kind: 'Delta', value: {r'$coreDelta': []}),
+        decodeItem: (reader) => reader.readInt(),
+      ),
+      throwsStateError,
+    );
+  });
 }
 
 /// Creates one raw Core watch event for protocol decoder tests.
 CoreEvent _rawCoreEvent({required String kind, required Object? value}) {
   return CoreEvent.raw(
     requestId: 'watch-1',
-    targetObjectId: 7,
+    target: 'core/test7',
     propertyName: 'chatMessagesFlow',
     kind: kind,
     valueBytes: encodeCoreLink(value),
@@ -313,7 +918,7 @@ class _EmbeddedStreamFactoryRecorder {
   /// Opens one deterministic test stream for an embedded descriptor.
   Stream<T> open<T>(
     String streamId,
-    int targetObjectId,
+    String target,
     String propertyName,
     Object? args,
     T Function(CoreLinkValueReader reader) decode,

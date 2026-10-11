@@ -26,7 +26,7 @@ use operit_model::MessageVariantEntity::MessageVariantEntity;
 /// Sync domain used for SQL-backed chat history operations.
 pub const CHAT_SYNC_DOMAIN: &str = "chat";
 
-const CHAT_SYNC_OPERATION_SCHEMA_VERSION: i32 = 5;
+const CHAT_SYNC_OPERATION_SCHEMA_VERSION: i32 = 6;
 
 const DELETE_CHAT: &str = "chats";
 const DELETE_MESSAGE: &str = "messages";
@@ -496,7 +496,7 @@ impl SqlChatSyncStore {
         chatId: &str,
     ) -> Result<ChatSyncPayload, SqlChatSyncStoreError> {
         let chatDao = ChatDao::new(self.store.clone());
-        let chatRows = chatDao.getChatById(chatId)?.into_iter().collect();
+        let chatRows = chatDao.getChatById(chatId)?.into_iter().collect::<Vec<_>>();
         Ok(ChatSyncPayload {
             chatRows,
             ..ChatSyncPayload::default()
@@ -597,7 +597,7 @@ fn readChatRows(store: &SqliteStore, opId: &str) -> Result<Vec<ChatEntity>, Sqli
         .queryRows(
             r#"
             SELECT id, title, createdAt, updatedAt, inputTokens, outputTokens,
-                currentWindowSize, "group", displayOrder, workspace,
+                currentWindowSize, "group", displayOrder, workspaceId,
                 parentChatId, characterCardName, characterGroupId, locked, pinned
             FROM sync_sql_chat_rows
             WHERE opId = ?1
@@ -617,7 +617,7 @@ fn readChatRows(store: &SqliteStore, opId: &str) -> Result<Vec<ChatEntity>, Sqli
                 currentWindowSize: row.get(6)?,
                 group: row.get(7)?,
                 displayOrder: row.get(8)?,
-                workspace: row.get(9)?,
+                workspaceId: row.get(9)?,
                 parentChatId: row.get(10)?,
                 characterCardName: row.get(11)?,
                 characterGroupId: row.get(12)?,
@@ -845,7 +845,7 @@ fn insertChatSyncRow(
         r#"
         INSERT INTO sync_sql_chat_rows (
             opId, id, title, createdAt, updatedAt, inputTokens, outputTokens,
-            currentWindowSize, "group", displayOrder, workspace,
+            currentWindowSize, "group", displayOrder, workspaceId,
             parentChatId, characterCardName, characterGroupId, locked, pinned
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
@@ -861,7 +861,7 @@ fn insertChatSyncRow(
             chat.currentWindowSize,
             chat.group,
             chat.displayOrder,
-            chat.workspace,
+            chat.workspaceId,
             chat.parentChatId,
             chat.characterCardName,
             chat.characterGroupId,
@@ -1105,7 +1105,7 @@ fn upsertChat(
         r#"
         INSERT INTO chats (
             id, title, createdAt, updatedAt, inputTokens, outputTokens,
-            currentWindowSize, "group", displayOrder, workspace,
+            currentWindowSize, "group", displayOrder, workspaceId,
             parentChatId, characterCardName, characterGroupId, locked, pinned
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
@@ -1118,7 +1118,7 @@ fn upsertChat(
             currentWindowSize = excluded.currentWindowSize,
             "group" = excluded."group",
             displayOrder = excluded.displayOrder,
-            workspace = excluded.workspace,
+            workspaceId = excluded.workspaceId,
             parentChatId = excluded.parentChatId,
             characterCardName = excluded.characterCardName,
             characterGroupId = excluded.characterGroupId,
@@ -1135,7 +1135,7 @@ fn upsertChat(
             chat.currentWindowSize,
             chat.group,
             chat.displayOrder,
-            chat.workspace,
+            chat.workspaceId,
             chat.parentChatId,
             chat.characterCardName,
             chat.characterGroupId,
@@ -1433,4 +1433,4 @@ fn currentTimeMillis() -> Result<i64, SqlChatSyncStoreError> {
 
 #[cfg(test)]
 #[path = "SqlChatSyncStoreTests/mod.rs"]
-mod tests;
+pub(crate) mod tests;

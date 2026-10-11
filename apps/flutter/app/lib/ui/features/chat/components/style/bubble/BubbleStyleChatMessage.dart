@@ -7,12 +7,12 @@ import '../../../viewmodel/ChatViewModel.dart';
 import 'BubbleAiMessageComposable.dart';
 import 'BubbleSurface.dart';
 import 'BubbleUserMessageComposable.dart';
+import '../SummaryMessageComposable.dart';
 
 class BubbleStyleChatMessage extends StatelessWidget {
   const BubbleStyleChatMessage({
     super.key,
     required this.message,
-    required this.isStreaming,
     required this.userMessageColor,
     required this.aiMessageColor,
     required this.userTextColor,
@@ -37,10 +37,11 @@ class BubbleStyleChatMessage extends StatelessWidget {
     this.enableDialogs = true,
     this.onRoleAvatarLongPress,
     this.splitMarkdownContent,
+    this.onDeleteMessage,
+    this.onEditSummary,
   });
 
   final ChatUiMessage message;
-  final bool isStreaming;
   final Color userMessageColor;
   final Color aiMessageColor;
   final Color userTextColor;
@@ -65,6 +66,8 @@ class BubbleStyleChatMessage extends StatelessWidget {
   final bool enableDialogs;
   final void Function(String roleName)? onRoleAvatarLongPress;
   final MarkdownContentSplitter? splitMarkdownContent;
+  final Future<void> Function(int timestamp)? onDeleteMessage;
+  final ValueChanged<ChatUiMessage>? onEditSummary;
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +88,6 @@ class BubbleStyleChatMessage extends StatelessWidget {
       case 'ai':
         return BubbleAiMessageComposable(
           message: message,
-          isStreaming: isStreaming,
           backgroundColor: aiMessageColor,
           textColor: aiTextColor,
           transparentSurface: transparentSurface,
@@ -104,48 +106,18 @@ class BubbleStyleChatMessage extends StatelessWidget {
           splitMarkdownContent: splitMarkdownContent,
         );
       case 'summary':
-        return _SummaryMessageComposable(
+        return SummaryMessageComposable(
           message: message,
-          backgroundColor: systemMessageColor.withValues(alpha: 0.7),
-          textColor: systemTextColor,
+          onDelete: onDeleteMessage == null
+              ? null
+              : () => onDeleteMessage!(message.timestamp),
+          onEdit: onEditSummary,
+          enableDialog: enableDialogs,
         );
     }
     return _SystemMessageComposable(
       message: message,
       textColor: systemTextColor,
-    );
-  }
-}
-
-class _SummaryMessageComposable extends StatelessWidget {
-  const _SummaryMessageComposable({
-    required this.message,
-    required this.backgroundColor,
-    required this.textColor,
-  });
-
-  final ChatUiMessage message;
-  final Color backgroundColor;
-  final Color textColor;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        color: backgroundColor,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: SelectableText(
-        message.displayText,
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: textColor,
-          height: 1.4,
-        ),
-      ),
     );
   }
 }

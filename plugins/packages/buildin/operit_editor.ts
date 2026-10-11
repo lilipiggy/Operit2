@@ -6,8 +6,8 @@
         "en": "Operit Platform Editor"
     },
     "description": {
-        "zh": "Operit2 平台编辑与排查手册。面向当前版本 core command，不复刻旧版 soft setting 工具面。",
-        "en": "Operit2 platform editing and troubleshooting guide for the current core command surface."
+        "zh": "通过真实的 core command 执行入口管理 Operit2 的包、Skill、MCP、模型、偏好设置、聊天与工作区，返回实际执行结果。",
+        "en": "Manage Operit2 packages, skills, MCP, models, preferences, chats, and workspaces through the real core command executor."
     },
     "enabledByDefault": false,
     "category": "System",
@@ -15,73 +15,60 @@
         {
             "name": "operit_editor",
             "description": {
-                "zh": "读取 Operit2 平台编辑手册。真正的配置、包、Skill、MCP、模型、聊天、工作区操作请直接调用系统工具 execute_cli_command。",
-                "en": "Read the Operit2 platform editing guide. Use the system execute_cli_command tool for package, skill, MCP, model, chat, and workspace operations."
+                "zh": "执行 Operit2 平台编辑命令，直接调用 Tools.SoftwareSettings.exec(args)，与系统 execute_cli_command 使用同一执行入口。args=[] 获取实际命令帮助；例如 [\"package\",\"list\"]、[\"package\",\"enable\",\"包名\"]、[\"skill\",\"show\",\"PackageBuilder\"]、[\"prefs\",\"show\"]。先读取真实状态，变更用户配置或删除资源前取得用户确认，修改后重新读取状态核验。不执行 shell 命令或任意脚本片段，不接受自然语言 query。",
+                "en": "Execute Operit2 editing commands via Tools.SoftwareSettings.exec(args), using the same executor as execute_cli_command. Use [] for live help, or e.g. [\"package\",\"list\"], [\"package\",\"enable\",\"name\"], [\"prefs\",\"show\"]. Read state first, obtain user confirmation before mutations or deletion, and verify state afterward. Not a shell or arbitrary script evaluator; natural-language query is not supported."
             },
             "parameters": [
                 {
-                    "name": "query",
+                    "name": "args",
                     "description": {
-                        "zh": "可选，说明本次要编辑或排查的目标。",
-                        "en": "Optional editing or troubleshooting target."
+                        "zh": "必填，CLI 字符串参数数组（也接受数组的 JSON 字符串），不含 operit2 可执行文件名。空数组获取帮助，保留每个参数的原始内容，例如 [\"package\",\"exec\",\"包名:工具名\",\"{\\\"name\\\":\\\"世界\\\"}\"]。",
+                        "en": "Required CLI string argument array (a JSON-encoded array is also accepted), without the operit2 executable name. An empty array requests help. Each argument is forwarded unchanged, including JSON tool payloads."
                     },
-                    "type": "string",
-                    "required": false
+                    "type": "array",
+                    "required": true
                 }
             ]
         }
     ]
 }*/
 
+/// <reference path="../../types/index.d.ts" />
+
 type OperitEditorParams = {
-    query?: string;
+    args: string[] | string;
 };
 
-const OPERIT_EDITOR_GUIDE = `
-# Operit2 平台编辑器
-
-这个包只提供当前 Operit2 平台编辑手册。执行动作使用系统工具 execute_cli_command，参数是 CLI 字符串数组。
-
-常用入口：
-
-- 查看总帮助：["package", "help"] 之外的总入口可用空数组或具体一级命令查看。
-- 包管理：["package", "list"]、["package", "more"]、["package", "load", "<name>"]、["package", "show", "<name>"]、["package", "enable", "<name>"]、["package", "disable", "<name>"]、["package", "use", "<name>"]、["package", "exec", "<package:tool>", "<params-json>"]。
-- Skill：["skill", "list"]、["skill", "show", "<name>"]、["skill", "visible", "<name>", "true"]、["skill", "visible", "<name>", "false"]、["skill", "errors"]。
-- MCP：["mcp", "dir"]、["mcp", "list"]、["mcp", "show", "<name>"]、["mcp", "enable", "<name>"]、["mcp", "disable", "<name>"]、["mcp", "start", "<name>"]、["mcp", "tools", "<name>"]。
-- 模型：["model", "list"]、["model", "show", "<id>"]、["model", "function-list"]、["model", "function-show", "<type>"]、["model", "function-set", "<type>", "<provider-id>", "<model-id>"]。
-- 偏好设置：["prefs", "show"]、["prefs", "thinking"]、["prefs", "stream"]、["prefs", "media-history"]、["prefs", "mcp-timeout"]。
-- 日志：["log", "show"]、["log", "package"]、["log", "path"]、["log", "clear"]。
-- 工具：["tool", "list"]、["tool", "show", "<name>"]、["tool", "exec", "<name>", "<params-json>"]。
-- 工作区：["workspace", "commands"]、["workspace", "run", "<command-id>"]、["workspace", "list"]、["workspace", "bind-default"]。
-
-插件创作约定：
-
-- 使用 PackageBuilder skill 中随包携带的当前版本类型定义。
-- 开发目录固定在手机下载/Operit/dev_package/<package-id>。
-- 包 id 在首次确定后保持不变。
-- 使用终端完成 TypeScript/JavaScript 开发、编译、安装和测试。
-- 安装与调试走当前版本 package core command 和系统工具，不使用旧版 SoftwareSettings 的包开关、脚本直跑、模型设置枚举接口。
-
-包系统说明：
-
-- 内置包来自应用内置资源。
-- 准内置包来自应用内资源中的 external 候选，查看用 ["package", "more"]，加入加载列表用 ["package", "load", "<name>"]。
-- 当前会话调用某个包前，用 ["package", "use", "<name>"] 让 runtime 激活它。
-- ToolPkg 子包由包系统解析和展示，不手写另一套识别逻辑。
-
-执行原则：
-
-- 先用对应 core command 查看真实状态，再执行修改命令。
-- 需要变更用户配置、启停包、启停 MCP、删除资源时，先向用户确认。
-- 不从云端拉取 PackageBuilder 类型；使用当前软件随包携带的类型。
-`.trim();
-
-async function operit_editor(params: OperitEditorParams = {}) {
-    const query = params.query?.trim();
-    if (!query) {
-        return OPERIT_EDITOR_GUIDE;
+/** Validates structured CLI arguments without splitting or rewriting their contents. */
+function commandArgs(value: unknown): string[] {
+    let args = value;
+    if (typeof args === "string") {
+        try {
+            args = JSON.parse(args);
+        } catch {
+            throw new Error('operit_editor: args 必须是字符串数组或其 JSON 字符串，例如 ["package","list"]。');
+        }
     }
-    return `目标：${query}\n\n${OPERIT_EDITOR_GUIDE}`;
+    if (!Array.isArray(args)) {
+        throw new Error('operit_editor: 必须提供 args 字符串数组；用 [] 获取命令帮助，不接受自然语言 query。');
+    }
+    for (let index = 0; index < args.length; index++) {
+        if (typeof args[index] !== "string") {
+            throw new Error(`operit_editor: args[${index}] 必须是字符串。`);
+        }
+    }
+    return args;
+}
+
+/** Executes the requested command through the host tool and preserves its result or failure. */
+async function operit_editor(params: OperitEditorParams) {
+    if (!params || typeof params !== "object" || Array.isArray(params)) {
+        throw new Error('operit_editor: 必须提供参数对象，例如 {"args":["package","list"]}。');
+    }
+    if (Object.prototype.hasOwnProperty.call(params, "query")) {
+        throw new Error('operit_editor: query 已移除；请使用 args 字符串数组执行实际命令，用 [] 获取命令帮助。');
+    }
+    return await Tools.SoftwareSettings.exec(commandArgs(params.args));
 }
 
 exports.operit_editor = operit_editor;

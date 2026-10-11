@@ -16,7 +16,8 @@ class WorkspaceBrowserMenuSheet extends StatefulWidget {
     required this.onClearStorage,
     required this.zoomLabel,
     required this.onZoomOut,
-    required this.onZoomReset,
+    required this.zoomButtonKey,
+    required this.onZoomMenuRequested,
     required this.onZoomIn,
     required this.desktopMode,
     required this.onDesktopModeChanged,
@@ -33,7 +34,8 @@ class WorkspaceBrowserMenuSheet extends StatefulWidget {
   final VoidCallback onClearStorage;
   final String zoomLabel;
   final VoidCallback onZoomOut;
-  final VoidCallback onZoomReset;
+  final GlobalKey zoomButtonKey;
+  final VoidCallback onZoomMenuRequested;
   final VoidCallback onZoomIn;
   final bool desktopMode;
   final ValueChanged<bool> onDesktopModeChanged;
@@ -56,6 +58,7 @@ class _WorkspaceBrowserMenuSheetState extends State<WorkspaceBrowserMenuSheet> {
     _menuCommandsFuture = widget.onLoadMenuCommands();
   }
 
+  /// Builds browser actions and explicitly renders userscript menu errors.
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -90,8 +93,19 @@ class _WorkspaceBrowserMenuSheetState extends State<WorkspaceBrowserMenuSheet> {
           FutureBuilder<List<WorkspaceUserscriptMenuCommand>>(
             future: _menuCommandsFuture,
             builder: (context, snapshot) {
-              final commands =
-                  snapshot.data ?? const <WorkspaceUserscriptMenuCommand>[];
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const LinearProgressIndicator();
+              }
+              if (snapshot.hasError) {
+                return ListTile(
+                  leading: const Icon(Icons.error_outline),
+                  title: const Text('加载脚本菜单失败'),
+                  subtitle: Text('${snapshot.error}'),
+                  textColor: Theme.of(context).colorScheme.error,
+                  iconColor: Theme.of(context).colorScheme.error,
+                );
+              }
+              final commands = snapshot.requireData;
               if (commands.isEmpty) {
                 return const SizedBox.shrink();
               }
@@ -119,7 +133,8 @@ class _WorkspaceBrowserMenuSheetState extends State<WorkspaceBrowserMenuSheet> {
             title: l10n.zoom,
             value: widget.zoomLabel,
             onZoomOut: widget.onZoomOut,
-            onZoomReset: widget.onZoomReset,
+            zoomButtonKey: widget.zoomButtonKey,
+            onZoomMenuRequested: widget.onZoomMenuRequested,
             onZoomIn: widget.onZoomIn,
           ),
           _MenuTile(
@@ -146,7 +161,8 @@ class _MenuActionRow extends StatelessWidget {
     required this.title,
     required this.value,
     required this.onZoomOut,
-    required this.onZoomReset,
+    required this.zoomButtonKey,
+    required this.onZoomMenuRequested,
     required this.onZoomIn,
   });
 
@@ -154,7 +170,8 @@ class _MenuActionRow extends StatelessWidget {
   final String title;
   final String value;
   final VoidCallback onZoomOut;
-  final VoidCallback onZoomReset;
+  final GlobalKey zoomButtonKey;
+  final VoidCallback onZoomMenuRequested;
   final VoidCallback onZoomIn;
 
   @override
@@ -184,13 +201,17 @@ class _MenuActionRow extends StatelessWidget {
               onPressed: onZoomOut,
               icon: const Icon(Icons.remove, size: 18),
               visualDensity: VisualDensity.compact,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
               constraints: const BoxConstraints.tightFor(width: 28, height: 28),
               padding: EdgeInsets.zero,
             ),
             const SizedBox(width: 4),
-            InkWell(
-              onTap: onZoomReset,
-              borderRadius: BorderRadius.circular(6),
+            GestureDetector(
+              key: zoomButtonKey,
+              behavior: HitTestBehavior.opaque,
+              onTap: onZoomMenuRequested,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                 child: Text(
@@ -208,6 +229,9 @@ class _MenuActionRow extends StatelessWidget {
               onPressed: onZoomIn,
               icon: const Icon(Icons.add, size: 18),
               visualDensity: VisualDensity.compact,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
               constraints: const BoxConstraints.tightFor(width: 28, height: 28),
               padding: EdgeInsets.zero,
             ),

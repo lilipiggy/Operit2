@@ -16,6 +16,8 @@ import io.flutter.plugin.common.BinaryMessenger;
 
 public class ProxyApiRegistrar extends AndroidWebkitLibraryPigeonProxyApiRegistrar {
   @NonNull private Context context;
+  final WebViewLocalResources localResources;
+  final WebViewUserScripts userScripts;
 
   @NonNull private final FlutterAssetManager flutterAssetManager;
 
@@ -26,6 +28,8 @@ public class ProxyApiRegistrar extends AndroidWebkitLibraryPigeonProxyApiRegistr
     super(binaryMessenger);
     this.context = context;
     this.flutterAssetManager = flutterAssetManager;
+    localResources = new WebViewLocalResources(binaryMessenger, this);
+    userScripts = new WebViewUserScripts(binaryMessenger, this);
   }
 
   // Interface for an injectable SDK version checker.

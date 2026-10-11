@@ -44,6 +44,18 @@ impl WebTerminalHost {
 }
 
 impl TerminalHost for WebTerminalHost {
+    /// Starts isolated browser terminals at their only supported guest root.
+    fn resolveWorkingDirectory(
+        &self,
+        terminal: &str,
+        terminalType: &str,
+        _workingDir: &str,
+        _resolveHostDirectory: &dyn Fn(&str) -> HostResult<String>,
+    ) -> HostResult<String> {
+        requireLinuxVmTerminalType(terminal, terminalType)?;
+        Ok("/".to_string())
+    }
+
     /// Describes the Linux VM terminal available in browser builds.
     fn terminalInfo(&self) -> HostResult<TerminalInfo> {
         Ok(TerminalInfo {
@@ -191,6 +203,16 @@ impl TerminalHost for WebTerminalHost {
 
     /// Returns a named Linux VM terminal session or starts it at the guest root.
     fn createOrGetSession(&self, sessionName: &str) -> HostResult<TerminalSessionInfo> {
+        self.createOrGetTypedSession(sessionName, SHELL_TERMINAL_TYPE)
+    }
+
+    /// Creates or reuses a browser VM session of exactly the requested interpreter type.
+    fn createOrGetTypedSession(
+        &self,
+        sessionName: &str,
+        terminalType: &str,
+    ) -> HostResult<TerminalSessionInfo> {
+        requireLinuxVmTerminalType(TERMINAL, terminalType)?;
         let normalizedSessionName = requiredText(sessionName, "session_name")?;
         let existing = TERMINAL_SESSIONS.with(|sessions| {
             sessions.borrow().iter().find_map(|(sessionId, session)| {

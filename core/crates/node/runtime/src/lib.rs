@@ -1,10 +1,18 @@
 #![allow(non_snake_case)]
+pub mod PeerRouter;
 
 /// Identifies the CoreNode selected by one protocol request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GeneratedCoreRoute {
     Local,
     Binding { scope: usize, key: String },
+}
+
+/// Identifies the device whose capability is required by a route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedRoutePermissionSubject {
+    Caller,
+    Target,
 }
 
 /// Identifies lifecycle hooks registered by annotated Space routes.
@@ -18,11 +26,15 @@ pub enum GeneratedRouteLifecycle {
 /// Describes one annotation-generated Space route independent of local Proxy object IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedSpaceRoute {
-    pub routeId: u32,
+    pub routeId: &'static str,
     pub methodName: &'static str,
     pub bindingArgument: &'static str,
     pub targetType: &'static str,
+    pub permissionScope: GeneratedRoutePermissionSubject,
+    pub permissionCapability: &'static str,
     pub lifecycle: GeneratedRouteLifecycle,
+    /// Only explicit creation commands may allocate a missing binding.
+    pub createBindingCapability: &'static str,
 }
 
 impl GeneratedSpaceRoute {
@@ -59,16 +71,35 @@ impl GeneratedSpaceRoute {
     }
 }
 
+#[cfg(feature = "route-catalog")]
 include!(concat!(env!("OUT_DIR"), "/generated_route_catalog.rs"));
 
+#[cfg(feature = "full")]
+include!(concat!(env!("OUT_DIR"), "/generated_space_dispatch.rs"));
+
+#[cfg(feature = "full")]
 pub mod CoreNodeRouter;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod RuntimeRemoteLinkDiscovery;
+#[cfg(feature = "full")]
+pub mod NodeClient;
+pub mod RuntimePeerService;
+#[cfg(feature = "peer-runtime")]
+pub mod HostRuntimePeerService;
+#[cfg(feature = "peer-runtime")]
+pub mod NodeSpaceService;
+pub mod NodeServices;
+#[cfg(feature = "peer-state")]
+pub mod PeerStateStore;
+#[cfg(feature = "full")]
 pub mod RuntimeRemoteLinkService;
+#[cfg(feature = "full")]
 pub mod SpacePersistenceSyncService;
+pub mod SpaceDoctor;
+#[cfg(feature = "full")]
+mod PeerSync;
+#[cfg(feature = "full")]
 pub mod SpaceRuntime;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "route-catalog"))]
 mod tests {
     use super::*;
 
@@ -85,5 +116,50 @@ mod tests {
         assert_eq!(after.methodName, "afterChangeRoute");
         assert_eq!(after.bindingArgument, "chatId");
         assert_eq!(after.lifecycle, GeneratedRouteLifecycle::AfterChangeRoute);
+    }
+
+    /// Resolves the semantic Space target without a declaration-position identifier.
+    #[test]
+    fn space_routes_use_stable_named_targets() {
+        let route = generated_space_route_for_method("beforeChangeRoute").unwrap();
+        assert_eq!(route.routeId, format!("space/{}/beforeChangeRoute", route.targetType));
+        assert_eq!(generated_space_route_for_id(route.routeId, route.methodName), Some(route.clone()));
+        assert!(generated_space_route_for_id("0", route.methodName).is_none());
+        assert!(generated_space_route_for_id(route.routeId, "notAnExportedMethod").is_none());
+        let request = operit_link::CoreCallRequest::new("space-test", route.routeId, route.methodName, operit_link::CoreValue::emptyMap());
+        assert_eq!(generated_space_call_route(&request), Some(route));
+    }
+
+    #[test]
+    fn route_catalog_contains_no_chat_execution_functions() {
+        let catalog = include_str!(concat!(env!("OUT_DIR"), "/generated_route_catalog.rs"));
+        assert!(!catalog.contains("generated_space_call_on_chat_core"));
+        assert!(!catalog.contains("generated_space_watch_on_chat_core"));
+        assert!(!catalog.contains("generated_space_watch_snapshot_on_chat_core"));
+    }
+
+    #[test]
+    fn shared_catalog_preserves_binding_validation() {
+        use operit_link::{CoreCallRequest, CoreValue};
+        let route = generated_space_route_for_method("beforeChangeRoute").unwrap();
+        let request =
+            |args| CoreCallRequest::new("binding-test", route.routeId, route.methodName, args);
+        let empty = request(CoreValue::emptyMap());
+        assert_eq!(
+            generated_core_call_route(&empty).unwrap_err().code,
+            "CORE_BINDING_KEY_REQUIRED"
+        );
+        let args = CoreValue::Map(std::collections::BTreeMap::from([(
+            route.bindingArgument.into(),
+            CoreValue::String("chat-1".into()),
+        )]));
+        assert_eq!(
+            generated_core_call_route(&request(args)).unwrap(),
+            GeneratedCoreRoute::Binding {
+                scope: 0,
+                key: "chat-1".into()
+            }
+        );
+        assert!(generated_space_route_for_id("device/unknown", route.methodName).is_none());
     }
 }

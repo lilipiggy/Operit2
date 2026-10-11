@@ -1,0 +1,10 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@android:color/transparent">
+    <ImageView android:id="@+id/desktop_widget_image"
+        android:layout_width="match_parent" android:layout_height="match_parent"
+        android:scaleType="fitCenter" android:adjustViewBounds="true" />
+    <TextView android:id="@+id/desktop_widget_error"
+        android:layout_width="match_parent" android:layout_height="match_parent"
+        android:gravity="center" android:visibility="gone" />
+</FrameLayout>

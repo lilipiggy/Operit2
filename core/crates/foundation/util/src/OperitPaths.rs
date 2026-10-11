@@ -17,8 +17,6 @@ pub const RUNTIME_SHARE_IMAGE_DIR_PATH: &str = Layout::RUNTIME_SHARE_IMAGE_DIR_P
 pub const RUNTIME_WORKSPACE_VIDEO_DIR_PATH: &str = Layout::RUNTIME_WORKSPACE_VIDEO_DIR_PATH;
 pub const RUNTIME_COMPOSE_DSL_WEBVIEW_FILES_DIR_PATH: &str =
     Layout::RUNTIME_COMPOSE_DSL_WEBVIEW_FILES_DIR_PATH;
-pub const RUNTIME_LINK_ACCESS_WEB_ASSETS_DIR_PATH: &str =
-    Layout::RUNTIME_LINK_ACCESS_WEB_ASSETS_DIR_PATH;
 pub const RUNTIME_CLIENT_LOG_PATH: &str = Layout::RUNTIME_CLIENT_LOG_PATH;
 pub const RUNTIME_SHARE_IMAGE_EXPORTS_DIR_PATH: &str = Layout::RUNTIME_SHARE_IMAGE_EXPORTS_DIR_PATH;
 
@@ -52,6 +50,7 @@ pub const USER_PREFERENCES_PATH: &str = Layout::USER_PREFERENCES_PATH;
 pub const API_PREFERENCES_PATH: &str = Layout::API_PREFERENCES_PATH;
 pub const ENV_PREFERENCES_PATH: &str = Layout::ENV_PREFERENCES_PATH;
 pub const GITHUB_AUTH_PREFERENCES_PATH: &str = Layout::GITHUB_AUTH_PREFERENCES_PATH;
+pub const CODEX_AUTH_PREFERENCES_PATH: &str = Layout::CODEX_AUTH_PREFERENCES_PATH;
 pub const MODEL_CONFIGS_PREFERENCES_PATH: &str = Layout::MODEL_CONFIGS_PREFERENCES_PATH;
 pub const FUNCTIONAL_CONFIGS_PREFERENCES_PATH: &str = Layout::FUNCTIONAL_CONFIGS_PREFERENCES_PATH;
 pub const PACKAGE_MANAGER_PREFERENCES_PATH: &str = Layout::PACKAGE_MANAGER_PREFERENCES_PATH;
@@ -63,6 +62,7 @@ pub const MCP_SERVER_STATUS_PATH: &str = Layout::MCP_SERVER_STATUS_PATH;
 const MEMORY_USER_MARKDOWN_FILE_NAME: &str = "USER.md";
 const MEMORY_SQLITE_FILE_NAME: &str = "Memory.sqlite";
 const MEMORY_LINK_SQLITE_FILE_NAME: &str = "MemoryLink.sqlite";
+const MEMORY_AUTO_SAVE_CANDIDATE_SQLITE_FILE_NAME: &str = "MemoryAutoSaveCandidate.sqlite";
 const MEMORY_SEARCH_SETTINGS_FILE_PATH: &str = "settings/memory_search_settings.preferences.json";
 
 #[allow(non_snake_case)]
@@ -111,6 +111,12 @@ pub fn pluginConfigsDir() -> Result<PathBuf, String> {
 
 #[allow(non_snake_case)]
 pub fn pluginConfigDir(pluginId: &str) -> Result<PathBuf, String> {
+    Ok(pluginConfigsDir()?.join(pluginConfigDirName(pluginId)?))
+}
+
+/// Resolves the stable config directory name without requiring a process-global runtime root.
+#[allow(non_snake_case)]
+pub fn pluginConfigDirName(pluginId: &str) -> Result<String, String> {
     let trimmed = pluginId.trim();
     if trimmed.is_empty() {
         return Err("plugin id must not be blank".to_string());
@@ -126,7 +132,7 @@ pub fn pluginConfigDir(pluginId: &str) -> Result<PathBuf, String> {
     } else {
         format!("{safeBaseName}-{:x}", javaStringHashCode(trimmed))
     };
-    Ok(pluginConfigsDir()?.join(safeName))
+    Ok(safeName)
 }
 
 #[allow(non_snake_case)]
@@ -213,6 +219,11 @@ pub fn githubAuthPreferencesPath() -> Result<PathBuf, String> {
 }
 
 #[allow(non_snake_case)]
+pub fn codexAuthPreferencesPath() -> Result<PathBuf, String> {
+    relativeFile(CODEX_AUTH_PREFERENCES_PATH)
+}
+
+#[allow(non_snake_case)]
 pub fn modelConfigsPreferencesPath() -> Result<PathBuf, String> {
     relativeFile(MODEL_CONFIGS_PREFERENCES_PATH)
 }
@@ -291,6 +302,12 @@ pub fn memorySqlitePath(ownerKey: &str) -> Result<PathBuf, String> {
 #[allow(non_snake_case)]
 pub fn memoryLinkSqlitePath(ownerKey: &str) -> Result<PathBuf, String> {
     Ok(memoryStoreRootPath(ownerKey)?.join(MEMORY_LINK_SQLITE_FILE_NAME))
+}
+
+/// Returns the candidate queue database path for one memory owner.
+#[allow(non_snake_case)]
+pub fn memoryAutoSaveCandidateSqlitePath(ownerKey: &str) -> Result<PathBuf, String> {
+    Ok(memoryStoreRootPath(ownerKey)?.join(MEMORY_AUTO_SAVE_CANDIDATE_SQLITE_FILE_NAME))
 }
 
 #[allow(non_snake_case)]

@@ -1,0 +1,27 @@
+group 'operit.plugin.sdk.flutter'
+version '0.1.0'
+
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.1'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20'
+    }
+}
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'operit.plugin.sdk.flutter'
+    compileSdk 36
+    defaultConfig { minSdk 24; consumerProguardFiles '../../kotlin/consumer-rules.pro' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    kotlinOptions { jvmTarget = '17' }
+    sourceSets.main.java.srcDirs += ['../../kotlin/src/main/kotlin', '../../kotlin/src/android/kotlin']
+}
+repositories { google(); mavenCentral() }
+dependencies {
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
+    implementation 'org.msgpack:jackson-dataformat-msgpack:0.9.9'
+}

@@ -6,13 +6,13 @@ import 'dart:typed_data';
 class CoreCallRequest {
   const CoreCallRequest({
     required this.requestId,
-    required this.targetObjectId,
+    required this.target,
     required this.methodName,
     required this.args,
   });
 
   final String requestId;
-  final int targetObjectId;
+  final String target;
   final String methodName;
   final Object? args;
 }
@@ -20,13 +20,13 @@ class CoreCallRequest {
 class CoreWatchRequest {
   const CoreWatchRequest({
     required this.requestId,
-    required this.targetObjectId,
+    required this.target,
     required this.propertyName,
     required this.args,
   });
 
   final String requestId;
-  final int targetObjectId;
+  final String target;
   final String propertyName;
   final Object? args;
 }
@@ -35,13 +35,13 @@ class CorePushRequest {
   /// Creates a client-owned input stream targeting one Core method.
   const CorePushRequest({
     required this.requestId,
-    required this.targetObjectId,
+    required this.target,
     required this.methodName,
     this.args = const <String, Object?>{},
   });
 
   final String requestId;
-  final int targetObjectId;
+  final String target;
   final String methodName;
   final Object? args;
 }
@@ -57,7 +57,7 @@ abstract class CorePushSink {
 class CoreEvent {
   CoreEvent({
     required this.requestId,
-    required this.targetObjectId,
+    required this.target,
     required this.propertyName,
     required this.kind,
     required Object? value,
@@ -67,7 +67,7 @@ class CoreEvent {
 
   CoreEvent.raw({
     required this.requestId,
-    required this.targetObjectId,
+    required this.target,
     required this.propertyName,
     required this.kind,
     required Uint8List valueBytes,
@@ -77,7 +77,7 @@ class CoreEvent {
        _decodeValue = decodeValue;
 
   final String? requestId;
-  final int targetObjectId;
+  final String target;
   final String propertyName;
   final String kind;
   final Uint8List? _valueBytes;
@@ -154,6 +154,28 @@ class CoreLinkError implements Exception {
   final CoreLinkErrorLocation? location;
   final String? backtrace;
 
+  /// Reports whether the route was rejected because its target lacks a capability.
+  bool get isRoutePermissionDenied => code == 'ROUTE_PERMISSION_DENIED';
+
+  /// Returns the capability required by a route permission denial.
+  String? get requiredCapability => _detailString('requiredCapability');
+
+  /// Returns the target device rejected by a route permission check.
+  String? get targetNodeId => _detailString('targetNodeId');
+
+  /// Returns the route method rejected by a route permission check.
+  String? get deniedMethod => _detailString('method');
+
+  /// Returns one string field from structured Core error details.
+  String? _detailString(String name) {
+    final errorDetails = details;
+    if (errorDetails is! Map) {
+      return null;
+    }
+    final value = errorDetails[name];
+    return value is String ? value : null;
+  }
+
   @override
   String toString() {
     final buffer = StringBuffer('$code: $message');
@@ -161,8 +183,14 @@ class CoreLinkError implements Exception {
     if (location != null) {
       buffer.write('\nRust error location: $location');
     }
-    final backtrace = this.backtrace;
-    if (backtrace != null && backtrace.isNotEmpty) {
+    return buffer.toString();
+  }
+
+  /// Returns the complete diagnostic payload without flooding user-facing error labels.
+  String toDiagnosticString() {
+    final buffer = StringBuffer(toString());
+    if (details != null) buffer.write('\nDetails: $details');
+    if (backtrace != null && backtrace!.isNotEmpty) {
       buffer.write('\nRust backtrace:\n$backtrace');
     }
     return buffer.toString();

@@ -1,0 +1,105 @@
+import importlib.util
+import json
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from io import BytesIO
+from urllib.parse import urlsplit, parse_qs
+
+spec = importlib.util.spec_from_file_location('sync_packages', Path(__file__).with_name('sync_plugin_packages.py'))
+sync = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = sync
+spec.loader.exec_module(sync)
+
+
+class HotReloadTests(unittest.TestCase):
+    """Checks upload acknowledgements without writing to a real runtime."""
+
+    def test_upload_and_failed_commit(self):
+        """Records signatures only after a successful remote commit."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'workflow.toolpkg').write_bytes(b'package' * 5000)
+            actions = []
+            fail = False
+
+            def respond(url, timeout):
+                """Emulates VM discovery and the extension response envelope."""
+                parsed = urlsplit(url)
+                params = parse_qs(parsed.query)
+                if parsed.path.endswith('getVM'):
+                    result = {'isolates': [{'id': 'isolates/1'}]}
+                elif parsed.path.endswith('getIsolate'):
+                    result = {'extensionRPCs': ['ext.operit.reloadPlugins']}
+                else:
+                    action = params['action'][0]
+                    actions.append(action)
+                    if fail and action == 'commit':
+                        return BytesIO(json.dumps({'error': {'message': 'write failed'}}).encode())
+                    result = {'ok': True}
+                return BytesIO(json.dumps({'result': result}).encode())
+
+            arguments = dict(state_key='test', label='test', dry_run=False,
+                             disabled=False, timeout_seconds=5,
+                             vm_service='ws://127.0.0.1:1234/auth/ws')
+            with patch.object(sync.urllib.request, 'urlopen', side_effect=respond):
+                sync._maybe_hot_reload_output(root, root, **arguments)
+                self.assertEqual(actions[0], 'begin')
+                self.assertGreater(actions.count('chunk'), 1)
+                self.assertEqual(actions[-1], 'commit')
+                state = root / sync.HOT_RELOAD_STATE_FILE
+                self.assertTrue(state.exists())
+                state.unlink()
+                fail = True
+                with self.assertRaises(RuntimeError):
+                    sync._maybe_hot_reload_output(root, root, **arguments)
+                self.assertFalse(state.exists())
+
+    # Verifies build-time plugin synchronization never requires a running app.
+    def test_android_build_sync_does_not_contact_vm_service(self):
+        """Checks that Android build arguments sync both plugin sets without a runtime."""
+        gradle = (Path(__file__).resolve().parents[2] /
+                  'apps/flutter/app/android/app/build.gradle.kts').read_text(encoding='utf-8')
+        task = re.search(
+            r'^val syncOperitPlugins = tasks\.register<Exec>\("syncOperitPlugins"\) \{(.*?)^\}',
+            gradle, re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(task)
+        command = re.search(r'commandLine\((.*?)\)', task.group(1), re.DOTALL)
+        self.assertIsNotNone(command)
+        arguments = re.findall(r'"([^"\n]*)"', command.group(1))
+        self.assertEqual(arguments, ['--source', 'runtime', '--no-hot-reload'])
+
+        with (
+            patch.object(sys, 'argv', ['sync_plugin_packages.py', *arguments]),
+            patch.object(sync, '_generate_plugin_sdk_types'),
+            patch.object(sync, '_sync', return_value=(0, 0, 0)) as synchronize,
+            patch.object(sync, '_discover_vm_service') as discover,
+            patch.object(sync.urllib.request, 'urlopen') as request,
+            patch('builtins.print'),
+        ):
+            self.assertEqual(sync.main(), 0)
+            self.assertEqual(
+                [call.args[0].name for call in synchronize.call_args_list],
+                ['buildin', 'external'],
+            )
+            discover.assert_not_called()
+            request.assert_not_called()
+
+    def test_discovers_flutter_development_service(self):
+        """Extracts the authenticated VM service URI from the Flutter service process."""
+        command_lines = [
+            'dart.exe development-service --vm-service-uri="http://127.0.0.1:4906/token/"'
+        ]
+        with patch.object(sync, '_running_process_command_lines', return_value=command_lines):
+            self.assertEqual(
+                sync._discover_vm_service(),
+                'http://127.0.0.1:4906/token/',
+            )
+
+
+if __name__ == '__main__':
+    unittest.main()

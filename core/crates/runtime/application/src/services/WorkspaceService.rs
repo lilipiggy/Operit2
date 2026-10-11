@@ -8,11 +8,16 @@ use operit_store::RuntimeStorePaths::RuntimeStorePaths;
 use operit_util::RuntimeStorageLayout::WORKSPACE_DIR_PATH;
 use serde::{Deserialize, Serialize};
 
+use crate::ui::features::chat::webview::workspace::process::GitIgnoreFilter::GitIgnoreFilter;
 use operit_host_api::HostManager::HostManager;
+use operit_model::Workspace::Workspace;
 use operit_store::dao::ChatDao::ChatDao;
 use operit_store::db::AppDatabase::AppDatabase;
+use operit_store::repository::WorkspacePreferenceStore::WorkspacePreferenceStore;
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::files::VisualFileSystem::VisualFileSystem;
+
+const MAX_MENTION_FILE_SUGGESTIONS: usize = 10;
 
 /// File metadata returned when browsing a chat workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +56,9 @@ pub struct WorkspaceManagementSummary {
 /// Provides chat-bound workspace file operations through the virtual file system.
 pub struct WorkspaceService {
     chatDao: ChatDao,
+    workspaceStore: WorkspacePreferenceStore,
     fileSystemHost: Arc<dyn FileSystemHost>,
+    runtimeStorageHost: Arc<dyn operit_host_api::RuntimeStorageHost>,
     runtimeStoreRoot: std::path::PathBuf,
     workspaceCollectionRoot: std::path::PathBuf,
 }
@@ -74,10 +81,12 @@ impl WorkspaceService {
             .expect("RuntimeStorageHost workspace root must be configured for WorkspaceService");
         Self {
             chatDao: database.chatDao(),
+            workspaceStore: WorkspacePreferenceStore::getInstance(),
             fileSystemHost: context
                 .fileSystemHost
                 .clone()
                 .expect("FileSystemHost must be configured for WorkspaceService"),
+            runtimeStorageHost: runtimeStorageHost.clone(),
             runtimeStoreRoot,
             workspaceCollectionRoot,
         }
@@ -90,14 +99,32 @@ impl WorkspaceService {
         chatId: String,
         relativePath: String,
     ) -> Result<Vec<WorkspaceFileEntry>, String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let directoryPath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
-        let vfs = self.vfsForWorkspace(&workspaceRoot);
+        let workspace = self.boundWorkspace(&chatId)?;
+        let relativePath = PathMapper::normalizeRelativePath(&relativePath)?;
+        if relativePath.is_empty() {
+            let mut workspaceEntries = workspace
+                .folders
+                .iter()
+                .map(|folder| WorkspaceFileEntry {
+                    name: folder.name.clone(),
+                    path: folder.path.clone(),
+                    relativePath: folder.name.clone(),
+                    isDirectory: true,
+                    size: 0,
+                    lastModified: String::new(),
+                })
+                .collect::<Vec<_>>();
+            workspaceEntries
+                .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            return Ok(workspaceEntries);
+        }
+        let directoryPath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
+        let vfs = self.vfsForWorkspace(&directoryPath);
         let entries = vfs.listFiles(&directoryPath)?;
         let mut workspaceEntries = Vec::new();
         for entry in entries {
             let childRelativePath = joinRelativePath(&relativePath, &entry.name)?;
-            let path = self.resolveWorkspacePath(&workspaceRoot, &childRelativePath)?;
+            let path = resolveWorkspaceRelativePath(&workspace, &childRelativePath)?;
             workspaceEntries.push(WorkspaceFileEntry {
                 name: entry.name,
                 path,
@@ -114,6 +141,45 @@ impl WorkspaceService {
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
         });
         Ok(workspaceEntries)
+    }
+
+    /// Lists ranked workspace file suggestions for an active @ mention.
+    #[allow(non_snake_case)]
+    pub fn listMentionWorkspaceSuggestions(
+        &self,
+        chatId: String,
+        searchQuery: String,
+    ) -> Result<Vec<WorkspaceFileEntry>, String> {
+        let workspace = self.boundWorkspace(&chatId)?;
+        let vfs = self.vfsForWorkspace(&workspace.primaryFolder().path);
+        let normalizedQuery = searchQuery.trim().to_ascii_lowercase();
+        let recursive = !normalizedQuery.is_empty();
+        let mut suggestions = Vec::<MentionWorkspaceSuggestion>::new();
+        for folder in &workspace.folders {
+            let gitignoreRules = workspaceGitignoreRules(&vfs, &folder.path)?;
+            collectMentionWorkspaceSuggestions(
+                &vfs,
+                &folder.path,
+                &folder.name,
+                &normalizedQuery,
+                recursive,
+                &gitignoreRules,
+                &mut suggestions,
+            )?;
+        }
+        suggestions.sort_by(|left, right| {
+            left.score.cmp(&right.score).then_with(|| {
+                left.entry
+                    .relativePath
+                    .to_ascii_lowercase()
+                    .cmp(&right.entry.relativePath.to_ascii_lowercase())
+            })
+        });
+        Ok(suggestions
+            .into_iter()
+            .take(MAX_MENTION_FILE_SUGGESTIONS)
+            .map(|suggestion| suggestion.entry)
+            .collect())
     }
 
     /// Lists directories that can be selected as workspace binding targets.
@@ -152,9 +218,9 @@ impl WorkspaceService {
         chatId: String,
         relativePath: String,
     ) -> Result<String, String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let filePath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
-        self.vfsForWorkspace(&workspaceRoot).readFile(&filePath)
+        let workspace = self.boundWorkspace(&chatId)?;
+        let filePath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
+        self.vfsForWorkspace(&filePath).readFile(&filePath)
     }
 
     /// Reads a binary file from a chat-bound workspace as base64.
@@ -164,11 +230,9 @@ impl WorkspaceService {
         chatId: String,
         relativePath: String,
     ) -> Result<WorkspaceFileBytes, String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let filePath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
-        let bytes = self
-            .vfsForWorkspace(&workspaceRoot)
-            .readFileBytes(&filePath)?;
+        let workspace = self.boundWorkspace(&chatId)?;
+        let filePath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
+        let bytes = self.vfsForWorkspace(&filePath).readFileBytes(&filePath)?;
         Ok(WorkspaceFileBytes {
             base64Content: STANDARD.encode(bytes),
         })
@@ -182,10 +246,10 @@ impl WorkspaceService {
         relativePath: String,
         content: String,
     ) -> Result<(), String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let filePath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
-        self.vfsForWorkspace(&workspaceRoot)
-            .writeFile(&filePath, &content, false)
+        let workspace = self.boundWorkspace(&chatId)?;
+        let filePath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
+        self.trackWorkspaceChange(&filePath, || self.vfsForWorkspace(&filePath)
+            .writeFile(&filePath, &content, false))
     }
 
     /// Writes base64-decoded bytes into a chat-bound workspace file.
@@ -196,21 +260,21 @@ impl WorkspaceService {
         relativePath: String,
         base64Content: String,
     ) -> Result<(), String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let filePath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
+        let workspace = self.boundWorkspace(&chatId)?;
+        let filePath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
         let bytes = STANDARD
             .decode(base64Content.as_bytes())
             .map_err(|error| error.to_string())?;
-        self.vfsForWorkspace(&workspaceRoot)
-            .writeFileBytes(&filePath, &bytes)
+        self.trackWorkspaceChange(&filePath, || self.vfsForWorkspace(&filePath)
+            .writeFileBytes(&filePath, &bytes))
     }
 
     /// Opens a chat-bound workspace file through the host file opener.
     #[allow(non_snake_case)]
     pub fn openWorkspaceFile(&self, chatId: String, relativePath: String) -> Result<(), String> {
-        let workspaceRoot = self.workspaceRoot(chatId)?;
-        let filePath = self.resolveWorkspacePath(&workspaceRoot, &relativePath)?;
-        self.vfsForWorkspace(&workspaceRoot).openFile(&filePath)
+        let workspace = self.boundWorkspace(&chatId)?;
+        let filePath = resolveWorkspaceRelativePath(&workspace, &relativePath)?;
+        self.vfsForWorkspace(&filePath).openFile(&filePath)
     }
 
     /// Builds the workspace-management summary for chat bindings and stored workspace folders.
@@ -225,24 +289,29 @@ impl WorkspaceService {
         let mut boundChatCount = 0i32;
 
         for chat in &chats {
-            let Some(workspace) = chat.workspace.as_ref() else {
+            let Some(workspaceId) = chat.workspaceId.as_ref() else {
                 continue;
             };
-            let workspace = workspace.trim();
-            if workspace.is_empty() {
-                continue;
-            }
             boundChatCount += 1;
-            let Some(relativePath) =
-                PathMapper::relativePath(PathMapper::workspaceCollectionPath(), workspace)?
+            let Some(workspace) = self
+                .workspaceStore
+                .getById(workspaceId)
+                .map_err(|error| error.to_string())?
             else {
                 continue;
             };
-            let components = relativePath.split('/').collect::<Vec<_>>();
-            if components.len() != 1 || components[0].is_empty() {
-                continue;
+            for folder in &workspace.folders {
+                let Some(relativePath) =
+                    PathMapper::relativePath(PathMapper::workspaceCollectionPath(), &folder.path)?
+                else {
+                    continue;
+                };
+                let components = relativePath.split('/').collect::<Vec<_>>();
+                if components.len() != 1 || components[0].is_empty() {
+                    continue;
+                }
+                boundWorkspaceNames.insert(components[0].to_string());
             }
-            boundWorkspaceNames.insert(components[0].to_string());
         }
 
         let mut unboundWorkspaces = Vec::new();
@@ -299,18 +368,35 @@ impl WorkspaceService {
         Ok(deletedCount)
     }
 
-    /// Returns the workspace root bound to a chat.
+    /// Returns the named workspace bound to a chat.
     #[allow(non_snake_case)]
-    fn workspaceRoot(&self, chatId: String) -> Result<String, String> {
+    fn boundWorkspace(&self, chatId: &str) -> Result<Workspace, String> {
         let chat = self
             .chatDao
-            .getChatById(&chatId)
+            .getChatById(chatId)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Chat does not exist: {chatId}"))?;
-        chat.workspace
-            .map(|workspace| workspace.trim().to_string())
-            .filter(|workspace| !workspace.is_empty())
+        let workspaceId = chat
+            .workspaceId
+            .ok_or_else(|| format!("Chat has no bound workspace: {chatId}"))?;
+        self.workspaceStore
+            .getById(&workspaceId)
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Chat has no bound workspace: {chatId}"))
+    }
+
+    /// Returns the primary folder path bound to a chat.
+    #[allow(non_snake_case)]
+    fn workspaceRoot(&self, chatId: String) -> Result<String, String> {
+        Ok(self.boundWorkspace(&chatId)?.primaryFolder().path.clone())
+    }
+
+    fn trackWorkspaceChange<T>(&self, path: &str, change: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        if PathMapper::relativePath(PathMapper::workspaceCollectionPath(), path)?.is_some() {
+            operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(
+                self.runtimeStorageHost.clone(), operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH,
+            ).track(change)
+        } else { change() }
     }
 
     /// Creates a VFS instance scoped to the configured workspace roots.
@@ -321,6 +407,7 @@ impl WorkspaceService {
             PathMapper::new(
                 self.runtimeStoreRoot.clone(),
                 self.workspaceCollectionRoot.clone(),
+                self.runtimeStorageHost.clone(),
             ),
         )
     }
@@ -336,6 +423,25 @@ impl WorkspaceService {
     }
 }
 
+/// Resolves a workspace-relative path against one of the mounted folders.
+fn resolveWorkspaceRelativePath(
+    workspace: &Workspace,
+    relativePath: &str,
+) -> Result<String, String> {
+    let relativePath = PathMapper::normalizeRelativePath(relativePath)?;
+    if relativePath.is_empty() {
+        return Err("workspace-relative path must include a folder name".to_string());
+    }
+    let (folderName, rest) = match relativePath.split_once('/') {
+        Some((folderName, rest)) => (folderName, rest),
+        None => (relativePath.as_str(), ""),
+    };
+    let folder = workspace
+        .folderByName(folderName)
+        .ok_or_else(|| format!("workspace folder not found: {folderName}"))?;
+    PathMapper::joinVfsPath(&folder.path, rest)
+}
+
 /// Joins two workspace-relative path segments.
 #[allow(non_snake_case)]
 fn joinRelativePath(parent: &str, child: &str) -> Result<String, String> {
@@ -346,6 +452,197 @@ fn joinRelativePath(parent: &str, child: &str) -> Result<String, String> {
     } else {
         Ok(format!("{parent}/{child}"))
     }
+}
+
+struct MentionWorkspaceSuggestion {
+    entry: WorkspaceFileEntry,
+    score: i32,
+}
+
+/// Collects workspace mention candidates from one directory.
+#[allow(non_snake_case)]
+fn collectMentionWorkspaceSuggestions(
+    vfs: &VisualFileSystem,
+    directoryVfsPath: &str,
+    relativePath: &str,
+    normalizedQuery: &str,
+    recursive: bool,
+    gitignoreRules: &[String],
+    suggestions: &mut Vec<MentionWorkspaceSuggestion>,
+) -> Result<(), String> {
+    for entry in vfs.listFiles(directoryVfsPath)? {
+        let childRelativePath = joinRelativePath(relativePath, &entry.name)?;
+        if GitIgnoreFilter::shouldIgnore(
+            &childRelativePath,
+            &entry.name,
+            entry.isDirectory,
+            gitignoreRules,
+        ) {
+            continue;
+        }
+
+        let childPath = PathMapper::joinVfsPath(directoryVfsPath, &entry.name)?;
+        let parentPath = parentRelativePath(&childRelativePath);
+        let score = scoreMentionWorkspaceEntry(
+            &childRelativePath,
+            &entry.name,
+            &parentPath,
+            entry.isDirectory,
+            normalizedQuery,
+        );
+        if let Some(score) = score {
+            if entry.isDirectory || isTextBasedFileName(&entry.name) {
+                suggestions.push(MentionWorkspaceSuggestion {
+                    entry: WorkspaceFileEntry {
+                        name: entry.name.clone(),
+                        path: childPath.clone(),
+                        relativePath: childRelativePath.clone(),
+                        isDirectory: entry.isDirectory,
+                        size: entry.size,
+                        lastModified: entry.lastModified.clone(),
+                    },
+                    score,
+                });
+            }
+        }
+
+        if recursive && entry.isDirectory {
+            collectMentionWorkspaceSuggestions(
+                vfs,
+                &childPath,
+                &childRelativePath,
+                normalizedQuery,
+                recursive,
+                gitignoreRules,
+                suggestions,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Scores one workspace entry against the active mention query.
+#[allow(non_snake_case)]
+fn scoreMentionWorkspaceEntry(
+    relativePath: &str,
+    displayName: &str,
+    parentPath: &str,
+    isDirectory: bool,
+    query: &str,
+) -> Option<i32> {
+    let normalizedName = displayName.to_ascii_lowercase();
+    let normalizedPath = relativePath.to_ascii_lowercase();
+    let normalizedParentPath = parentPath.to_ascii_lowercase();
+    let depth = relativePath
+        .chars()
+        .filter(|character| *character == '/')
+        .count() as i32;
+
+    if query.is_empty() {
+        return Some(if isDirectory { depth } else { 20 + depth });
+    }
+
+    let baseScore = if normalizedName == query {
+        0
+    } else if normalizedPath == query {
+        1
+    } else if normalizedName.starts_with(query) {
+        2
+    } else if normalizedPath.starts_with(query) {
+        3
+    } else if normalizedParentPath.find(query).is_some() {
+        4
+    } else if normalizedName.find(query).is_some() {
+        5
+    } else if normalizedPath.find(query).is_some() {
+        6
+    } else {
+        return None;
+    };
+
+    Some(if isDirectory {
+        baseScore * 2
+    } else {
+        baseScore * 2 + 1
+    })
+}
+
+/// Builds the parent path shown for a workspace mention suggestion.
+#[allow(non_snake_case)]
+fn parentRelativePath(relativePath: &str) -> String {
+    relativePath
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
+}
+
+/// Loads workspace gitignore rules used by mention suggestions.
+#[allow(non_snake_case)]
+fn workspaceGitignoreRules(
+    vfs: &VisualFileSystem,
+    workspaceRoot: &str,
+) -> Result<Vec<String>, String> {
+    let gitignorePath = PathMapper::joinVfsPath(workspaceRoot, ".gitignore")?;
+    let gitignoreInfo = vfs.fileExists(&gitignorePath)?;
+    if gitignoreInfo.exists && !gitignoreInfo.isDirectory {
+        let content = vfs.readFile(&gitignorePath)?;
+        return Ok(GitIgnoreFilter::buildRulesFromContent(&content));
+    }
+    Ok(GitIgnoreFilter::defaultRules())
+}
+
+/// Reports whether a file name is suitable for text mention attachments.
+#[allow(non_snake_case)]
+fn isTextBasedFileName(fileName: &str) -> bool {
+    let lower = fileName.to_ascii_lowercase();
+    let extension = lower
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or("");
+    matches!(
+        extension,
+        "txt"
+            | "md"
+            | "markdown"
+            | "rs"
+            | "kt"
+            | "kts"
+            | "java"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "dart"
+            | "py"
+            | "json"
+            | "json5"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "html"
+            | "css"
+            | "scss"
+            | "gradle"
+            | "properties"
+            | "ini"
+            | "csv"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "ps1"
+            | "bat"
+            | "cmd"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "go"
+            | "swift"
+            | "sql"
+            | "lock"
+    ) || lower.find('.').is_none()
 }
 
 /// Extracts a workspace directory name from a runtime storage path.

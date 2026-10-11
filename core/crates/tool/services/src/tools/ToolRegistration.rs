@@ -39,7 +39,7 @@ use operit_tools::tools::mcp::MCPManager::MCPManager;
 use operit_tools::tools::mcp::MCPToolExecutor::MCPToolExecutor;
 use operit_tools::tools::packTool::RuntimePackageManager::RuntimePackageManager;
 use operit_tools::tools::AIToolHandler::{
-    AIToolHandler, FnToolExecutor, ToolRegistrationVisibility,
+    AIToolHandler, AsyncFnToolExecutor, FnToolExecutor, ToolRegistrationVisibility,
 };
 use operit_tools::tools::PackageToolExecutor::PackageToolExecutor;
 use operit_tools::tools::ToolResultDataClasses::{
@@ -166,14 +166,23 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                     };
                     let result = serde_json::json!({
                         "currentNodeId": state.currentNodeId,
-                        "nodes": state.nodes.into_iter().map(|node| serde_json::json!({
-                            "nodeId": node.nodeId,
-                            "displayName": node.displayName,
-                            "userName": node.userName,
-                            "platform": node.platform,
-                            "model": node.model,
-                            "reachable": node.reachable,
-                        })).collect::<Vec<_>>(),
+                        "nodes": state.nodes.into_iter().map(|node| {
+                            let mut encoded = serde_json::json!({
+                                "nodeId": node.nodeId,
+                                "displayName": node.displayName,
+                                "userName": node.userName,
+                                "platform": node.platform,
+                                "model": node.model,
+                                "reachable": node.reachable,
+                            });
+                            if let Some(relayHops) = node.relayHops {
+                                encoded["relayHops"] = serde_json::json!(relayHops);
+                            }
+                            if let Some(relayPath) = node.relayPath {
+                                encoded["relayPath"] = serde_json::json!(relayPath);
+                            }
+                            encoded
+                        }).collect::<Vec<_>>(),
                     });
                     ToolResult {
                         toolName: tool.name.clone(),
@@ -208,6 +217,7 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                 }
             }),
             invoke: {
+                let runtimeSupport = coreNodeRuntimeSupport.clone();
                 Arc::new(move |tool| {
                     let targetNodeId = tool
                         .parameters
@@ -217,6 +227,16 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                         .value
                         .trim()
                         .to_string();
+                    // The actual Binding move happens after this model turn ends;
+                    // without a pre-flight check every invalid target would only
+                    // fail asynchronously, leaving the tool result claiming success.
+                    let state = match runtimeSupport.coreNodeRouteState() {
+                        Ok(state) => state,
+                        Err(error) => return toolErrorResult(tool, error),
+                    };
+                    if let Some(error) = switchCoreTargetError(&state, &targetNodeId) {
+                        return toolErrorResult(tool, error);
+                    }
                     ToolResult {
                         toolName: tool.name.clone(),
                         success: true,
@@ -256,14 +276,21 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
     let usePackageHandler = handler.clone();
     handler.registerBuiltinTool(
         BuiltinToolName::UsePackage,
-        Box::new(FnToolExecutor {
+        crate::ToolExecutionManager::RegisteredToolExecutor::Asynchronous(Box::new(AsyncFnToolExecutor {
             effect: ToolEffect::WRITE,
             validate: Arc::new(|_| ToolValidationResult {
                 valid: true,
                 errorMessage: String::new(),
             }),
             invoke: Arc::new(move |tool| {
+                let usePackageManager = usePackageManager.clone();
+                let usePackageHandler = usePackageHandler.clone();
+                Box::pin(async move {
+                let tool = &tool;
                 let packageName = requiredParameterValue(tool, "package_name");
+                if let Err(error) = RuntimePackageManager::prepareMcpPackage(&usePackageManager, &packageName).await {
+                    return toolErrorResult(tool, error);
+                }
                 let (result, selectedPackage) = {
                     let mut guard = usePackageManager
                         .lock()
@@ -286,8 +313,9 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
                     );
                 }
                 result
+                })
             }),
-        }),
+        })),
         ToolRegistrationVisibility::PUBLIC,
     );
     let searchContext = context.clone();
@@ -360,98 +388,107 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
         }),
     );
     let proxyHandler = handler.clone();
-    handler.registerTool(
+    handler.registerAsyncTool(
         PROXY_TOOL_NAME.to_string(),
-        Box::new(FnToolExecutor {
+        Box::new(AsyncFnToolExecutor {
             effect: ToolEffect::WRITE,
             validate: Arc::new(|_| ToolValidationResult {
                 valid: true,
                 errorMessage: String::new(),
             }),
             invoke: Arc::new(move |tool| {
-                let useEnglish = false;
-                let runtimeContext = ToolExecutionManager::currentToolRuntimeContext();
-                if runtimeContext
-                    .as_ref()
-                    .map(|context| context.toolExposureMode.clone())
-                    != Some(operit_tools::ToolExecutionManager::ToolExposureMode::CLI)
-                {
-                    return toolErrorResult(
-                        tool,
-                        CliToolModeSupport::buildCliModeUnavailableMessage(useEnglish),
-                    );
-                }
-
-                let (parsedInvocation, parseError) = parseProxyInvocation(tool, false);
-                if let Some(error) = parseError {
-                    return error;
-                }
-                let Some(resolvedInvocation) = parsedInvocation else {
-                    return toolErrorResult(
-                        tool,
-                        "Missing required parameter: tool_name".to_string(),
-                    );
-                };
-
-                if CliToolModeSupport::isReservedProxyTarget(&resolvedInvocation.targetToolName) {
-                    return toolErrorResult(
-                        tool,
-                        CliToolModeSupport::buildReservedProxyTargetMessage(
-                            &resolvedInvocation.targetToolName,
-                            useEnglish,
-                        ),
-                    );
-                }
-
-                let packageManager = proxyHandler.getOrCreatePackageManager();
-                let packageManagerGuard = packageManager
-                    .lock()
-                    .expect("package manager mutex poisoned");
-                let proxyRuntimeSupport = proxyHandler.runtimeSupport();
-                let roleCardToolAccess = proxyRuntimeSupport.resolveCharacterCardToolAccess(
-                    runtimeContext
+                let proxyHandler = proxyHandler.clone();
+                Box::pin(async move {
+                    let tool = &tool;
+                    let useEnglish = false;
+                    let runtimeContext = ToolExecutionManager::currentToolRuntimeContext();
+                    if runtimeContext
                         .as_ref()
-                        .and_then(|context| context.callerCardId.as_deref()),
-                    &packageManagerGuard,
-                    None,
-                );
-                drop(packageManagerGuard);
+                        .map(|context| context.toolExposureMode.clone())
+                        != Some(operit_tools::ToolExecutionManager::ToolExposureMode::CLI)
+                    {
+                        return toolErrorResult(
+                            tool,
+                            CliToolModeSupport::buildCliModeUnavailableMessage(useEnglish),
+                        );
+                    }
 
-                let usePackageSourceName = if resolvedInvocation.targetToolName == "use_package" {
-                    resolvedInvocation
-                        .forwardedParameters
-                        .iter()
-                        .find(|parameter| parameter.name == "package_name")
-                        .map(|parameter| parameter.value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                } else {
-                    None
-                };
-                if !CliToolModeSupport::isToolNameAllowedForRoleCard(
-                    &resolvedInvocation.targetToolName,
-                    usePackageSourceName.as_deref(),
-                    &roleCardToolAccess,
-                ) {
-                    return ToolResult {
-                        toolName: resolvedInvocation.targetToolName,
-                        success: false,
-                        result: stringResultData(""),
-                        error: Some(CliToolModeSupport::buildRoleAccessDeniedMessage(useEnglish)),
+                    let (parsedInvocation, parseError) = parseProxyInvocation(tool, false);
+                    if let Some(error) = parseError {
+                        return error;
+                    }
+                    let Some(resolvedInvocation) = parsedInvocation else {
+                        return toolErrorResult(
+                            tool,
+                            "Missing required parameter: tool_name".to_string(),
+                        );
                     };
-                }
 
-                let proxiedTool = AITool {
-                    name: resolvedInvocation.targetToolName,
-                    parameters: resolvedInvocation.forwardedParameters,
-                };
-                let mut clonedHandler = proxyHandler.clone();
-                let proxiedResult = clonedHandler.executeTool(proxiedTool);
-                ToolResult {
-                    toolName: proxiedResult.toolName,
-                    success: proxiedResult.success,
-                    result: proxiedResult.result,
-                    error: proxiedResult.error,
-                }
+                    if CliToolModeSupport::isReservedProxyTarget(&resolvedInvocation.targetToolName)
+                    {
+                        return toolErrorResult(
+                            tool,
+                            CliToolModeSupport::buildReservedProxyTargetMessage(
+                                &resolvedInvocation.targetToolName,
+                                useEnglish,
+                            ),
+                        );
+                    }
+
+                    let packageManager = proxyHandler.getOrCreatePackageManager();
+                    let roleCardToolAccess = {
+                        let packageManagerGuard = packageManager
+                            .lock()
+                            .expect("package manager mutex poisoned");
+                        let proxyRuntimeSupport = proxyHandler.runtimeSupport();
+                        proxyRuntimeSupport.resolveCharacterCardToolAccess(
+                            runtimeContext
+                                .as_ref()
+                                .and_then(|context| context.callerCardId.as_deref()),
+                            &packageManagerGuard,
+                            None,
+                        )
+                    };
+
+                    let usePackageSourceName = if resolvedInvocation.targetToolName == "use_package"
+                    {
+                        resolvedInvocation
+                            .forwardedParameters
+                            .iter()
+                            .find(|parameter| parameter.name == "package_name")
+                            .map(|parameter| parameter.value.trim().to_string())
+                            .filter(|value| !value.is_empty())
+                    } else {
+                        None
+                    };
+                    if !CliToolModeSupport::isToolNameAllowedForRoleCard(
+                        &resolvedInvocation.targetToolName,
+                        usePackageSourceName.as_deref(),
+                        &roleCardToolAccess,
+                    ) {
+                        return ToolResult {
+                            toolName: resolvedInvocation.targetToolName,
+                            success: false,
+                            result: stringResultData(""),
+                            error: Some(CliToolModeSupport::buildRoleAccessDeniedMessage(
+                                useEnglish,
+                            )),
+                        };
+                    }
+
+                    let proxiedTool = AITool {
+                        name: resolvedInvocation.targetToolName,
+                        parameters: resolvedInvocation.forwardedParameters,
+                    };
+                    let mut clonedHandler = proxyHandler.clone();
+                    let proxiedResult = clonedHandler.executeTool(proxiedTool).await;
+                    ToolResult {
+                        toolName: proxiedResult.toolName,
+                        success: proxiedResult.success,
+                        result: proxiedResult.result,
+                        error: proxiedResult.error,
+                    }
+                })
             }),
         }),
     );
@@ -529,6 +566,12 @@ fn registerChatTools(handler: &mut AIToolHandler, chatTools: StandardChatManager
     registerChatTool(
         handler,
         &chatTools,
+        BuiltinToolName::CallChatModel,
+        ChatManagerToolOperation::CallChatModel,
+    );
+    registerChatTool(
+        handler,
+        &chatTools,
         BuiltinToolName::ListCharacterCards,
         ChatManagerToolOperation::ListCharacterCards,
     );
@@ -537,6 +580,12 @@ fn registerChatTools(handler: &mut AIToolHandler, chatTools: StandardChatManager
         &chatTools,
         BuiltinToolName::GetChatMessages,
         ChatManagerToolOperation::GetChatMessages,
+    );
+    registerChatTool(
+        handler,
+        &chatTools,
+        BuiltinToolName::GetChatMessagesRange,
+        ChatManagerToolOperation::GetChatMessagesRange,
     );
 }
 
@@ -934,6 +983,18 @@ fn registerBluetoothTool(
 
 #[allow(non_snake_case)]
 fn registerInternalTools(handler: &mut AIToolHandler, context: &HostManager) {
+    handler.registerBuiltinTool(
+        BuiltinToolName::EdgeExecute,
+        crate::ToolExecutionManager::RegisteredToolExecutor::Asynchronous(Box::new(
+            crate::tools::EdgePortTool::EdgePortToolExecutor { io: false, runtime: handler.runtimeSupport() })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
+    handler.registerBuiltinTool(
+        BuiltinToolName::IoExecute,
+        crate::ToolExecutionManager::RegisteredToolExecutor::Asynchronous(Box::new(
+            crate::tools::EdgePortTool::EdgePortToolExecutor { io: true, runtime: handler.runtimeSupport() })),
+        ToolRegistrationVisibility::INTERNAL,
+    );
     let readEnvironmentRuntimeSupport = handler.runtimeSupport();
     registerHttpTools(handler, ToolGetter::getHttpTools(context));
     if let Some(browserTools) = ToolGetter::getBrowserAutomationTools(context) {
@@ -949,81 +1010,95 @@ fn registerInternalTools(handler: &mut AIToolHandler, context: &HostManager) {
     let packageProxyHandler = handler.clone();
     handler.registerBuiltinTool(
         BuiltinToolName::PackageProxy,
-        Box::new(FnToolExecutor {
-            effect: ToolEffect::WRITE,
-            validate: Arc::new(|_| ToolValidationResult {
-                valid: true,
-                errorMessage: String::new(),
-            }),
-            invoke: Arc::new(move |tool| {
-                let (parsedInvocation, parseError) = parseProxyInvocation(tool, true);
-                if let Some(error) = parseError {
-                    return error;
-                }
-                let Some(resolvedInvocation) = parsedInvocation else {
-                    return toolErrorResult(
-                        tool,
-                        "Missing required parameter: tool_name".to_string(),
-                    );
-                };
-                if resolvedInvocation.targetToolName == PACKAGE_PROXY_TOOL_NAME {
-                    return toolErrorResult(tool, "tool_name cannot be package_proxy".to_string());
-                }
+        crate::ToolExecutionManager::RegisteredToolExecutor::Asynchronous(Box::new(
+            AsyncFnToolExecutor {
+                effect: ToolEffect::WRITE,
+                validate: Arc::new(|_| ToolValidationResult {
+                    valid: true,
+                    errorMessage: String::new(),
+                }),
+                invoke: Arc::new(move |tool| {
+                    let packageProxyHandler = packageProxyHandler.clone();
+                    Box::pin(async move {
+                        let tool = &tool;
+                        let (parsedInvocation, parseError) = parseProxyInvocation(tool, true);
+                        if let Some(error) = parseError {
+                            return error;
+                        }
+                        let Some(resolvedInvocation) = parsedInvocation else {
+                            return toolErrorResult(
+                                tool,
+                                "Missing required parameter: tool_name".to_string(),
+                            );
+                        };
+                        if resolvedInvocation.targetToolName == PACKAGE_PROXY_TOOL_NAME {
+                            return toolErrorResult(
+                                tool,
+                                "tool_name cannot be package_proxy".to_string(),
+                            );
+                        }
 
-                let proxiedTool = AITool {
-                    name: resolvedInvocation.targetToolName,
-                    parameters: resolvedInvocation.forwardedParameters,
-                };
-                let mut clonedHandler = packageProxyHandler.clone();
-                let proxiedResult = clonedHandler.executeTool(proxiedTool);
-                ToolResult {
-                    toolName: proxiedResult.toolName,
-                    success: proxiedResult.success,
-                    result: proxiedResult.result,
-                    error: proxiedResult.error,
-                }
-            }),
-        }),
+                        let proxiedTool = AITool {
+                            name: resolvedInvocation.targetToolName,
+                            parameters: resolvedInvocation.forwardedParameters,
+                        };
+                        let mut clonedHandler = packageProxyHandler.clone();
+                        let proxiedResult = clonedHandler.executeTool(proxiedTool).await;
+                        ToolResult {
+                            toolName: proxiedResult.toolName,
+                            success: proxiedResult.success,
+                            result: proxiedResult.result,
+                            error: proxiedResult.error,
+                        }
+                    })
+                }),
+            },
+        )),
         ToolRegistrationVisibility::INTERNAL,
     );
     let cliCommandHandler = handler.clone();
     handler.registerBuiltinTool(
         BuiltinToolName::ExecuteCliCommand,
-        Box::new(FnToolExecutor {
-            effect: ToolEffect::WRITE,
-            validate: Arc::new(|_| ToolValidationResult {
-                valid: true,
-                errorMessage: String::new(),
-            }),
-            invoke: Arc::new(move |tool| {
-                let argsRaw = requiredParameterValue(tool, "args");
-                let args = match serde_json::from_str::<Vec<String>>(&argsRaw) {
-                    Ok(args) => args,
-                    Err(error) => {
-                        return toolErrorResult(
-                            tool,
-                            format!("args must be a JSON string array: {error}"),
-                        );
-                    }
-                };
-                let context = cliCommandHandler.getContext();
-                let Some(executor) = context.coreCommandExecutor else {
-                    return toolErrorResult(
-                        tool,
-                        "Core command executor is not configured.".to_string(),
-                    );
-                };
-                match executor(args) {
-                    Ok(output) => ToolResult {
-                        toolName: tool.name.clone(),
-                        success: true,
-                        result: stringResultData(output),
-                        error: None,
-                    },
-                    Err(error) => toolErrorResult(tool, error),
-                }
-            }),
-        }),
+        crate::ToolExecutionManager::RegisteredToolExecutor::Asynchronous(Box::new(
+            AsyncFnToolExecutor {
+                effect: ToolEffect::WRITE,
+                validate: Arc::new(|_| ToolValidationResult {
+                    valid: true,
+                    errorMessage: String::new(),
+                }),
+                invoke: Arc::new(move |tool| {
+                    let cliCommandHandler = cliCommandHandler.clone();
+                    Box::pin(async move {
+                        let argsRaw = requiredParameterValue(&tool, "args");
+                        let args = match serde_json::from_str::<Vec<String>>(&argsRaw) {
+                            Ok(args) => args,
+                            Err(error) => {
+                                return toolErrorResult(
+                                    &tool,
+                                    format!("args must be a JSON string array: {error}"),
+                                );
+                            }
+                        };
+                        let context = cliCommandHandler.getContext();
+                        let Some(executor) = context.coreCommandExecutor else {
+                            return toolErrorResult(
+                                &tool,
+                                "Core command executor is not configured.".to_string(),
+                            );
+                        };
+                        match executor(args).await {
+                            Ok(output) => ToolResult {
+                                toolName: tool.name.clone(),
+                                success: true,
+                                result: stringResultData(output),
+                                error: None,
+                            },
+                            Err(error) => toolErrorResult(&tool, error),
+                        }
+                    })
+                }),
+            },
+        )),
         ToolRegistrationVisibility::INTERNAL,
     );
     handler.registerBuiltinTool(
@@ -1229,6 +1304,12 @@ fn registerMemoryPublicTools(handler: &mut AIToolHandler) {
 
 #[allow(non_snake_case)]
 fn registerMemoryInternalTools(handler: &mut AIToolHandler) {
+    registerMemoryTool(
+        handler,
+        BuiltinToolName::GetMemoryOwnerKey,
+        MemoryToolOperation::GetMemoryOwnerKey,
+        true,
+    );
     registerMemoryTool(
         handler,
         BuiltinToolName::CreateMemory,
@@ -1541,14 +1622,14 @@ fn registerPackageTools(
         let toolName = format!("{}:{}", toolPackage.name, packageTool.name);
         let mut clonedHandler = handler.clone();
         if isMcpPackage {
-            clonedHandler.registerTool(
+            clonedHandler.registerAsyncTool(
                 toolName,
                 Box::new(MCPToolExecutor::new(MCPManager::getInstance(
                     context.clone(),
                 ))),
             );
         } else {
-            clonedHandler.registerTool(
+            clonedHandler.registerAsyncTool(
                 toolName,
                 Box::new(PackageToolExecutor::new(
                     toolPackage.clone(),
@@ -1566,6 +1647,67 @@ fn toolErrorResult(tool: &AITool, error: String) -> ToolResult {
         success: false,
         result: stringResultData(""),
         error: Some(error),
+    }
+}
+
+/// Validates one switch_core target against the live route state so an invalid
+/// target fails the tool call instead of the asynchronous Binding move.
+fn switchCoreTargetError(
+    state: &crate::runtime_support::RuntimeCoreNodeRouteState,
+    targetNodeId: &str,
+) -> Option<String> {
+    let Some(node) = state.nodes.iter().find(|node| node.nodeId == targetNodeId) else {
+        return Some(format!(
+            "switch_core target is not a member of the current device space: {targetNodeId}"
+        ));
+    };
+    if !node.reachable {
+        return Some(format!(
+            "switch_core target is not currently reachable: {targetNodeId}"
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod switch_core_tests {
+    use super::*;
+
+    fn routeState(nodes: Vec<(&str, bool)>) -> crate::runtime_support::RuntimeCoreNodeRouteState {
+        operit_tools::runtime_support::RuntimeCoreNodeRouteState {
+            currentNodeId: "local".to_string(),
+            nodes: nodes
+                .into_iter()
+                .map(|(nodeId, reachable)| crate::runtime_support::RuntimeCoreNodeStatus {
+                    nodeId: nodeId.to_string(),
+                    displayName: nodeId.to_string(),
+                    userName: "tester".to_string(),
+                    platform: "linux".to_string(),
+                    model: String::new(),
+                    reachable,
+                    relayHops: None,
+                    relayPath: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn switch_core_accepts_reachable_members_including_direct_peers() {
+        let state = routeState(vec![("local", true), ("direct-peer", true), ("relayed", true)]);
+        assert_eq!(switchCoreTargetError(&state, "direct-peer"), None);
+        assert_eq!(switchCoreTargetError(&state, "local"), None);
+    }
+
+    #[test]
+    fn switch_core_rejects_unknown_and_unreachable_targets() {
+        let state = routeState(vec![("local", true), ("offline", false)]);
+        assert!(switchCoreTargetError(&state, "stranger")
+            .expect("unknown target must be rejected")
+            .contains("not a member"));
+        assert!(switchCoreTargetError(&state, "offline")
+            .expect("unreachable target must be rejected")
+            .contains("not currently reachable"));
     }
 }
 

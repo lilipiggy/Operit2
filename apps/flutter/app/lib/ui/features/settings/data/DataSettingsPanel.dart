@@ -1,19 +1,25 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
+
+import 'package:operit_folder_access/operit_folder_access.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/logging/ClientLogger.dart';
+import '../../../../core/logging/DiagnosticLogExporter.dart';
 import '../../../../core/host/FileSaveService.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart';
 import '../../../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../../../core/snapshot/SnapshotImportUploader.dart';
+import '../../../../core/host/SelectedFileInput.dart';
 import '../../../../l10n/generated/app_localizations.dart';
+import '../../../common/StorageDirectorySelectionError.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../theme/OperitGlassSurface.dart';
 import '../components/SettingsControlStyles.dart';
@@ -24,14 +30,28 @@ const XTypeGroup _rawSnapshotFileTypeGroup = XTypeGroup(
   extensions: <String>['opsnapshot', 'zip'],
 );
 
+const XTypeGroup _backupJsonFileTypeGroup = XTypeGroup(
+  label: 'Operit JSON backup',
+  extensions: <String>['json'],
+);
+
+const XTypeGroup _diagnosticLogFileTypeGroup = XTypeGroup(
+  label: 'Diagnostic log',
+  extensions: <String>['log', 'txt'],
+);
+
 const String _operit1SnapshotImportLogTag = 'Operit1SnapshotImport';
 
 class DataSettingsPanel extends StatefulWidget {
-  const DataSettingsPanel({super.key, GeneratedCoreProxyClients? clients})
-    : clients =
-          clients ?? const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge());
+  const DataSettingsPanel({
+    super.key,
+    GeneratedCoreProxyClients? clients,
+    this.diagnosticLogExporter,
+  }) : clients =
+           clients ?? const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge());
 
   final GeneratedCoreProxyClients clients;
+  final DiagnosticLogExporter? diagnosticLogExporter;
 
   @override
   State<DataSettingsPanel> createState() => _DataSettingsPanelState();
@@ -40,6 +60,7 @@ class DataSettingsPanel extends StatefulWidget {
 class _DataSettingsPanelState extends State<DataSettingsPanel> {
   Future<_DataSettingsData>? _future;
   bool _busy = false;
+  bool _exportingLogs = false;
   int? _lastSnapshotBytes;
   StreamSubscription<Operit1SnapshotImportProgress>?
   _operit1ImportProgressSubscription;
@@ -81,6 +102,12 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
               error: error,
               stackTrace: stackTrace,
             );
+            _operit1ImportProgressSubscription = null;
+          },
+          onDone: () {
+            // Core watch streams are one-shot and close after the terminal
+            // event. Clear the handle so a later import can subscribe again.
+            _operit1ImportProgressSubscription = null;
           },
         );
   }
@@ -96,12 +123,13 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
       coreVersion: await widget.clients.application.coreVersion(),
       storagePaths: storagePaths,
       inputTokens: await widget.clients.chatRuntimeHolderMain
-          .inputTokenCountFlow().first,
+          .inputTokenCountFlow()
+          .first,
       outputTokens: await widget.clients.chatRuntimeHolderMain
-          .outputTokenCountFlow().first,
+          .outputTokenCountFlow()
+          .first,
       chatHistoryCount:
-          (await widget.clients.chatRuntimeHolderMain
-                  .chatHistoriesFlow().first)
+          (await widget.clients.chatRuntimeHolderMain.chatHistoriesFlow().first)
               .length,
       characterCardCount:
           (await characterCardManager.getAllCharacterCards()).length,
@@ -206,13 +234,13 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
   Future<void> _runStorageMigrate(RuntimeStoragePaths paths) async {
     final value = await widget.clients.application.runCoreCommand(
       args: <String>[
-            'storage',
-            'migrate',
-            '--runtime',
-            paths.runtimeRoot,
-            '--workspace',
-            paths.workspaceRoot,
-          ],
+        'storage',
+        'migrate',
+        '--runtime',
+        paths.runtimeRoot,
+        '--workspace',
+        paths.workspaceRoot,
+      ],
     );
     if (value is! Map<Object?, Object?>) {
       throw StateError('Invalid core command output');
@@ -223,49 +251,93 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  /// Exports the raw snapshot to a user-selected file.
+  /// Builds the suggested file name for one JSON backup.
+  String _backupJsonSuggestedName(String slug) {
+    return 'operit-$slug-${DateTime.now().millisecondsSinceEpoch}.json';
+  }
+
+  /// Writes one JSON backup to a user-selected file.
+  Future<String?> _saveBackupJson({
+    required String jsonText,
+    required String suggestedName,
+  }) {
+    return FileSaveService.saveBytes(
+      bytes: Uint8List.fromList(utf8.encode(jsonText)),
+      name: suggestedName,
+      mimeType: 'application/json',
+      acceptedTypeGroups: const <XTypeGroup>[_backupJsonFileTypeGroup],
+    );
+  }
+
+  /// Reads one JSON backup from a user-selected file.
+  Future<String?> _readBackupJson() async {
+    final file = await openFile(
+      acceptedTypeGroups: const <XTypeGroup>[_backupJsonFileTypeGroup],
+    );
+    if (file == null) {
+      return null;
+    }
+    return file.readAsString();
+  }
+
+  /// Saves a streamed raw snapshot and releases its host-owned staging file.
   Future<void> _exportRawSnapshot() async {
     final l10n = AppLocalizations.of(context)!;
     final suggestedName = _rawSnapshotSuggestedName();
     setState(() => _busy = true);
+    StagedArchiveFile? exported;
     try {
-      final bytes = await widget.clients.servicesSnapshotImportManager
-          .exportRawSnapshot();
-      final savedPath = await FileSaveService.saveBytes(
-        bytes: Uint8List.fromList(bytes),
+      final savedPath = await FileSaveService.saveGeneratedFile(
+        // Generate the snapshot only after the registered output implementation is ready.
+        generate: () async {
+          final file = await widget.clients.servicesSnapshotImportManager
+              .exportRawSnapshot();
+          exported = file;
+          return XFile(
+            file.fileReference,
+            name: suggestedName,
+            mimeType: 'application/zip',
+            length: file.archive.byteLength,
+          );
+        },
         name: suggestedName,
-        mimeType: 'application/zip',
         acceptedTypeGroups: const <XTypeGroup>[_rawSnapshotFileTypeGroup],
       );
-      if (savedPath == null) {
-        return;
-      }
-      if (!mounted) {
+      if (savedPath == null || !mounted) {
         return;
       }
       setState(() {
-        _lastSnapshotBytes = bytes.length;
+        _lastSnapshotBytes = exported!.archive.byteLength;
       });
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataSnapshotExportError('$error'))),
-      );
-    } finally {
       if (mounted) {
-        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(l10n.settingsDataSnapshotExportError('$error')),
+          ),
+        );
+      }
+    } finally {
+      try {
+        final file = exported;
+        if (file != null) {
+          await widget.clients.servicesArchiveTransferManager
+              .discardArchiveUpload(archiveId: file.archive.archiveId);
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _busy = false);
+        }
       }
     }
   }
 
   Future<void> _importRawSnapshot() async {
     final l10n = AppLocalizations.of(context)!;
-    final file = await SnapshotImportFile.pick();
+    final file = await SelectedFileInput.pickSnapshot();
     if (file == null) {
       return;
     }
@@ -332,22 +404,80 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
+  /// Publishes a local progress state for the file-selection and staging phase.
+  void _setOperit1ImportProgress({
+    required String stage,
+    required String title,
+    required String detail,
+    required double progress,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _operit1ImportProgress = Operit1SnapshotImportProgress(
+        stage: stage,
+        title: title,
+        detail: detail,
+        progress: progress.clamp(0.0, 1.0).toDouble(),
+        active: true,
+      );
+    });
+  }
+
   /// Selects, previews, confirms, and imports a complete Operit1 snapshot.
   Future<void> _importOperit1Snapshot() async {
     final l10n = AppLocalizations.of(context)!;
-    final file = await SnapshotImportFile.pick();
+    final file = await SelectedFileInput.pickSnapshot();
     if (file == null) {
       return;
     }
+    if (!mounted) {
+      await file.close();
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _operit1ImportProgress = const Operit1SnapshotImportProgress(
+        stage: 'prepare',
+        title: '准备导入',
+        detail: '正在准备 Operit1 快照。',
+        progress: 0.0,
+        active: true,
+      );
+    });
     ClientLogger.i(
       'settings snapshot selected name=${file.name} bytes=${file.byteLength}',
       tag: _operit1SnapshotImportLogTag,
     );
-    setState(() => _busy = true);
     SnapshotImportSession? stagedSession;
     late final Operit1SnapshotPreview preview;
+    var lastUploadPercent = -1;
     try {
-      stagedSession = await SnapshotImportUploader(widget.clients).stage(file);
+      stagedSession = await SnapshotImportUploader(widget.clients).stage(
+        file,
+        onProgress: (uploadedBytes, totalBytes) {
+          final uploadPercent = totalBytes <= 0
+              ? 100
+              : (uploadedBytes * 100 / totalBytes).floor().clamp(0, 100);
+          if (uploadPercent == lastUploadPercent) {
+            return;
+          }
+          lastUploadPercent = uploadPercent;
+          _setOperit1ImportProgress(
+            stage: 'upload',
+            title: '上传快照',
+            detail: '正在读取并上传快照文件（$uploadPercent%）。',
+            progress: 0.18 * uploadPercent / 100,
+          );
+        },
+      );
+      _setOperit1ImportProgress(
+        stage: 'inspect',
+        title: '检查快照',
+        detail: '正在检查 Operit1 快照内容，请稍候。',
+        progress: 0.20,
+      );
       ClientLogger.i(
         'settings snapshot upload completed bytes=${stagedSession.byteLength}; inspection started',
         tag: _operit1SnapshotImportLogTag,
@@ -368,6 +498,9 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
       if (session != null) {
         await session.discard();
       }
+      if (mounted) {
+        setState(() => _operit1ImportProgress = null);
+      }
       if (!mounted) {
         return;
       }
@@ -387,6 +520,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
       await session.discard();
       return;
     }
+    setState(() => _operit1ImportProgress = null);
     final confirmed = await _Operit1SnapshotImportDialog.show(
       context: context,
       fileName: file.name,
@@ -399,7 +533,13 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
     setState(() {
       _busy = true;
-      _operit1ImportProgress = null;
+      _operit1ImportProgress = const Operit1SnapshotImportProgress(
+        stage: 'start',
+        title: '开始导入',
+        detail: '正在启动 Operit1 数据迁移。',
+        progress: 0.02,
+        active: true,
+      );
     });
     try {
       ClientLogger.i(
@@ -413,6 +553,9 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
         tag: _operit1SnapshotImportLogTag,
       );
       await session.discard();
+      if (mounted) {
+        setState(() => _operit1ImportProgress = null);
+      }
       if (!mounted) {
         return;
       }
@@ -443,29 +586,89 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  Future<void> _copyChatHistoriesBackup() async {
+  /// Exports merged Core/client diagnostics through the platform save dialog.
+  Future<void> _exportDiagnosticLogs() async {
     final l10n = AppLocalizations.of(context)!;
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _exportingLogs = true;
+    });
     try {
-      final jsonText = await widget.clients.chatRuntimeHolderMain
-          .exportChatHistoriesToJson();
-      await Clipboard.setData(ClipboardData(text: jsonText));
+      final exporter =
+          widget.diagnosticLogExporter ??
+          DiagnosticLogExporter(clients: widget.clients);
+      final exported = await exporter.collect();
       if (!mounted) {
+        return;
+      }
+      final savedPath = await FileSaveService.saveBytes(
+        bytes: Uint8List.fromList(utf8.encode(exported.text)),
+        name: 'operit-diagnostics-${DateTime.now().millisecondsSinceEpoch}.log',
+        mimeType: 'text/plain',
+        acceptedTypeGroups: const <XTypeGroup>[_diagnosticLogFileTypeGroup],
+      );
+      if (savedPath == null || !mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            l10n.settingsDataBackupCopied(l10n.settingsDataChatHistoriesBackup),
+            exported.isPartial
+                ? l10n.settingsDataLogsExportPartial(savedPath)
+                : l10n.savedTo(savedPath),
           ),
         ),
       );
+    } catch (error, stackTrace) {
+      if (ClientLogger.isInitialized) {
+        ClientLogger.e(
+          'Diagnostic log export failed',
+          tag: 'DiagnosticLogExport',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.settingsDataLogsExportError('$error'))),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _exportingLogs = false;
+        });
+      }
+    }
+  }
+
+  /// Exports all chat histories to a JSON file.
+  Future<void> _exportChatHistoriesBackup() async {
+    final l10n = AppLocalizations.of(context)!;
+    setState(() => _busy = true);
+    try {
+      final jsonText = await widget.clients.chatRuntimeHolderMain
+          .exportChatHistoriesToJson();
+      final savedPath = await _saveBackupJson(
+        jsonText: jsonText,
+        suggestedName: _backupJsonSuggestedName('chat-histories'),
+      );
+      if (savedPath == null) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataBackupCopyError('$error'))),
+        SnackBar(content: Text(l10n.settingsDataBackupExportError('$error'))),
       );
     } finally {
       if (mounted) {
@@ -474,9 +677,10 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
+  /// Imports all chat histories from a JSON file.
   Future<void> _importChatHistoriesBackup() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _BackupImportDialog.show(context: context);
+    final jsonText = await _readBackupJson();
     if (jsonText == null) {
       return;
     }
@@ -513,31 +717,32 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  Future<void> _copyCharacterCardsBackup() async {
+  /// Exports all character cards to a JSON file.
+  Future<void> _exportCharacterCardsBackup() async {
     final l10n = AppLocalizations.of(context)!;
     setState(() => _busy = true);
     try {
       final jsonText = await widget.clients.preferencesCharacterCardManager
           .exportAllCharacterCardsToBackupContent();
-      await Clipboard.setData(ClipboardData(text: jsonText));
+      final savedPath = await _saveBackupJson(
+        jsonText: jsonText,
+        suggestedName: _backupJsonSuggestedName('character-cards'),
+      );
+      if (savedPath == null) {
+        return;
+      }
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            l10n.settingsDataBackupCopied(
-              l10n.settingsDataCharacterCardsBackup,
-            ),
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataBackupCopyError('$error'))),
+        SnackBar(content: Text(l10n.settingsDataBackupExportError('$error'))),
       );
     } finally {
       if (mounted) {
@@ -546,9 +751,10 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
+  /// Imports all character cards from a JSON file.
   Future<void> _importCharacterCardsBackup() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _BackupImportDialog.show(context: context);
+    final jsonText = await _readBackupJson();
     if (jsonText == null) {
       return;
     }
@@ -585,31 +791,32 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  Future<void> _copyCharacterGroupsBackup() async {
+  /// Exports all character groups to a JSON file.
+  Future<void> _exportCharacterGroupsBackup() async {
     final l10n = AppLocalizations.of(context)!;
     setState(() => _busy = true);
     try {
       final jsonText = await widget.clients.preferencesCharacterGroupCardManager
           .exportAllCharacterGroupsToBackupContent();
-      await Clipboard.setData(ClipboardData(text: jsonText));
+      final savedPath = await _saveBackupJson(
+        jsonText: jsonText,
+        suggestedName: _backupJsonSuggestedName('character-groups'),
+      );
+      if (savedPath == null) {
+        return;
+      }
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            l10n.settingsDataBackupCopied(
-              l10n.settingsDataCharacterGroupsBackup,
-            ),
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataBackupCopyError('$error'))),
+        SnackBar(content: Text(l10n.settingsDataBackupExportError('$error'))),
       );
     } finally {
       if (mounted) {
@@ -618,9 +825,10 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
+  /// Imports all character groups from a JSON file.
   Future<void> _importCharacterGroupsBackup() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _BackupImportDialog.show(context: context);
+    final jsonText = await _readBackupJson();
     if (jsonText == null) {
       return;
     }
@@ -657,10 +865,10 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  /// Restores model configurations from backup JSON entered by the user.
+  /// Imports model configurations from a JSON file.
   Future<void> _importModelConfigsBackup() async {
     final l10n = AppLocalizations.of(context)!;
-    final jsonText = await _BackupImportDialog.show(context: context);
+    final jsonText = await _readBackupJson();
     if (jsonText == null) {
       return;
     }
@@ -697,35 +905,66 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     }
   }
 
-  Future<void> _copyModelConfigsBackup() async {
+  /// Exports all model configurations to a JSON file.
+  Future<void> _exportModelConfigsBackup() async {
     final l10n = AppLocalizations.of(context)!;
     setState(() => _busy = true);
     try {
       final jsonText = await widget.clients.preferencesModelConfigManager
           .exportAllProviders();
-      await Clipboard.setData(ClipboardData(text: jsonText));
+      final savedPath = await _saveBackupJson(
+        jsonText: jsonText,
+        suggestedName: _backupJsonSuggestedName('model-configs'),
+      );
+      if (savedPath == null) {
+        return;
+      }
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            l10n.settingsDataBackupCopied(l10n.settingsDataModelConfigsBackup),
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.savedTo(savedPath))));
     } catch (error) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.settingsDataBackupCopyError('$error'))),
+        SnackBar(content: Text(l10n.settingsDataBackupExportError('$error'))),
       );
     } finally {
       if (mounted) {
         setState(() => _busy = false);
       }
     }
+  }
+
+  /// Keeps diagnostics usable even if the overview cannot connect to Core.
+  Widget _buildDiagnosticLogsCard(
+    AppLocalizations l10n,
+    ColorScheme colorScheme,
+  ) {
+    return _SectionCard(
+      title: l10n.settingsDataLogsSection,
+      children: <Widget>[
+        Text(
+          l10n.settingsDataLogsDescription,
+          style: TextStyle(color: colorScheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          onPressed: _busy ? null : _exportDiagnosticLogs,
+          icon: _exportingLogs
+              ? const M3LoadingIndicator(size: 20)
+              : const Icon(Icons.download_outlined),
+          label: Text(
+            _exportingLogs
+                ? l10n.settingsDataLogsExporting
+                : l10n.settingsDataExportLogs,
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -735,16 +974,30 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
     return FutureBuilder<_DataSettingsData>(
       future: _future,
       builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          Error.throwWithStackTrace(snapshot.error!, snapshot.stackTrace!);
-        }
         final data = snapshot.data;
         if (data == null) {
-          return const M3LoadingPane();
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            children: <Widget>[
+              _buildDiagnosticLogsCard(l10n, colorScheme),
+              if (snapshot.hasError)
+                _SectionCard(
+                  title: l10n.settingsDataRuntimeSection,
+                  children: <Widget>[
+                    Text(
+                      l10n.settingsDataOverviewLoadError('${snapshot.error}'),
+                    ),
+                  ],
+                )
+              else
+                const SizedBox(height: 160, child: M3LoadingPane()),
+            ],
+          );
         }
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
           children: <Widget>[
+            _buildDiagnosticLogsCard(l10n, colorScheme),
             _SectionCard(
               title: l10n.settingsDataBackupSection,
               children: <Widget>[
@@ -784,7 +1037,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
                         ),
                         description:
                             l10n.settingsDataChatHistoriesBackupDescription,
-                        onExport: _busy ? null : _copyChatHistoriesBackup,
+                        onExport: _busy ? null : _exportChatHistoriesBackup,
                         onImport: _busy ? null : _importChatHistoriesBackup,
                       ),
                       const Divider(height: 20),
@@ -795,7 +1048,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
                         ),
                         description:
                             l10n.settingsDataCharacterCardsBackupDescription,
-                        onExport: _busy ? null : _copyCharacterCardsBackup,
+                        onExport: _busy ? null : _exportCharacterCardsBackup,
                         onImport: _busy ? null : _importCharacterCardsBackup,
                       ),
                       const Divider(height: 20),
@@ -806,7 +1059,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
                         ),
                         description:
                             l10n.settingsDataCharacterGroupsBackupDescription,
-                        onExport: _busy ? null : _copyCharacterGroupsBackup,
+                        onExport: _busy ? null : _exportCharacterGroupsBackup,
                         onImport: _busy ? null : _importCharacterGroupsBackup,
                       ),
                       const Divider(height: 20),
@@ -817,7 +1070,7 @@ class _DataSettingsPanelState extends State<DataSettingsPanel> {
                         ),
                         description:
                             l10n.settingsDataModelConfigsBackupDescription,
-                        onExport: _busy ? null : _copyModelConfigsBackup,
+                        onExport: _busy ? null : _exportModelConfigsBackup,
                         onImport: _busy ? null : _importModelConfigsBackup,
                       ),
                     ],
@@ -1114,8 +1367,8 @@ class _BackupLine extends StatelessWidget {
             children: <Widget>[
               OutlinedButton.icon(
                 onPressed: onExport,
-                icon: const Icon(Icons.copy_outlined),
-                label: Text(l10n.settingsDataCopyBackupJson),
+                icon: const Icon(Icons.download_outlined),
+                label: Text(l10n.settingsDataExportBackupJson),
               ),
               FilledButton.tonalIcon(
                 onPressed: onImport,
@@ -1272,27 +1525,35 @@ class _StorageLocationEditDialogState
   }
 
   /// Selects a new runtime root directory.
-  Future<void> _selectRuntimeRoot() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.trim().isEmpty) {
-      return;
-    }
-    setState(() {
-      _runtimeRootController.text = path.trim();
-      _errorText = null;
-    });
-  }
+  Future<void> _selectRuntimeRoot() =>
+      _selectStorageRoot(_runtimeRootController);
 
   /// Selects a new workspace root directory.
-  Future<void> _selectWorkspaceRoot() async {
-    final path = await getDirectoryPath();
-    if (path == null || path.trim().isEmpty) {
-      return;
+  Future<void> _selectWorkspaceRoot() =>
+      _selectStorageRoot(_workspaceRootController);
+
+  /// Keeps picker failures in the storage UI instead of the unhandled zone.
+  Future<void> _selectStorageRoot(TextEditingController controller) async {
+    try {
+      final path = await OperitFolderAccess.pickDirectory();
+      if (!mounted || path == null || path.trim().isEmpty) {
+        return;
+      }
+      setState(() {
+        controller.text = path.trim();
+        _errorText = null;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorText = storageDirectorySelectionErrorMessage(
+          AppLocalizations.of(context)!,
+          error,
+        );
+      });
     }
-    setState(() {
-      _workspaceRootController.text = path.trim();
-      _errorText = null;
-    });
   }
 
   /// Returns the explicitly entered runtime and workspace roots.
@@ -1390,60 +1651,6 @@ class _StorageRootEditField extends StatelessWidget {
         fontSize: 13,
         letterSpacing: 0,
       ),
-    );
-  }
-}
-
-class _BackupImportDialog extends StatefulWidget {
-  const _BackupImportDialog();
-
-  static Future<String?> show({required BuildContext context}) {
-    return showDialog<String>(
-      context: context,
-      builder: (context) => const _BackupImportDialog(),
-    );
-  }
-
-  @override
-  State<_BackupImportDialog> createState() => _BackupImportDialogState();
-}
-
-class _BackupImportDialogState extends State<_BackupImportDialog> {
-  final TextEditingController _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
-    return AlertDialog(
-      title: Text(l10n.settingsDataImportBackupJson),
-      content: SizedBox(
-        width: 560,
-        child: TextField(
-          controller: _controller,
-          minLines: 10,
-          maxLines: 18,
-          decoration: InputDecoration(
-            labelText: l10n.settingsDataBackupJsonInput,
-            border: const OutlineInputBorder(),
-          ),
-        ),
-      ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(l10n.cancel),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
-          child: Text(l10n.settingsDataImportBackupJson),
-        ),
-      ],
     );
   }
 }

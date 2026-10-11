@@ -40,6 +40,7 @@ desktop.ini
 **/.pub-cache/
 **/.pub/
 **/build/
+**/.build/
 **/coverage/
 **/doc/api/
 **/flutter_export_environment.sh
@@ -95,30 +96,26 @@ apps/flutter/app/ios/Runner/python/
 # Rust
 target/
 
+# ESP32 / ESP-IDF build outputs
+apps/esp32/.embuild/
+**/.embuild/
+apps/esp32/sdkconfig
+apps/esp32/sdkconfig.old
+apps/esp32/bootloader.bin
+apps/esp32/partition-table.bin
+apps/esp32/partitions.bin
+apps/esp32/*.elf
+apps/esp32/*.bin
+/bootloader.bin
+/partition-table.bin
+
 # Generated core proxy artifacts
 core/generated/
 apps/flutter/app/lib/core/proxy/generated/
 
-# Flutter web generated runtime bridge artifacts
-apps/flutter/app/assets/web_access/
+# Flutter-generated build output
 apps/flutter/app/build/web
 apps/flutter/app/build/web/
-apps/web_access/web/operit_flutter_bridge.js
-apps/web_access/web/operit_flutter_bridge_bg.wasm
-apps/web_access/web/operit_flutter_bridge_worker.js
-apps/web_access/web/operit_messagepack.js
-apps/web_access/web/operit_runtime_bridge.js
-apps/web_access/web/operit_runtime_worker.js
-apps/web_access/web/operit_model_install_worker.js
-apps/web_access/web/v86_runtime_worker.js
-apps/web_access/web/operit_flutter_bridge*.d
-apps/web_access/web/operit_flutter_bridge*.d.ts
-apps/web_access/build/bundle/operit_flutter_bridge*.d
-apps/web_access/build/bundle/operit_flutter_bridge*.d.ts
-apps/web_access/web/sql-wasm.js
-apps/web_access/web/sql-wasm.wasm
-apps/web_access/web/v86/
-apps/web_access/v86/runtime/
 tools/web-runtime/.wrangler/
 
 # Local dependency extraction/package scratch
@@ -188,8 +185,11 @@ apps/flutter/app/ohos/entry/src/main/resources/rawfile/ohos-vroot/
 
 # Plugin packaging outputs
 plugins/**/*.toolpkg
-core/crates/operit-runtime/assets/plugins/**/*.toolpkg
-core/crates/operit-runtime/assets/plugins/**/*.js
+core/crates/runtime/application/assets/plugins/buildin/**/*.toolpkg
+core/crates/runtime/application/assets/plugins/external/*.toolpkg
+core/crates/runtime/application/assets/plugins/buildin/**/*.js
+core/crates/runtime/application/assets/plugins/buildin/
+core/crates/runtime/application/assets/plugins/external/
 plugins/**/build/
 plugins/**/out/
 plugins/**/.cache/
@@ -211,4 +211,10 @@ plugins/**/.sync_hot_reload_state.json
 
 AGENTS.md
 .codex*
+.zcodeignore
 tools/ios-runtime/native/sources
+
+# Local ESP32 Edge pairing secret
+apps/esp32/.edge-token
+artifacts/*
+apps/flutter/app/web/runtime/generated/*

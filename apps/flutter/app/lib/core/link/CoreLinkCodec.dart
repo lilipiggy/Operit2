@@ -8,7 +8,7 @@ import 'CoreLinkProtocol.dart';
 typedef CoreEmbeddedStreamFactory =
     Stream<T> Function<T>(
       String streamId,
-      int targetObjectId,
+      String target,
       String propertyName,
       Object? args,
       T Function(CoreLinkValueReader reader) decode,
@@ -25,12 +25,12 @@ Uint8List encodeCoreLink(Object? value) {
 T decodeCoreLink<T>(
   Uint8List bytes, {
   T Function(CoreLinkValueReader reader)? decode,
-  int? targetObjectId,
+  String? target,
   CoreEmbeddedStreamFactory? embeddedStreamFactory,
 }) {
   final reader = _CoreLinkMessagePackReader(
     bytes,
-    targetObjectId: targetObjectId,
+    target: target,
     embeddedStreamFactory: embeddedStreamFactory,
   );
   final value = decode == null ? reader.readValue() as T : decode(reader);
@@ -46,6 +46,22 @@ class CoreLinkEventValueDecoder {
   /// Decodes one watch event after applying protocol-level incremental payloads.
   T decode<T>(CoreEvent event, {required T Function(Uint8List bytes) decode}) {
     return decode(completeValueBytes(event));
+  }
+
+  /// Decodes one complete event with the typed Link reader API.
+  ///
+  /// Kept for callers that predate the byte-oriented [decode] callback.
+  T decodeValue<T>(
+    CoreEvent event, {
+    required T Function(CoreLinkValueReader reader) decode,
+    CoreEmbeddedStreamFactory? embeddedStreamFactory,
+  }) {
+    return decodeCoreLink<T>(
+      completeValueBytes(event),
+      decode: decode,
+      target: event.target,
+      embeddedStreamFactory: embeddedStreamFactory,
+    );
   }
 
   /// Returns complete MessagePack bytes for one ordered Core watch event.
@@ -84,6 +100,198 @@ class CoreLinkEventValueDecoder {
     }
     _previousValue = _applyCoreLinkDelta(_previousValue, delta);
     return _previousValue;
+  }
+}
+
+/// Retains individual wire values so unchanged list elements need no re-encoding.
+class _CoreLinkListEntry<T> {
+  /// Retains a decoded item and its original MessagePack bytes.
+  _CoreLinkListEntry.decoded(this.bytes, this.value);
+
+  /// Holds a freshly decoded item until the current delta has been fully applied.
+  _CoreLinkListEntry.pending(this.pendingValue);
+
+  Uint8List? bytes;
+  late T value;
+  Object? pendingValue;
+  bool dirty = false;
+}
+
+/// Decodes list watch deltas without re-encoding or decoding unchanged elements.
+class CoreLinkListEventDecoder<T> {
+  List<_CoreLinkListEntry<T>>? _entries;
+
+  /// Applies one ordered watch event and returns a complete typed list.
+  List<T> decode(
+    CoreEvent event, {
+    required T Function(CoreLinkValueReader reader) decodeItem,
+    CoreEmbeddedStreamFactory? embeddedStreamFactory,
+  }) {
+    final valueBytes = event.valueBytes;
+    if (valueBytes == null) {
+      throw StateError('Core watch event has no payload bytes');
+    }
+    final entries = switch (event.kind) {
+      'Snapshot' || 'Changed' => _readList(
+        valueBytes,
+        event.target,
+        decodeItem,
+        embeddedStreamFactory,
+      ),
+      'Delta' => _applyListDelta(valueBytes),
+      _ => throw FormatException(
+        'Unsupported Core watch event kind: ${event.kind}',
+      ),
+    };
+    for (final entry in entries) {
+      if (entry.dirty || entry.bytes == null) {
+        final bytes = encodeCoreLink(entry.pendingValue);
+        entry.value = decodeCoreLink<T>(
+          bytes,
+          decode: decodeItem,
+          target: event.target,
+          embeddedStreamFactory: embeddedStreamFactory,
+        );
+        entry.bytes = bytes;
+        entry.pendingValue = null;
+        entry.dirty = false;
+      }
+    }
+    _entries = entries;
+    return entries.map((entry) => entry.value).toList(growable: false);
+  }
+
+  /// Reads a complete MessagePack array while retaining each element's wire slice.
+  List<_CoreLinkListEntry<T>> _readList(
+    Uint8List bytes,
+    String target,
+    T Function(CoreLinkValueReader reader) decodeItem,
+    CoreEmbeddedStreamFactory? embeddedStreamFactory,
+  ) {
+    return decodeCoreLink<List<_CoreLinkListEntry<T>>>(
+      bytes,
+      target: target,
+      decode: (reader) {
+        final length = reader.readArrayLength();
+        return List<_CoreLinkListEntry<T>>.generate(length, (_) {
+          final itemBytes = reader.readValueBytes();
+          return _CoreLinkListEntry<T>.decoded(
+            itemBytes,
+            decodeCoreLink<T>(
+              itemBytes,
+              decode: decodeItem,
+              target: target,
+              embeddedStreamFactory: embeddedStreamFactory,
+            ),
+          );
+        }, growable: false);
+      },
+    );
+  }
+
+  /// Applies list-indexed operations to a shallow copy of the retained entries.
+  List<_CoreLinkListEntry<T>> _applyListDelta(Uint8List bytes) {
+    final previous = _entries;
+    if (previous == null) {
+      throw StateError('Core watch delta arrived before a full value');
+    }
+    final delta = _coreLinkMap(
+      decodeCoreLink<Object?>(bytes),
+      'incremental delta',
+    );
+    final operations = delta[_coreDeltaMarker];
+    if (operations is! List) {
+      throw const FormatException('Core incremental delta marker is missing');
+    }
+    var entries = List<_CoreLinkListEntry<T>>.of(previous);
+    for (final operation in operations) {
+      final fields = _coreLinkMap(operation, 'incremental operation');
+      final name = fields['op'];
+      final path = fields['path'];
+      if (name is! String) {
+        throw const FormatException(
+          'Core incremental operation name is missing',
+        );
+      }
+      if (path is! List) {
+        throw const FormatException(
+          'Core incremental operation path is missing',
+        );
+      }
+      if (name == 'set' && !fields.containsKey('value')) {
+        throw const FormatException(
+          'Core incremental set operation value is missing',
+        );
+      }
+      if (path.isEmpty) {
+        if (name != 'set') {
+          throw const FormatException(
+            'Core incremental root remove is invalid',
+          );
+        }
+        final root = fields['value'];
+        if (root is! List) {
+          throw const FormatException(
+            'Core incremental list root must be an array',
+          );
+        }
+        entries = root
+            .map((item) => _CoreLinkListEntry<T>.pending(item))
+            .toList();
+        continue;
+      }
+      final index = path.first;
+      if (index is! int) {
+        throw const FormatException(
+          'Core incremental list path segment must be an integer',
+        );
+      }
+      if (path.length == 1) {
+        if (name == 'set') {
+          final entry = _CoreLinkListEntry<T>.pending(fields['value']);
+          if (index == entries.length) {
+            entries.add(entry);
+          } else if (index >= 0 && index < entries.length) {
+            entries[index] = entry;
+          } else {
+            throw FormatException(
+              'Core incremental list append index is invalid: $index',
+            );
+          }
+        } else if (name == 'remove') {
+          if (index < 0 || index >= entries.length) {
+            throw FormatException(
+              'Core incremental list removal index is invalid: $index',
+            );
+          }
+          entries.removeAt(index);
+        } else {
+          throw FormatException(
+            'Unsupported Core incremental operation: $name',
+          );
+        }
+        continue;
+      }
+      if (index < 0 || index >= entries.length) {
+        throw FormatException(
+          'Core incremental list path does not exist: $index',
+        );
+      }
+      var entry = entries[index];
+      if (!entry.dirty && entry.bytes != null) {
+        entry = _CoreLinkListEntry<T>.pending(
+          decodeCoreLink<Object?>(entry.bytes!),
+        );
+        entry.dirty = true;
+        entries[index] = entry;
+      }
+      entry.pendingValue = _applyCoreDeltaOperation(entry.pendingValue, {
+        'op': name,
+        'path': path.sublist(1),
+        if (name == 'set') 'value': fields['value'],
+      });
+    }
+    return entries;
   }
 }
 
@@ -305,7 +513,7 @@ Uint8List encodeNativeCoreCallRequest(CoreCallRequest request) {
   final writer = _CoreLinkMessagePackWriter();
   writer.writeArrayHeader(4);
   writer.writeValue(request.requestId);
-  _writeNativeCorePath(writer, request.targetObjectId);
+  _writeNativeCorePath(writer, request.target);
   writer.writeValue(request.methodName);
   writer.writeValue(request.args);
   return writer.takeBytes();
@@ -316,7 +524,7 @@ Uint8List encodeNativeCorePushOpenRequest(CorePushRequest request) {
   final writer = _CoreLinkMessagePackWriter();
   writer.writeArrayHeader(4);
   writer.writeValue(request.requestId);
-  _writeNativeCorePath(writer, request.targetObjectId);
+  _writeNativeCorePath(writer, request.target);
   writer.writeValue(request.methodName);
   writer.writeValue(request.args);
   return writer.takeBytes();
@@ -337,7 +545,7 @@ Uint8List encodeNativeCoreWatchSnapshotRequest(CoreWatchRequest request) {
   final writer = _CoreLinkMessagePackWriter();
   writer.writeArrayHeader(4);
   writer.writeValue(request.requestId);
-  _writeNativeCorePath(writer, request.targetObjectId);
+  _writeNativeCorePath(writer, request.target);
   writer.writeValue(request.propertyName);
   writer.writeValue(request.args);
   return writer.takeBytes();
@@ -352,14 +560,14 @@ Uint8List encodeNativeCoreWatchStreamRequest(
   writer.writeArrayHeader(5);
   writer.writeValue(subscriptionId);
   writer.writeValue(request.requestId);
-  _writeNativeCorePath(writer, request.targetObjectId);
+  _writeNativeCorePath(writer, request.target);
   writer.writeValue(request.propertyName);
   writer.writeValue(request.args);
   return writer.takeBytes();
 }
 
 /// Writes one Core object identity as its compact native path field.
-void _writeNativeCorePath(_CoreLinkMessagePackWriter writer, int objectId) {
+void _writeNativeCorePath(_CoreLinkMessagePackWriter writer, String objectId) {
   writer.writeValue(objectId);
 }
 
@@ -367,12 +575,12 @@ void _writeNativeCorePath(_CoreLinkMessagePackWriter writer, int objectId) {
 T decodeNativeCoreResult<T>(
   Uint8List bytes, {
   T Function(CoreLinkValueReader reader)? decode,
-  int? targetObjectId,
+  String? target,
   CoreEmbeddedStreamFactory? embeddedStreamFactory,
 }) {
   final reader = _CoreLinkMessagePackReader(
     bytes,
-    targetObjectId: targetObjectId,
+    target: target,
     embeddedStreamFactory: embeddedStreamFactory,
   );
   final value = _readNativeCoreResult(
@@ -516,7 +724,7 @@ CoreEvent _readNativeCoreEvent(_CoreLinkMessagePackReader reader) {
   final valueBytes = reader.readValueBytes();
   return CoreEvent.raw(
     requestId: requestId,
-    targetObjectId: target,
+    target: target,
     propertyName: propertyName,
     kind: kind,
     valueBytes: valueBytes,
@@ -525,19 +733,19 @@ CoreEvent _readNativeCoreEvent(_CoreLinkMessagePackReader reader) {
 }
 
 /// Reads one compact native Core object identity.
-int _readNativeCorePath(_CoreLinkMessagePackReader reader) {
+String _readNativeCorePath(_CoreLinkMessagePackReader reader) {
   final objectId = reader.readValue();
-  if (objectId is! int) {
-    throw FormatException('Native core object id must be an integer');
+  if (objectId is! String) {
+    throw FormatException('Native core target must be a string');
   }
   return objectId;
 }
 
 /// Decodes one fixed embedded-stream pool object address.
-int _readCoreObjectIdValue(Object? value) {
-  if (value is! int) {
+String _readCoreTargetValue(Object? value) {
+  if (value is! String) {
     throw FormatException(
-      'Embedded Core stream target path must be an integer address',
+      'Embedded Core stream target must be a string address',
     );
   }
   return value;
@@ -846,7 +1054,7 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
   /// Creates a reader over one complete MessagePack payload.
   _CoreLinkMessagePackReader(
     this._bytes, {
-    int? targetObjectId,
+    String? target,
     CoreEmbeddedStreamFactory? embeddedStreamFactory,
   }) : _embeddedStreamFactory = embeddedStreamFactory;
 
@@ -866,7 +1074,7 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
   ) {
     final fieldCount = readMapLength();
     String? streamId;
-    int? targetObjectId;
+    String? target;
     String? propertyName;
     Object? args;
     for (var index = 0; index < fieldCount; index += 1) {
@@ -884,8 +1092,8 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
         final descriptorKey = readString();
         if (descriptorKey == 'streamId') {
           streamId = readString();
-        } else if (descriptorKey == 'targetObjectId') {
-          targetObjectId = _readCoreObjectIdValue(readValue());
+        } else if (descriptorKey == 'target') {
+          target = _readCoreTargetValue(readValue());
         } else if (descriptorKey == 'propertyName') {
           propertyName = readString();
         } else if (descriptorKey == 'args') {
@@ -896,18 +1104,18 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
       }
     }
     final resolvedStreamId = streamId;
-    final resolvedTargetObjectId = targetObjectId;
+    final resolvedTarget = target;
     final resolvedPropertyName = propertyName;
     final factory = _embeddedStreamFactory;
     if (resolvedStreamId == null ||
-        resolvedTargetObjectId == null ||
+        resolvedTarget == null ||
         resolvedPropertyName == null ||
         factory == null) {
       throw StateError('Embedded Core stream requires a stream factory');
     }
     return factory<T>(
       resolvedStreamId,
-      resolvedTargetObjectId,
+      resolvedTarget,
       resolvedPropertyName,
       args,
       decode,
@@ -1313,9 +1521,9 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
     return value;
   }
 
-  /// Reads a Link array.
+  /// Decodes an owned, growable array so deltas can resize it without cloning.
   List<Object?> _readArray(int length) {
-    return List<Object?>.generate(length, (_) => readValue(), growable: false);
+    return List<Object?>.generate(length, (_) => readValue(), growable: true);
   }
 
   /// Reads a Link map with string keys.

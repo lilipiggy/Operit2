@@ -1,11 +1,13 @@
 // ignore_for_file: file_names, constant_identifier_names
 
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 
 import '../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../core/proxy/generated/CoreProxyClients.g.dart';
 
 class ThemePreferenceSnapshot {
+  /// Creates the complete effective theme state for one UI surface.
   const ThemePreferenceSnapshot({
     required this.themeMode,
     required this.useCustomColors,
@@ -77,7 +79,6 @@ class ThemePreferenceSnapshot {
     required this.bubbleAiSystemFontName,
     required this.bubbleAiCustomFontPath,
     required this.showThinkingProcess,
-    required this.toolCollapseMode,
     required this.showModelProvider,
     required this.showModelName,
     required this.showRoleName,
@@ -158,7 +159,6 @@ class ThemePreferenceSnapshot {
   final String? bubbleAiSystemFontName;
   final String? bubbleAiCustomFontPath;
   final bool showThinkingProcess;
-  final String toolCollapseMode;
   final bool showModelProvider;
   final bool showModelName;
   final bool showRoleName;
@@ -167,6 +167,204 @@ class ThemePreferenceSnapshot {
   final bool showMessageTimingStats;
   final bool showMessageTimestamp;
   final bool showInputProcessingStatus;
+
+  /// Encodes the complete effective theme state for another Flutter engine.
+  Map<String, Object?> toJson() {
+    return <String, Object?>{
+      'themeMode': themeMode.name,
+      'useCustomColors': useCustomColors,
+      'customPrimaryColor': customPrimaryColor,
+      'customSecondaryColor': customSecondaryColor,
+      'useBackgroundImage': useBackgroundImage,
+      'backgroundImageUri': backgroundImageUri,
+      'backgroundMediaType': backgroundMediaType,
+      'backgroundImageOpacity': backgroundImageOpacity,
+      'videoBackgroundMuted': videoBackgroundMuted,
+      'videoBackgroundLoop': videoBackgroundLoop,
+      'useBackgroundBlur': useBackgroundBlur,
+      'backgroundBlurRadius': backgroundBlurRadius,
+      'transparentSurfaceEnabled': transparentSurfaceEnabled,
+      'chatInputFloating': chatInputFloating,
+      'inputStyle': inputStyle,
+      'chatStyle': chatStyle,
+      'bubbleShowAvatar': bubbleShowAvatar,
+      'bubbleWideLayoutEnabled': bubbleWideLayoutEnabled,
+      'cursorUserBubbleColor': cursorUserBubbleColor,
+      'bubbleUserBubbleColor': bubbleUserBubbleColor,
+      'bubbleAiBubbleColor': bubbleAiBubbleColor,
+      'bubbleUserTextColor': bubbleUserTextColor,
+      'bubbleAiTextColor': bubbleAiTextColor,
+      'bubbleUserUseImage': bubbleUserUseImage,
+      'bubbleAiUseImage': bubbleAiUseImage,
+      'bubbleUserImageUri': bubbleUserImageUri,
+      'bubbleAiImageUri': bubbleAiImageUri,
+      'bubbleUserImageRenderMode': bubbleUserImageRenderMode,
+      'bubbleAiImageRenderMode': bubbleAiImageRenderMode,
+      'bubbleUserImageCropLeft': bubbleUserImageCropLeft,
+      'bubbleUserImageCropTop': bubbleUserImageCropTop,
+      'bubbleUserImageCropRight': bubbleUserImageCropRight,
+      'bubbleUserImageCropBottom': bubbleUserImageCropBottom,
+      'bubbleUserImageRepeatStart': bubbleUserImageRepeatStart,
+      'bubbleUserImageRepeatEnd': bubbleUserImageRepeatEnd,
+      'bubbleUserImageRepeatYStart': bubbleUserImageRepeatYStart,
+      'bubbleUserImageRepeatYEnd': bubbleUserImageRepeatYEnd,
+      'bubbleUserImageScale': bubbleUserImageScale,
+      'bubbleAiImageCropLeft': bubbleAiImageCropLeft,
+      'bubbleAiImageCropTop': bubbleAiImageCropTop,
+      'bubbleAiImageCropRight': bubbleAiImageCropRight,
+      'bubbleAiImageCropBottom': bubbleAiImageCropBottom,
+      'bubbleAiImageRepeatStart': bubbleAiImageRepeatStart,
+      'bubbleAiImageRepeatEnd': bubbleAiImageRepeatEnd,
+      'bubbleAiImageRepeatYStart': bubbleAiImageRepeatYStart,
+      'bubbleAiImageRepeatYEnd': bubbleAiImageRepeatYEnd,
+      'bubbleAiImageScale': bubbleAiImageScale,
+      'bubbleUserRoundedCornersEnabled': bubbleUserRoundedCornersEnabled,
+      'bubbleAiRoundedCornersEnabled': bubbleAiRoundedCornersEnabled,
+      'bubbleUserContentPaddingLeft': bubbleUserContentPaddingLeft,
+      'bubbleUserContentPaddingRight': bubbleUserContentPaddingRight,
+      'bubbleAiContentPaddingLeft': bubbleAiContentPaddingLeft,
+      'bubbleAiContentPaddingRight': bubbleAiContentPaddingRight,
+      'customUserAvatarUri': customUserAvatarUri,
+      'avatarShape': avatarShape,
+      'avatarCornerRadius': avatarCornerRadius,
+      'useCustomFont': useCustomFont,
+      'fontType': fontType,
+      'systemFontName': systemFontName,
+      'customFontPath': customFontPath,
+      'fontScale': fontScale,
+      'bubbleUserUseCustomFont': bubbleUserUseCustomFont,
+      'bubbleUserFontType': bubbleUserFontType,
+      'bubbleUserSystemFontName': bubbleUserSystemFontName,
+      'bubbleUserCustomFontPath': bubbleUserCustomFontPath,
+      'bubbleAiUseCustomFont': bubbleAiUseCustomFont,
+      'bubbleAiFontType': bubbleAiFontType,
+      'bubbleAiSystemFontName': bubbleAiSystemFontName,
+      'bubbleAiCustomFontPath': bubbleAiCustomFontPath,
+      'showThinkingProcess': showThinkingProcess,
+      'showModelProvider': showModelProvider,
+      'showModelName': showModelName,
+      'showRoleName': showRoleName,
+      'showUserName': showUserName,
+      'showMessageTokenStats': showMessageTokenStats,
+      'showMessageTimingStats': showMessageTimingStats,
+      'showMessageTimestamp': showMessageTimestamp,
+      'showInputProcessingStatus': showInputProcessingStatus,
+    };
+  }
+
+  /// Decodes a serialized effective theme state from another Flutter engine.
+  factory ThemePreferenceSnapshot.fromJson(Map<String, Object?> json) {
+    /// Converts an optional JSON number into a nullable integer.
+    int? optionalInt(String key) {
+      final value = json[key];
+      return value == null ? null : (value as num).toInt();
+    }
+
+    /// Converts a required JSON number into a double.
+    double requiredDouble(String key) => (json[key] as num).toDouble();
+
+    /// Reads one required string from the serialized snapshot.
+    String requiredString(String key) => json[key] as String;
+
+    /// Reads one optional string from the serialized snapshot.
+    String? optionalString(String key) => json[key] as String?;
+
+    /// Reads one required boolean from the serialized snapshot.
+    bool requiredBool(String key) => json[key] as bool;
+
+    return ThemePreferenceSnapshot(
+      themeMode: ThemeMode.values.byName(requiredString('themeMode')),
+      useCustomColors: requiredBool('useCustomColors'),
+      customPrimaryColor: optionalInt('customPrimaryColor'),
+      customSecondaryColor: optionalInt('customSecondaryColor'),
+      useBackgroundImage: requiredBool('useBackgroundImage'),
+      backgroundImageUri: optionalString('backgroundImageUri'),
+      backgroundMediaType: requiredString('backgroundMediaType'),
+      backgroundImageOpacity: requiredDouble('backgroundImageOpacity'),
+      videoBackgroundMuted: requiredBool('videoBackgroundMuted'),
+      videoBackgroundLoop: requiredBool('videoBackgroundLoop'),
+      useBackgroundBlur: requiredBool('useBackgroundBlur'),
+      backgroundBlurRadius: requiredDouble('backgroundBlurRadius'),
+      transparentSurfaceEnabled: requiredBool('transparentSurfaceEnabled'),
+      chatInputFloating: requiredBool('chatInputFloating'),
+      inputStyle: requiredString('inputStyle'),
+      chatStyle: requiredString('chatStyle'),
+      bubbleShowAvatar: requiredBool('bubbleShowAvatar'),
+      bubbleWideLayoutEnabled: requiredBool('bubbleWideLayoutEnabled'),
+      cursorUserBubbleColor: optionalInt('cursorUserBubbleColor'),
+      bubbleUserBubbleColor: optionalInt('bubbleUserBubbleColor'),
+      bubbleAiBubbleColor: optionalInt('bubbleAiBubbleColor'),
+      bubbleUserTextColor: optionalInt('bubbleUserTextColor'),
+      bubbleAiTextColor: optionalInt('bubbleAiTextColor'),
+      bubbleUserUseImage: requiredBool('bubbleUserUseImage'),
+      bubbleAiUseImage: requiredBool('bubbleAiUseImage'),
+      bubbleUserImageUri: optionalString('bubbleUserImageUri'),
+      bubbleAiImageUri: optionalString('bubbleAiImageUri'),
+      bubbleUserImageRenderMode: requiredString('bubbleUserImageRenderMode'),
+      bubbleAiImageRenderMode: requiredString('bubbleAiImageRenderMode'),
+      bubbleUserImageCropLeft: requiredDouble('bubbleUserImageCropLeft'),
+      bubbleUserImageCropTop: requiredDouble('bubbleUserImageCropTop'),
+      bubbleUserImageCropRight: requiredDouble('bubbleUserImageCropRight'),
+      bubbleUserImageCropBottom: requiredDouble('bubbleUserImageCropBottom'),
+      bubbleUserImageRepeatStart: requiredDouble('bubbleUserImageRepeatStart'),
+      bubbleUserImageRepeatEnd: requiredDouble('bubbleUserImageRepeatEnd'),
+      bubbleUserImageRepeatYStart: requiredDouble(
+        'bubbleUserImageRepeatYStart',
+      ),
+      bubbleUserImageRepeatYEnd: requiredDouble('bubbleUserImageRepeatYEnd'),
+      bubbleUserImageScale: requiredDouble('bubbleUserImageScale'),
+      bubbleAiImageCropLeft: requiredDouble('bubbleAiImageCropLeft'),
+      bubbleAiImageCropTop: requiredDouble('bubbleAiImageCropTop'),
+      bubbleAiImageCropRight: requiredDouble('bubbleAiImageCropRight'),
+      bubbleAiImageCropBottom: requiredDouble('bubbleAiImageCropBottom'),
+      bubbleAiImageRepeatStart: requiredDouble('bubbleAiImageRepeatStart'),
+      bubbleAiImageRepeatEnd: requiredDouble('bubbleAiImageRepeatEnd'),
+      bubbleAiImageRepeatYStart: requiredDouble('bubbleAiImageRepeatYStart'),
+      bubbleAiImageRepeatYEnd: requiredDouble('bubbleAiImageRepeatYEnd'),
+      bubbleAiImageScale: requiredDouble('bubbleAiImageScale'),
+      bubbleUserRoundedCornersEnabled: requiredBool(
+        'bubbleUserRoundedCornersEnabled',
+      ),
+      bubbleAiRoundedCornersEnabled: requiredBool(
+        'bubbleAiRoundedCornersEnabled',
+      ),
+      bubbleUserContentPaddingLeft: requiredDouble(
+        'bubbleUserContentPaddingLeft',
+      ),
+      bubbleUserContentPaddingRight: requiredDouble(
+        'bubbleUserContentPaddingRight',
+      ),
+      bubbleAiContentPaddingLeft: requiredDouble('bubbleAiContentPaddingLeft'),
+      bubbleAiContentPaddingRight: requiredDouble(
+        'bubbleAiContentPaddingRight',
+      ),
+      customUserAvatarUri: optionalString('customUserAvatarUri'),
+      avatarShape: requiredString('avatarShape'),
+      avatarCornerRadius: requiredDouble('avatarCornerRadius'),
+      useCustomFont: requiredBool('useCustomFont'),
+      fontType: requiredString('fontType'),
+      systemFontName: optionalString('systemFontName'),
+      customFontPath: optionalString('customFontPath'),
+      fontScale: requiredDouble('fontScale'),
+      bubbleUserUseCustomFont: requiredBool('bubbleUserUseCustomFont'),
+      bubbleUserFontType: requiredString('bubbleUserFontType'),
+      bubbleUserSystemFontName: optionalString('bubbleUserSystemFontName'),
+      bubbleUserCustomFontPath: optionalString('bubbleUserCustomFontPath'),
+      bubbleAiUseCustomFont: requiredBool('bubbleAiUseCustomFont'),
+      bubbleAiFontType: requiredString('bubbleAiFontType'),
+      bubbleAiSystemFontName: optionalString('bubbleAiSystemFontName'),
+      bubbleAiCustomFontPath: optionalString('bubbleAiCustomFontPath'),
+      showThinkingProcess: requiredBool('showThinkingProcess'),
+      showModelProvider: requiredBool('showModelProvider'),
+      showModelName: requiredBool('showModelName'),
+      showRoleName: requiredBool('showRoleName'),
+      showUserName: requiredBool('showUserName'),
+      showMessageTokenStats: requiredBool('showMessageTokenStats'),
+      showMessageTimingStats: requiredBool('showMessageTimingStats'),
+      showMessageTimestamp: requiredBool('showMessageTimestamp'),
+      showInputProcessingStatus: requiredBool('showInputProcessingStatus'),
+    );
+  }
 }
 
 class LongPastedTextInputSettings {
@@ -196,6 +394,8 @@ class UserPreferencesManager {
   static const String CHAT_STYLE_BUBBLE = 'bubble';
   static const String INPUT_STYLE_CLASSIC = 'classic';
   static const String INPUT_STYLE_AGENT = 'agent';
+  static const String CHAT_HISTORY_GROUPING_CHARACTER = 'character';
+  static const String CHAT_HISTORY_GROUPING_WORKSPACE = 'workspace';
   static const String BUBBLE_IMAGE_RENDER_MODE_TILED_NINE_SLICE =
       'tiled_nine_slice';
   static const String BUBBLE_IMAGE_RENDER_MODE_NINE_PATCH = 'nine_patch';
@@ -211,9 +411,6 @@ class UserPreferencesManager {
   static const String SYSTEM_FONT_SANS_SERIF = 'sans-serif';
   static const String SYSTEM_FONT_MONOSPACE = 'monospace';
   static const String SYSTEM_FONT_CURSIVE = 'cursive';
-  static const String TOOL_COLLAPSE_MODE_READ_ONLY = 'read_only';
-  static const String TOOL_COLLAPSE_MODE_ALL = 'all';
-  static const String TOOL_COLLAPSE_MODE_FULL = 'full';
   static const int longPastedTextInputMinimumThreshold = 1000;
   static const int longPastedTextInputMaximumThreshold = 20000;
   static const int longPastedTextInputThresholdStep = 500;
@@ -228,7 +425,8 @@ class UserPreferencesManager {
   );
 
   static const String _fileName = 'user_preferences.preferences.json';
-  static const String _displayPreferencesFileName = 'display_preferences';
+  static const String _KEY_CHAT_HISTORY_GROUPING_MODE =
+      'chat_history_grouping_mode';
 
   static const ThemePreferenceSnapshot defaultThemePreferenceSnapshot =
       ThemePreferenceSnapshot(
@@ -302,7 +500,6 @@ class UserPreferencesManager {
         bubbleAiSystemFontName: SYSTEM_FONT_DEFAULT,
         bubbleAiCustomFontPath: null,
         showThinkingProcess: true,
-        toolCollapseMode: TOOL_COLLAPSE_MODE_ALL,
         showModelProvider: false,
         showModelName: false,
         showRoleName: true,
@@ -410,7 +607,6 @@ class UserPreferencesManager {
   static const String _BUBBLE_AI_CONTENT_PADDING_RIGHT =
       'bubble_ai_content_padding_right';
   static const String _KEY_SHOW_THINKING_PROCESS = 'show_thinking_process';
-  static const String _KEY_TOOL_COLLAPSE_MODE = 'tool_collapse_mode';
   static const String _KEY_SHOW_MODEL_PROVIDER = 'show_model_provider';
   static const String _KEY_SHOW_MODEL_NAME = 'show_model_name';
   static const String _KEY_SHOW_ROLE_NAME = 'show_role_name';
@@ -531,12 +727,60 @@ class UserPreferencesManager {
     _KEY_CUSTOM_USER_AVATAR_URI,
   ];
 
+  /// Observes committed user preferences, including changes synchronized from peers.
+  Stream<Map<String, String>> preferencesFlow() {
+    return _clients.preferencesPreferenceStorageManager
+        .preferencesFlow(fileName: _fileName)
+        .distinct(mapEquals);
+  }
+
+  /// Observes and validates the global long-paste settings from the shared store.
+  Stream<LongPastedTextInputSettings> longPastedTextInputSettingsFlow() {
+    return preferencesFlow()
+        .map(
+          (values) => <String, String>{
+            for (final key in <String>[
+              _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
+              _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
+            ])
+              if (values[key] case final String value) key: value,
+          },
+        )
+        .distinct(mapEquals)
+        .map(_decodeLongPastedTextInputSettings);
+  }
+
+  /// Observes the persisted sidebar conversation grouping mode.
+  Stream<String?> chatHistoryGroupingModeFlow() {
+    return preferencesFlow()
+        .map(
+          (values) => switch (values[_KEY_CHAT_HISTORY_GROUPING_MODE]) {
+            null => null,
+            CHAT_HISTORY_GROUPING_CHARACTER => CHAT_HISTORY_GROUPING_CHARACTER,
+            CHAT_HISTORY_GROUPING_WORKSPACE => CHAT_HISTORY_GROUPING_WORKSPACE,
+            final value => throw FormatException(
+              'Unsupported persisted sidebar grouping mode: $value',
+            ),
+          },
+        )
+        .distinct();
+  }
+
   /// Loads the global settings for converting long pasted text to attachments.
   Future<void> loadLongPastedTextInputSettings() async {
     final values = await _getStrings(<String>[
       _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
       _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
     ]);
+    longPastedTextInputSettings.value = _decodeLongPastedTextInputSettings(
+      values,
+    );
+  }
+
+  /// Decodes persisted long-paste settings without concealing malformed values.
+  LongPastedTextInputSettings _decodeLongPastedTextInputSettings(
+    Map<String, String> values,
+  ) {
     final enabledValue = values[_KEY_LONG_PASTED_TEXT_INPUT_ENABLED];
     final thresholdValue = values[_KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD];
     final settings = LongPastedTextInputSettings(
@@ -552,7 +796,7 @@ class UserPreferencesManager {
         '${settings.threshold}',
       );
     }
-    longPastedTextInputSettings.value = settings;
+    return settings;
   }
 
   /// Persists the global settings for converting long pasted text to attachments.
@@ -579,6 +823,28 @@ class UserPreferencesManager {
     longPastedTextInputSettings.value = settings;
   }
 
+  /// Loads the persisted sidebar conversation grouping mode.
+  Future<String?> loadChatHistoryGroupingMode() async {
+    final values = await _getStrings(<String>[_KEY_CHAT_HISTORY_GROUPING_MODE]);
+    return values[_KEY_CHAT_HISTORY_GROUPING_MODE];
+  }
+
+  /// Persists the sidebar conversation grouping mode.
+  Future<void> saveChatHistoryGroupingMode(String mode) async {
+    switch (mode) {
+      case CHAT_HISTORY_GROUPING_CHARACTER:
+      case CHAT_HISTORY_GROUPING_WORKSPACE:
+        break;
+      default:
+        throw ArgumentError.value(
+          mode,
+          'mode',
+          'is not a supported grouping mode',
+        );
+    }
+    await _setStrings(<String, String>{_KEY_CHAT_HISTORY_GROUPING_MODE: mode});
+  }
+
   /// Resolves one target-scoped theme snapshot and migrates its mode field.
   Future<ThemePreferenceSnapshot> resolveThemePreferenceSnapshot({
     String? characterCardId,
@@ -594,11 +860,6 @@ class UserPreferencesManager {
       _KEY_CUSTOM_USER_AVATAR_URI,
     ];
     final preferences = await _getStrings(keys);
-    final toolCollapseMode = await _clients.preferencesPreferenceStorageManager
-        .getPreference(
-          fileName: _displayPreferencesFileName,
-          key: _KEY_TOOL_COLLAPSE_MODE,
-        );
 
     String? stringValue(String key, {String? defaultValue}) {
       return preferences[_keyWithPrefix(key, prefix)] ?? defaultValue;
@@ -760,7 +1021,6 @@ class UserPreferencesManager {
           stringValue(_BUBBLE_AI_SYSTEM_FONT_NAME) ?? SYSTEM_FONT_DEFAULT,
       bubbleAiCustomFontPath: stringValue(_BUBBLE_AI_CUSTOM_FONT_PATH),
       showThinkingProcess: booleanValue(_KEY_SHOW_THINKING_PROCESS, true),
-      toolCollapseMode: toolCollapseMode ?? TOOL_COLLAPSE_MODE_ALL,
       showModelProvider: booleanValue(_KEY_SHOW_MODEL_PROVIDER, false),
       showModelName: booleanValue(_KEY_SHOW_MODEL_NAME, false),
       showRoleName: booleanValue(_KEY_SHOW_ROLE_NAME, true),

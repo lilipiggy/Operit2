@@ -1,11 +1,8 @@
 #![allow(non_snake_case)]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use operit_host_api::HostManager::HostManager;
-use operit_proxy_local::LocalCoreProxy;
-use operit_runtime::core::application::OperitApplication::OperitApplication;
 
 pub(crate) mod common;
 pub mod javascript_runtime;
@@ -33,29 +30,24 @@ pub use tools::terminal::WebTerminalHost;
 pub use tools::tts::WebTtsPlaybackHost;
 pub use tools::websocket::WebWebSocketHost;
 
-/// Creates the Web runtime with the Web host capability bundle.
-pub fn createLocalCore(
-    _runtimeRoot: PathBuf,
-    _workspaceRoot: PathBuf,
-    _webVisitHost: Arc<dyn operit_host_api::WebVisitHost>,
-    _browserAutomationHost: Option<Arc<dyn operit_host_api::BrowserAutomationHost>>,
-    _browserSessionHost: Option<Arc<dyn operit_host_api::BrowserSessionHost>>,
-    _composeDslWebViewHost: Option<Arc<dyn operit_host_api::ComposeDslWebViewHost>>,
-) -> Result<LocalCoreProxy, String> {
+/// Creates the browser-owned host bundle without constructing a second Core tree.
+pub fn createRuntimeHostManager() -> HostManager {
     let runtimeStorageHost = Arc::new(WebRuntimeStorageHost::new());
     let runtimeSqliteHost = runtimeStorageHost.clone();
     let hostSecretStore = runtimeStorageHost.clone();
     let runtimeStorageWriteHost = runtimeStorageHost.clone();
     let archiveStagingHost = Arc::new(WebArchiveStagingHost::new());
+    let systemOperationHost = Arc::new(WebSystemOperationHost::new());
     let mut context = HostManager::withFileSystemWebVisitSystemOperationAndManagedRuntimeHosts(
         Arc::new(WebFileSystemHost::new()),
         Arc::new(WebWebVisitHost::new()),
         Arc::new(WebHttpHost::new()),
-        Arc::new(WebSystemOperationHost::new()),
+        systemOperationHost.clone(),
         Arc::new(WebManagedRuntimeHost::new()),
         runtimeStorageHost,
         runtimeSqliteHost,
     )
+    .withToastHost(systemOperationHost)
     .withHostSecretStore(hostSecretStore)
     .withRuntimeStorageWriteHost(runtimeStorageWriteHost)
     .withArchiveStagingHost(archiveStagingHost);
@@ -72,7 +64,5 @@ pub fn createLocalCore(
         context.withHostRuntimeTaskSchedulerHost(Arc::new(WebHostRuntimeTaskSchedulerHost::new()));
     context = context.withHostJavaScriptRuntimeHost(Arc::new(WebHostJavaScriptRuntimeHost::new()));
     context = context.withHostRuntimeEventHost(Arc::new(WebHostRuntimeEventHost::new()));
-    Ok(LocalCoreProxy::new(OperitApplication::newWithContext(
-        context,
-    )))
+    context
 }

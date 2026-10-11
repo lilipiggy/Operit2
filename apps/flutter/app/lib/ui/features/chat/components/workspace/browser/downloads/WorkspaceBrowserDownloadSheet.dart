@@ -236,6 +236,7 @@ class _DownloadMenu extends StatelessWidget {
       tooltip: '',
       icon: const Icon(Icons.more_vert, size: 18),
       padding: EdgeInsets.zero,
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
       constraints: const BoxConstraints.tightFor(width: 30, height: 30),
       onSelected: (action) {
         switch (action) {

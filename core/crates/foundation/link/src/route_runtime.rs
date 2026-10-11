@@ -1,9 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::{CoreCallRequest, CoreCallResponse, CoreEventStream, CoreLinkError, CoreWatchRequest};
+use crate::{
+    CoreCallRequest, CoreCallResponse, CoreEvent, CoreEventStream, CoreLinkError, CoreWatchRequest,
+};
 
 tokio::task_local! {
     static CORE_FORCE_LOCAL: bool;
@@ -55,8 +57,22 @@ pub trait CoreRouteRuntime: Send + Sync {
     }
 }
 
+/// Reads the first event from one route-owned watch stream.
+pub async fn coreRouteWatchSnapshot(
+    runtime: Arc<dyn CoreRouteRuntime>,
+    request: CoreWatchRequest,
+) -> Result<CoreEvent, CoreLinkError> {
+    let mut stream = runtime.watch(request).await?;
+    stream.recv().await.ok_or_else(|| {
+        CoreLinkError::new(
+            "WATCH_STREAM_EMPTY",
+            "Core watch stream completed before its snapshot",
+        )
+    })
+}
+
 static CORE_ROUTE_RUNTIME: OnceLock<RwLock<Option<Arc<dyn CoreRouteRuntime>>>> = OnceLock::new();
-static CORE_ROUTE_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static CORE_ROUTE_REQUEST_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 
 /// Creates a unique request identifier for one annotation wrapper invocation.
 pub fn nextCoreRouteRequestId(methodName: &str) -> String {

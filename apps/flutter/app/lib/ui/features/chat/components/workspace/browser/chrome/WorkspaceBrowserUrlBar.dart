@@ -65,6 +65,7 @@ class _WorkspaceBrowserUrlBarState extends State<WorkspaceBrowserUrlBar> {
     widget.onSubmitted(text);
   }
 
+  /// Builds the address bar with consistent button tap targets across platforms.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -149,6 +150,10 @@ class _WorkspaceBrowserUrlBarState extends State<WorkspaceBrowserUrlBar> {
                                   tooltip: l10n.open,
                                   onPressed: _submit,
                                   icon: const Icon(Icons.check, size: 20),
+                                  style: const ButtonStyle(
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
                                   visualDensity: VisualDensity.compact,
                                   constraints: const BoxConstraints.tightFor(
                                     width: 30,
@@ -201,6 +206,10 @@ class _WorkspaceBrowserUrlBarState extends State<WorkspaceBrowserUrlBar> {
                                       color: widget.isBookmarked
                                           ? theme.colorScheme.primary
                                           : theme.colorScheme.onSurfaceVariant,
+                                      style: const ButtonStyle(
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
                                       visualDensity: VisualDensity.compact,
                                       constraints:
                                           const BoxConstraints.tightFor(
@@ -295,12 +304,14 @@ class _ToolbarIconButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback? onPressed;
 
+  /// Builds a toolbar button without platform-dependent tap target padding.
   @override
   Widget build(BuildContext context) {
     return IconButton(
       tooltip: tooltip,
       onPressed: onPressed,
       icon: Icon(icon, size: 20),
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
       constraints: const BoxConstraints.tightFor(width: 34, height: 34),

@@ -1,0 +1,11 @@
+[package]
+name = "operit-plugin-sdk-ipc-bridge"
+version = "2.0.0-preview.14"
+edition.workspace = true
+publish = false
+description = "Operit-host bridge between Plugin SDK IPC and the existing tool runtime."
+
+[dependencies]
+operit-host-api = { path = "../../foundation/host-api" }
+operit-link = { path = "../../foundation/link" }
+operit-plugin-sdk-ipc = { path = "../sdk-ipc" }

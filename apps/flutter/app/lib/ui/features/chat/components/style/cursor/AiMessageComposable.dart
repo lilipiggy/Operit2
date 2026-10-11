@@ -1,29 +1,33 @@
 // ignore_for_file: file_names
 
+import 'dart:async';
+import 'dart:ui' show FontFeature;
+
 import 'package:flutter/material.dart';
+import 'package:operit2/l10n/generated/app_localizations.dart';
 
 import '../../../../../common/CharacterAvatar.dart';
 import '../../../../../common/markdown/StreamMarkdownRenderer.dart';
 import '../../../../../common/markdown/StreamMarkdownRendererState.dart';
 import '../../../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../../theme/OperitTheme.dart';
+import '../MessageHeaderMetadata.dart';
 import '../bubble/BubbleSurface.dart';
 import '../../part/StructuredMessagePartRenderer.dart';
 import '../../part/ThinkToolsXmlNodeGrouper.dart';
+import '../../part/ToolCallResultMergeRender.dart';
 import '../../../viewmodel/ChatViewModel.dart';
 
 class AiMessageComposable extends StatefulWidget {
   const AiMessageComposable({
     super.key,
     required this.message,
-    required this.isStreaming,
     required this.useBubbleStyle,
     this.avatarImagePath,
     this.splitMarkdownContent,
   });
 
   final ChatUiMessage message;
-  final bool isStreaming;
   final bool useBubbleStyle;
   final String? avatarImagePath;
   final MarkdownContentSplitter? splitMarkdownContent;
@@ -33,23 +37,47 @@ class AiMessageComposable extends StatefulWidget {
 }
 
 class _AiMessageComposableState extends State<AiMessageComposable> {
+  static const Duration _touchHoldDuration = Duration(milliseconds: 1500);
+
   late StreamMarkdownRendererState _rendererState;
-  late int _messageTimestamp;
+  late String _renderIdentity;
+  bool _isMessageHovered = false;
+  bool _isMessageTouched = false;
+  Timer? _touchHoldTimer;
 
   /// Creates persistent Markdown renderer state for this message widget.
   @override
   void initState() {
     super.initState();
-    _messageTimestamp = widget.message.timestamp;
+    _renderIdentity = _messageRenderIdentity(widget.message);
     _rendererState = StreamMarkdownRendererState();
   }
 
-  /// Resets renderer state when the widget is reused for another message.
+  @override
+  void dispose() {
+    _touchHoldTimer?.cancel();
+    super.dispose();
+  }
+
+  void _handlePointerEnd() {
+    _touchHoldTimer?.cancel();
+    _touchHoldTimer = Timer(_touchHoldDuration, () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isMessageTouched = false;
+      });
+    });
+  }
+
+  /// Resets renderer state when the visible message variant changes.
   @override
   void didUpdateWidget(covariant AiMessageComposable oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.message.timestamp != _messageTimestamp) {
-      _messageTimestamp = widget.message.timestamp;
+    final renderIdentity = _messageRenderIdentity(widget.message);
+    if (renderIdentity != _renderIdentity) {
+      _renderIdentity = renderIdentity;
       _rendererState = StreamMarkdownRendererState();
     }
   }
@@ -58,16 +86,13 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
     final colorScheme = theme.colorScheme;
     final themePreferenceSnapshot = OperitTheme.of(
       context,
     ).themePreferenceSnapshot;
-    final detailText = _detailText(widget.message, themePreferenceSnapshot);
     final nodeGrouper = ThinkToolsXmlNodeGrouper(
       showThinkingProcess: themePreferenceSnapshot.showThinkingProcess,
-      toolCollapseMode: toolCollapseModeFromPreferenceValue(
-        themePreferenceSnapshot.toolCollapseMode,
-      ),
     );
     final useCardStyle = widget.useBubbleStyle;
     final aiBubbleColor =
@@ -123,6 +148,7 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
             renderMode: themePreferenceSnapshot.bubbleAiImageRenderMode,
           )
         : null;
+    final renderIdentity = _messageRenderIdentity(widget.message);
     final messageBody = Theme(
       data: messageTheme,
       child: DefaultTextStyle.merge(
@@ -131,15 +157,16 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
           fontFamilyFallback: messageFontFamilyFallback,
         ),
         child: KeyedSubtree(
-          key: ValueKey<int>(widget.message.timestamp),
+          key: ValueKey<String>(renderIdentity),
           child: StreamingStructuredMessageRenderer(
             parts: widget.message.parts,
             contentStream: widget.message.contentStream,
-            isStreaming: widget.isStreaming,
             textColor: aiTextColor,
             backgroundColor: useCardStyle ? aiBubbleColor : colorScheme.surface,
             nodeGrouper: nodeGrouper,
+            mergeRender: const ToolCallResultMergeRender(),
             streamState: _rendererState,
+            rendererId: 'cursor-ai-$renderIdentity',
             showThinkingProcess: themePreferenceSnapshot.showThinkingProcess,
             splitMarkdownContent: widget.splitMarkdownContent,
           ),
@@ -147,9 +174,36 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
       ),
     );
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
+    return MouseRegion(
+      onEnter: (_) {
+        if (!_isMessageHovered) {
+          setState(() {
+            _isMessageHovered = true;
+          });
+        }
+      },
+      onExit: (_) {
+        if (_isMessageHovered) {
+          setState(() {
+            _isMessageHovered = false;
+          });
+        }
+      },
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) {
+          _touchHoldTimer?.cancel();
+          if (!_isMessageTouched) {
+            setState(() {
+              _isMessageTouched = true;
+            });
+          }
+        },
+        onPointerUp: (_) => _handlePointerEnd(),
+        onPointerCancel: (_) => _handlePointerEnd(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           if (widget.useBubbleStyle &&
@@ -168,28 +222,6 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Row(
-                    children: <Widget>[
-                      Text(
-                        'Response',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: colorScheme.onSurface.withValues(alpha: 0.7),
-                        ),
-                      ),
-                      if (detailText.isNotEmpty) ...<Widget>[
-                        const Spacer(),
-                        Text(
-                          detailText,
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: colorScheme.onSurface.withValues(alpha: 0.5),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: useCardStyle
@@ -222,13 +254,29 @@ class _AiMessageComposableState extends State<AiMessageComposable> {
                           child: messageBody,
                         ),
                 ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                  child: _CursorAiMessageHeader(
+                    message: widget.message,
+                    snapshot: themePreferenceSnapshot,
+                    l10n: l10n,
+                    externalActive: _isMessageHovered || _isMessageTouched,
+                  ),
+                ),
               ],
             ),
           ),
         ],
       ),
+        ),
+      ),
     );
   }
+}
+
+/// Builds the renderer identity for one visible AI response variant.
+String _messageRenderIdentity(ChatUiMessage message) {
+  return '${message.timestamp}-v${message.selectedVariantIndex}';
 }
 
 Color? _optionalColor(int? value) {
@@ -252,7 +300,7 @@ class _MessageAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(left: 8, top: 18),
+      padding: const EdgeInsets.only(left: 8, top: 4),
       child: Container(
         width: 28,
         height: 28,
@@ -268,48 +316,101 @@ class _MessageAvatar extends StatelessWidget {
   }
 }
 
-String _detailText(
-  ChatUiMessage message,
-  ThemePreferenceSnapshot themePreferenceSnapshot,
-) {
-  final parts = <String>[];
-  if (themePreferenceSnapshot.showRoleName && message.roleName.isNotEmpty) {
-    parts.add(message.roleName);
-  }
-  if (themePreferenceSnapshot.showModelName && message.modelName.isNotEmpty) {
-    parts.add(message.modelName);
-  }
-  if (themePreferenceSnapshot.showModelProvider &&
-      message.provider.isNotEmpty) {
-    parts.add(message.provider);
-  }
-  if (themePreferenceSnapshot.showMessageTokenStats) {
-    parts.add(
-      '${message.inputTokens}+${message.outputTokens}'
-      '${message.cachedInputTokens > 0 ? " (${message.cachedInputTokens})" : ""} tokens',
+class _CursorAiMessageHeader extends StatelessWidget {
+  const _CursorAiMessageHeader({
+    required this.message,
+    required this.snapshot,
+    this.l10n,
+    this.externalActive = false,
+  });
+
+  final ChatUiMessage message;
+  final ThemePreferenceSnapshot snapshot;
+  final AppLocalizations? l10n;
+  final bool externalActive;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final primaryTitle = cursorAiPrimaryTitle(message, snapshot, l10n: l10n);
+    final modelLabel = formatModelProviderLabel(message, snapshot);
+    final statsText = formatMessageStatsText(message, snapshot, l10n: l10n);
+    final tooltipText = formatMessageMetadataTooltip(message, snapshot, l10n: l10n);
+
+    final headerRow = LayoutBuilder(
+      builder: (context, constraints) {
+        final leftMaxWidth = statsText.isNotEmpty
+            ? constraints.maxWidth * 0.48
+            : constraints.maxWidth;
+        return Row(
+          children: <Widget>[
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: leftMaxWidth),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Flexible(
+                    child: Text(
+                      primaryTitle,
+                      softWrap: true,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: colorScheme.onSurface.withValues(alpha: 0.85),
+                      ),
+                    ),
+                  ),
+                  if (modelLabel.isNotEmpty) ...<Widget>[
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 1,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colorScheme.onSurface.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          modelLabel,
+                          softWrap: true,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            fontSize: 10,
+                            color: colorScheme.onSurface.withValues(alpha: 0.72),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (statsText.isNotEmpty) ...<Widget>[
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  statsText,
+                  textAlign: TextAlign.end,
+                  softWrap: true,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: colorScheme.onSurface.withValues(alpha: 0.75),
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures(),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+
+    return MouseFollowingTooltip(
+      message: tooltipText,
+      externalActive: externalActive,
+      child: headerRow,
     );
   }
-  if (themePreferenceSnapshot.showMessageTimingStats) {
-    parts.add(_timingText(message));
-  }
-  if (themePreferenceSnapshot.showMessageTimestamp) {
-    parts.add(_timestampText(message));
-  }
-  return parts.join(' | ');
-}
-
-String _timingText(ChatUiMessage message) {
-  final outputSeconds = (message.outputDurationMs / 1000).toStringAsFixed(1);
-  final waitSeconds = (message.waitDurationMs / 1000).toStringAsFixed(1);
-  return '${waitSeconds}s wait | ${outputSeconds}s output';
-}
-
-String _timestampText(ChatUiMessage message) {
-  final rawTimestamp = message.completedAt > 0
-      ? message.completedAt
-      : message.timestamp;
-  final dateTime = DateTime.fromMillisecondsSinceEpoch(rawTimestamp);
-  String twoDigits(int value) => value.toString().padLeft(2, '0');
-  return '${dateTime.year}-${twoDigits(dateTime.month)}-${twoDigits(dateTime.day)} '
-      '${twoDigits(dateTime.hour)}:${twoDigits(dateTime.minute)}';
 }

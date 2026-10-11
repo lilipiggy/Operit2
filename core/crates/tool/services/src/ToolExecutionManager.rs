@@ -42,6 +42,7 @@ pub struct ToolRuntimeContext {
     pub callerChatId: Option<String>,
     pub callerCardId: Option<String>,
     pub workspacePath: Option<String>,
+    pub workspaceFolders: Vec<String>,
     pub toolExposureMode: ToolExposureMode,
 }
 
@@ -208,6 +209,7 @@ impl ToolExecutionManager {
         callerChatId: Option<String>,
         callerCardId: Option<String>,
         workspacePath: Option<String>,
+        workspaceFolders: Vec<String>,
         toolExposureMode: ToolExposureMode,
     ) -> (Vec<String>, Vec<ToolResult>, Option<RouteChangeIntent>) {
         let mut emitted = Vec::new();
@@ -243,6 +245,7 @@ impl ToolExecutionManager {
                 callerChatId: callerChatId.clone(),
                 callerCardId: callerCardId.clone(),
                 workspacePath: workspacePath.clone(),
+                workspaceFolders: workspaceFolders.clone(),
                 toolExposureMode: toolExposureMode.clone(),
             });
         });
@@ -318,7 +321,7 @@ impl ToolExecutionManager {
             }
 
             toolHandler.notifyToolCallRequested(&invocation.tool);
-            let interception = toolHandler.checkToolInterception(&invocation.tool);
+            let interception = toolHandler.checkToolInterception(&invocation.tool).await;
             if let operit_tools::tools::AIToolHook::AIToolHookDecision::Block(_) = interception {
                 let blockedResult =
                     AIToolHandler::toolInterceptionResult(&invocation.tool, interception);
@@ -352,7 +355,7 @@ impl ToolExecutionManager {
                 continue;
             }
 
-            if !toolHandler.getToolExecutorOrActivate(&invocation.tool.name) {
+            if !toolHandler.getToolExecutorOrActivate(&invocation.tool.name).await {
                 let errorMessage = Self::buildToolNotAvailableErrorMessage(&invocation.tool.name);
                 let content = ConversationMarkupManager::createToolNotAvailableError(
                     &invocation.tool.name,
@@ -484,7 +487,10 @@ impl ToolExecutionManager {
     /// Builds a route-change intent from the successful switch_core tool result.
     #[allow(non_snake_case)]
     fn routeChangeIntentForResult(tool: &AITool, result: &ToolResult) -> Option<RouteChangeIntent> {
-        if tool.name.trim() != "switch_core" || !result.success {
+        if Self::resolveToolTarget(tool).tool.name.trim() != "switch_core"
+            || result.toolName.trim() != "switch_core"
+            || !result.success
+        {
             return None;
         }
         Some(RouteChangeIntent {
@@ -791,6 +797,66 @@ pub trait ToolExecutor: Send {
     fn invokeAndStream(&mut self, tool: &AITool) -> Vec<ToolResult>;
 }
 
+/// Represents a tool result produced without blocking its calling executor.
+pub type ToolInvocationFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ToolResult>> + Send + 'a>>;
+
+/// Executes tools that own asynchronous package calls; synchronous tools retain ToolExecutor.
+pub trait AsyncToolExecutor: Send {
+    /// Validates a request before its execution begins.
+    fn validateParameters(&self, tool: &AITool) -> ToolValidationResult;
+    /// Declares the access boundary of the asynchronous tool.
+    fn accessSpec(&self, tool: &AITool) -> Result<ToolAccessSpec, String>;
+    /// Executes one invocation on its asynchronous result path.
+    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a>;
+}
+
+/// Records the execution contract explicitly selected when a tool is registered.
+pub enum RegisteredToolExecutor {
+    Synchronous(Box<dyn ToolExecutor>),
+    Asynchronous(Box<dyn AsyncToolExecutor>),
+}
+
+impl<T: ToolExecutor + 'static> From<Box<T>> for RegisteredToolExecutor {
+    /// Records a synchronous executor without changing its invocation contract.
+    fn from(executor: Box<T>) -> Self {
+        Self::Synchronous(executor)
+    }
+}
+
+impl From<Box<dyn ToolExecutor>> for RegisteredToolExecutor {
+    /// Records an already erased synchronous executor at registration.
+    fn from(executor: Box<dyn ToolExecutor>) -> Self {
+        Self::Synchronous(executor)
+    }
+}
+
+impl RegisteredToolExecutor {
+    /// Validates a request using its registered contract.
+    pub fn validateParameters(&self, tool: &AITool) -> ToolValidationResult {
+        match self {
+            Self::Synchronous(executor) => executor.validateParameters(tool),
+            Self::Asynchronous(executor) => executor.validateParameters(tool),
+        }
+    }
+    /// Returns the declared access boundary of the registered tool.
+    pub fn accessSpec(&self, tool: &AITool) -> Result<ToolAccessSpec, String> {
+        match self {
+            Self::Synchronous(executor) => executor.accessSpec(tool),
+            Self::Asynchronous(executor) => executor.accessSpec(tool),
+        }
+    }
+    /// Dispatches exactly the contract registered for this tool, without probing or retrying.
+    pub fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool) -> ToolInvocationFuture<'a> {
+        match self {
+            Self::Synchronous(executor) => {
+                Box::pin(std::future::ready(executor.invokeAndStream(tool)))
+            }
+            Self::Asynchronous(executor) => executor.invokeAndStreamAsync(tool),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolEffect {
     READ,
@@ -842,6 +908,36 @@ mod tests {
             .expect("switch_core success must produce route intent");
 
         assert_eq!(intent.targetNodeId, "core-target-1");
+    }
+
+    #[test]
+    fn route_change_intent_recognizes_executed_cli_proxy_target() {
+        let tool = AITool {
+            name: "proxy".to_string(),
+            parameters: vec![ToolParameter {
+                name: "tool_name".to_string(),
+                value: "switch_core".to_string(),
+            }],
+        };
+        let result = ToolResult {
+            toolName: "switch_core".to_string(),
+            success: true,
+            result: stringResultData("core-target-2"),
+            error: None,
+        };
+        assert_eq!(
+            ToolExecutionManager::routeChangeIntentForResult(&tool, &result)
+                .expect("executed switch_core via CLI proxy must produce route intent")
+                .targetNodeId,
+            "core-target-2",
+        );
+
+        let mut failed = result.clone();
+        failed.success = false;
+        assert!(ToolExecutionManager::routeChangeIntentForResult(&tool, &failed).is_none());
+        let mut mismatched = result;
+        mismatched.toolName = "other_tool".to_string();
+        assert!(ToolExecutionManager::routeChangeIntentForResult(&tool, &mismatched).is_none());
     }
 }
 

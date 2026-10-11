@@ -1,0 +1,10 @@
+[package]
+name = "operit-host-native-plugin-sdk-ipc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Native Plugin SDK IPC carriers for Operit hosts."
+
+[dependencies]
+operit-host-api = { path = "../../../core/crates/foundation/host-api" }

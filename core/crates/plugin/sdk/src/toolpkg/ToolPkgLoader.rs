@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use crate::javascript::JsExecutionEngine;
+use crate::javascript::{JsExecutionEngine, ToolPkgConfigScope};
 use crate::toolpkg::ToolPkgParser::{
     ToolPkgArchiveParser, ToolPkgLoadResult, ToolPkgMainRegistrationParseResult, ToolPkgSourceType,
 };
@@ -17,6 +17,7 @@ impl ToolPkgLoader {
     pub fn loadToolPkgFromExternalFile<FReportPackageLoadError>(
         fileSystemHost: &dyn FileSystemHost,
         sourcePath: &str,
+        configScope: ToolPkgConfigScope,
         jsEngine: &dyn JsExecutionEngine,
         reportPackageLoadError: FReportPackageLoadError,
     ) -> Result<ToolPkgLoadResult, String>
@@ -31,6 +32,29 @@ impl ToolPkgLoader {
             ToolPkgSourceType::EXTERNAL,
             sourcePath,
             false,
+            configScope,
+            jsEngine,
+            reportPackageLoadError,
+        )
+    }
+
+    /// Loads a ToolPkg archive from an embedded non-core external asset.
+    #[allow(non_snake_case)]
+    pub fn loadToolPkgFromBundledExternalAsset<FReportPackageLoadError>(
+        assetName: &str,
+        bytes: &'static [u8],
+        jsEngine: &dyn JsExecutionEngine,
+        reportPackageLoadError: FReportPackageLoadError,
+    ) -> Result<ToolPkgLoadResult, String>
+    where
+        FReportPackageLoadError: Fn(&str, &str),
+    {
+        Self::loadToolPkgFromArchiveBytes(
+            bytes,
+            ToolPkgSourceType::EXTERNAL,
+            assetName,
+            false,
+            ToolPkgConfigScope::Device,
             jsEngine,
             reportPackageLoadError,
         )
@@ -52,6 +76,7 @@ impl ToolPkgLoader {
             ToolPkgSourceType::ASSET,
             assetName,
             true,
+            ToolPkgConfigScope::Device,
             jsEngine,
             reportPackageLoadError,
         )
@@ -62,6 +87,7 @@ impl ToolPkgLoader {
     pub fn loadToolPkgFromMarketFile<FReportPackageLoadError>(
         fileSystemHost: &dyn FileSystemHost,
         sourcePath: &str,
+        configScope: ToolPkgConfigScope,
         jsEngine: &dyn JsExecutionEngine,
         reportPackageLoadError: FReportPackageLoadError,
     ) -> Result<ToolPkgLoadResult, String>
@@ -76,6 +102,7 @@ impl ToolPkgLoader {
             ToolPkgSourceType::MARKET,
             sourcePath,
             false,
+            configScope,
             jsEngine,
             reportPackageLoadError,
         )
@@ -88,6 +115,7 @@ impl ToolPkgLoader {
         sourceType: ToolPkgSourceType,
         sourcePath: &str,
         isBuiltIn: bool,
+        configScope: ToolPkgConfigScope,
         jsEngine: &dyn JsExecutionEngine,
         reportPackageLoadError: FReportPackageLoadError,
     ) -> Result<ToolPkgLoadResult, String>
@@ -119,11 +147,13 @@ impl ToolPkgLoader {
                     None
                 }
             },
-            |mainScriptText, toolPkgId, mainScriptPath| {
+            |mainScriptText, toolPkgId, mainScriptPath, apiVersion| {
                 parseMainRegistration(
                     mainScriptText,
                     toolPkgId,
                     mainScriptPath,
+                    apiVersion,
+                    configScope,
                     jsEngine,
                     textResources.clone(),
                 )
@@ -139,6 +169,8 @@ fn parseMainRegistration(
     mainScriptText: &str,
     toolPkgId: &str,
     mainScriptPath: &str,
+    apiVersion: &str,
+    configScope: ToolPkgConfigScope,
     jsEngine: &dyn JsExecutionEngine,
     textResources: Arc<std::collections::BTreeMap<String, String>>,
 ) -> ToolPkgMainRegistrationParseResult {
@@ -146,6 +178,8 @@ fn parseMainRegistration(
         mainScriptText,
         toolPkgId,
         mainScriptPath,
+        apiVersion,
+        configScope,
         jsEngine,
         Some(textResources),
     )

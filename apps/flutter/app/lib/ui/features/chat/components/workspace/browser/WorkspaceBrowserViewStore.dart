@@ -35,7 +35,8 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
       WorkspaceBrowserViewStore._();
 
   static const String _homeUrl = 'https://www.bing.com';
-  static const double _defaultZoomFactor = 1.0;
+  // Keep the workspace UI aligned with the host-owned WebView default.
+  static const double _defaultZoomFactor = 0.4;
   static const double _minZoomFactor = 0.1;
   static const double _maxZoomFactor = 2.0;
   static const double _zoomStep = 0.1;
@@ -45,7 +46,6 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   static const String _desktopUserAgent =
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-  static const String _localTextureTransport = 'localTexture';
   static const String _encodedStreamTransport = 'encodedStream';
   static const String _logTag = 'WorkspaceBrowserSurface';
 
@@ -59,6 +59,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   final Set<String> _closedSurfaceInteractionDropLogged = <String>{};
   final ValueNotifier<int> sessionCount = ValueNotifier<int>(0);
   Future<void>? _loadFuture;
+  bool _loaded = false;
   WorkspaceBrowserViewDelegate? _delegate;
   int _selectedIndex = 0;
   int _openingCount = 0;
@@ -105,13 +106,22 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
 
   /// Loads local browser chrome stores and existing Core sessions.
   Future<void> ensureLoaded() {
+    if (_loaded) {
+      return Future<void>.value();
+    }
     final current = _loadFuture;
     if (current != null) {
       return current;
     }
-    final next = _load();
+    final next = _load().then((_) {
+      _loaded = true;
+    });
     _loadFuture = next;
-    return next;
+    return next.whenComplete(() {
+      if (identical(_loadFuture, next)) {
+        _loadFuture = null;
+      }
+    });
   }
 
   /// Initializes the first visible browser surface.
@@ -269,6 +279,11 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   /// Restores the owner WebView zoom factor to the workspace default.
   void resetZoom() {
     unawaited(_setZoomFactor(_defaultZoomFactor));
+  }
+
+  /// Sets the current owner WebView to an explicit zoom factor.
+  void setZoomFactor(double zoomFactor) {
+    unawaited(_setZoomFactor(zoomFactor));
   }
 
   /// Reads owner-side userscript menu commands through Core.
@@ -527,11 +542,16 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   Future<void> _setZoomFactor(double value) async {
     final tab = _requireCurrentTab();
     final next = value.clamp(_minZoomFactor, _maxZoomFactor).toDouble();
+    if ((tab.zoomFactor - next).abs() < 0.0001) {
+      return;
+    }
+    // Do this before the asynchronous Core command so rapid +/- presses use
+    // the previous requested factor rather than a stale completed factor.
+    tab.update(zoomFactor: next);
     final result = await _sessions.setZoomFactor(tab.id, next);
     if (!result.success) {
-      throw StateError(result.error ?? 'Browser zoom command failed');
+      tab.update(errorText: result.error ?? 'Browser zoom command failed');
     }
-    tab.update(zoomFactor: next);
   }
 
   /// Applies one serialized compositor descriptor to a workspace tab.
@@ -545,7 +565,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
     }
     final descriptor = WorkspaceBrowserSurfaceDescriptor.fromJson(decoded);
     ClientLogger.i(
-      'descriptor session=${tab.id} transport=${descriptor.transport} platform=${descriptor.platform} textureId=${descriptor.textureId} streamId=${descriptor.streamId}',
+      'descriptor session=${tab.id} transport=${descriptor.transport} platform=${descriptor.platform} streamId=${descriptor.streamId}',
       tag: _logTag,
     );
     tab.updateSurfaceDescriptor(descriptor);
@@ -554,13 +574,7 @@ class WorkspaceBrowserViewStore extends ChangeNotifier {
   /// Builds the compositor transport requested by the current viewer.
   Map<String, Object?> _surfaceDisplayIntent() {
     final platform = defaultTargetPlatform;
-    final sameProcessWindows =
-        !kIsWeb &&
-        platform == TargetPlatform.windows &&
-        WidgetsBinding.instance.platformDispatcher.views.isNotEmpty;
-    final transport = sameProcessWindows
-        ? _localTextureTransport
-        : _encodedStreamTransport;
+    final transport = _encodedStreamTransport;
     ClientLogger.i(
       'displayIntent platform=${platform.name} transport=$transport',
       tag: _logTag,

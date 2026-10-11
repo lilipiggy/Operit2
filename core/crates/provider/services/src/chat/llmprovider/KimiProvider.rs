@@ -42,16 +42,30 @@ impl KimiProvider {
         &self,
         request: &SendMessageRequest,
     ) -> Result<Value, AiServiceError> {
-        let mut body = self.inner.create_request_body_internal(request)?;
+        let adjusted_request;
+        let effective_request = if request.enable_thinking && !request.preserve_think_in_history {
+            adjusted_request = SendMessageRequest {
+                chat_history: request.chat_history.clone(),
+                model_parameters: request.model_parameters.clone(),
+                enable_thinking: request.enable_thinking,
+                thinking_quality_level: request.thinking_quality_level,
+                thinking_configurations: request.thinking_configurations.clone(),
+                thinking_option_id: request.thinking_option_id.clone(),
+                stream: request.stream,
+                available_tools: request.available_tools.clone(),
+                preserve_think_in_history: true,
+                enable_retry: request.enable_retry,
+                on_non_fatal_error: request.on_non_fatal_error.clone(),
+                on_tool_invocation: request.on_tool_invocation.clone(),
+            };
+            &adjusted_request
+        } else {
+            request
+        };
+        let mut body = self.inner.create_request_body_internal(effective_request)?;
         let Some(object) = body.as_object_mut() else {
             return Ok(body);
         };
-        object.insert(
-            "thinking".to_string(),
-            json!({
-                "type": if request.enable_thinking { "enabled" } else { "disabled" }
-            }),
-        );
         if request.enable_thinking {
             let useToolCall = self.inner.enable_tool_call && !request.available_tools.is_empty();
             let providerReadyHistory = self
@@ -64,11 +78,6 @@ impl KimiProvider {
                     request.preserve_think_in_history,
                     useToolCall,
                 )?,
-            );
-            self.inner.calculate_and_store_input_tokens(
-                &providerReadyHistory,
-                object.get("tools").map(Value::to_string).as_deref(),
-                true,
             );
         }
         Ok(body)

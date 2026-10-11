@@ -41,7 +41,7 @@ pub enum PreferencesDataStoreError {
     Message(String),
 }
 
-const PREFERENCES_SCHEMA_VERSION_KEY_NAME: &str = "__operit_preferences_schema_version";
+pub const PREFERENCES_SCHEMA_VERSION_KEY_NAME: &str = "__operit_preferences_schema_version";
 
 /// Result alias used by Flow-like preference APIs.
 pub type FlowResult<T> = Result<T, PreferencesDataStoreError>;
@@ -480,9 +480,13 @@ impl<T> Flow<T> {
     {
         let stateFlow = StateFlow::new(initialValue);
         let cancellation = FlowCancellation::new();
-        let stateFlowForSubscription = stateFlow.clone();
+        // The sharing subscription belongs to the resulting state, not vice
+        // versa. Its callback must not retain its owner and form a cycle.
+        let target = Arc::downgrade(&stateFlow.inner);
         if let Ok(subscription) = self.subscribeWithCancellation(cancellation, move |value| {
-            stateFlowForSubscription.set_value(value);
+            if let Some(inner) = target.upgrade() {
+                StateFlow { inner }.set_value(value);
+            }
         }) {
             stateFlow.setUpstreamSubscription(subscription);
         }
@@ -594,6 +598,31 @@ where
             .lock()
             .expect("StateFlow upstream state subscription mutex must not be poisoned")
             .push(subscription);
+    }
+
+    /// Binds an upstream collector's cancellation to this derived state's owner.
+    /// Uses the same subscription ownership as `Flow::stateIn`; the returned
+    /// callback updates the state without keeping an abandoned sharing job alive.
+    #[allow(non_snake_case)]
+    pub fn upstreamCollector(
+        &self,
+        cancellation: FlowCancellation,
+    ) -> impl Fn(T) -> bool + Send + Sync + 'static
+    where
+        T: Send + 'static,
+    {
+        self.setUpstreamSubscription(FlowSubscription {
+            cancellation,
+            _observation: None,
+        });
+        let target = Arc::downgrade(&self.inner);
+        move |value| {
+            let Some(inner) = target.upgrade() else {
+                return false;
+            };
+            StateFlow { inner }.set_value(value);
+            true
+        }
     }
 
     /// Returns the current state value.
@@ -1550,6 +1579,11 @@ impl Preferences {
         self.values.contains_key(&key.name)
     }
 
+    /// Borrows entries without copying every serialized record for read-only scans.
+    pub fn iterEntries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values.iter().map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     /// Returns all preference entries as owned key-value pairs.
     pub fn entries(&self) -> Vec<(String, String)> {
         self.values
@@ -1629,6 +1663,36 @@ pub struct CoreNodeStateStore {
 }
 
 impl CoreNodeStateStore {
+    /// Deletes a node-local record and its shared preferences snapshot together.
+    /// A raw host deletion would leave an identical later import cached and
+    /// silently skip recreating the durable file. Failed deletion preserves cache.
+    pub fn delete(&self) -> Result<(), PreferencesDataStoreError> {
+        let transaction = self.inner.sharedState.transaction.lock()
+            .expect("PreferencesDataStore transaction mutex must not be poisoned");
+        if self.inner.storageHost.exists(&self.inner.storagePath)? {
+            self.inner.storageHost.delete(&self.inner.storagePath, false)?;
+        }
+        let mut loaded = self.inner.sharedState.preferences.lock()
+            .expect("PreferencesDataStore shared state mutex must not be poisoned");
+        loaded.loaded = true;
+        loaded.preferences = emptyPreferences();
+        drop(loaded);
+        drop(transaction);
+        self.inner.notifyChanged();
+        Ok(())
+    }
+
+    /// Declares a one-time schema migration for node-local state.
+    #[allow(non_snake_case)]
+    pub fn withSchema<F>(mut self, currentVersion: u32, migrate: F) -> Self
+    where
+        F: Fn(u32, &mut Preferences) -> Result<(), PreferencesDataStoreError>
+            + Send + Sync + 'static,
+    {
+        self.inner = self.inner.withSchema(currentVersion, migrate);
+        self
+    }
+
     /// Opens node-local state through an explicit runtime storage host.
     #[allow(non_snake_case)]
     pub fn newWithStorage(
@@ -2076,25 +2140,102 @@ impl PreferencesDataStore {
         storageHost: Arc<dyn RuntimeStorageHost>,
         entries: &[PreferencesSyncedEntry],
     ) -> Result<(), PreferencesDataStoreError> {
-        let Some(first) = entries.first() else {
-            return Ok(());
-        };
-        if entries.iter().any(|entry| {
-            entry.storagePath != first.storagePath || entry.encrypted != first.encrypted
-        }) {
-            return Err(PreferencesDataStoreError::Message(
-                "batched preference sync entries must share one storage path and encryption mode"
-                    .to_string(),
-            ));
-        }
-        let store =
-            Self::newNodeLocalWithStorage(storageHost, first.storagePath.clone(), first.encrypted);
-        store.try_edit_result(|preferences| {
-            for entry in entries {
-                entry.apply(preferences)?;
+        if let Some(first) = entries.first() {
+            if entries.iter().any(|entry| {
+                entry.storagePath != first.storagePath || entry.encrypted != first.encrypted
+            }) {
+                return Err(PreferencesDataStoreError::Message(
+                    "batched preference sync entries must share one storage path and encryption mode"
+                        .to_string(),
+                ));
             }
-            Ok(())
-        })
+        }
+        Self::applySyncedPreferencesWithStorage(storageHost, entries)
+    }
+
+    /// Validates every preferences file in one sync batch before writing any of
+    /// them, then publishes their cached snapshots before notifying observers.
+    /// Validation errors cannot leave a new model binding without its profiles.
+    /// Storage hosts do not provide a cross-file durable transaction, so I/O
+    /// failures during the write phase may still require a synchronization retry.
+    #[allow(non_snake_case)]
+    pub fn applySyncedPreferencesWithStorage(
+        storageHost: Arc<dyn RuntimeStorageHost>,
+        entries: &[PreferencesSyncedEntry],
+    ) -> Result<(), PreferencesDataStoreError> {
+        let batchesByPath = preferencesSyncBatchesByPath(entries)?;
+        // Stable path order prevents deadlocks between concurrent sync batches.
+        let stores = batchesByPath
+            .values()
+            .map(|entries| {
+                let first = &entries[0];
+                Self::newNodeLocalWithStorage(
+                    storageHost.clone(),
+                    first.storagePath.clone(),
+                    first.encrypted,
+                )
+            })
+            .collect::<Vec<_>>();
+        let transactions = stores
+            .iter()
+            .map(|store| {
+                store
+                    .sharedState
+                    .transaction
+                    .lock()
+                    .expect("PreferencesDataStore transaction mutex must not be poisoned")
+            })
+            .collect::<Vec<_>>();
+        // Preparation is side-effect free: a malformed delta aborts the whole
+        // preferences batch before bindings or provider profiles are written.
+        let snapshots = stores
+            .iter()
+            .zip(batchesByPath.values())
+            .map(|(store, entries)| store.prepareSyncedSnapshotUnlocked(entries))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (store, snapshot) in stores.iter().zip(&snapshots) {
+            if let Some(preferences) = snapshot {
+                store.commitSyncedSnapshotUnlocked(preferences)?;
+            }
+        }
+        drop(transactions);
+        for (store, snapshot) in stores.iter().zip(&snapshots) {
+            if snapshot.is_some() {
+                store.notifyChanged();
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds a changed snapshot while the caller holds this file's transaction lock.
+    fn prepareSyncedSnapshotUnlocked(
+        &self,
+        entries: &[&PreferencesSyncedEntry],
+    ) -> Result<Option<Preferences>, PreferencesDataStoreError> {
+        self.loadUnlocked()?;
+        let previous = self
+            .loadedPreferences()
+            .expect("PreferencesDataStore must be loaded before sync validation");
+        let mut next = previous.clone();
+        for entry in entries {
+            entry.apply(&mut next)?;
+        }
+        Ok((next != previous).then_some(next))
+    }
+
+    /// Persists and caches one prepared snapshot, without notifying observers yet.
+    fn commitSyncedSnapshotUnlocked(
+        &self,
+        preferences: &Preferences,
+    ) -> Result<(), PreferencesDataStoreError> {
+        self.writeStoredPreferencesUnlocked(preferences)?;
+        let mut loaded = self
+            .sharedState
+            .preferences
+            .lock()
+            .expect("PreferencesDataStore shared state mutex must not be poisoned");
+        loaded.preferences = preferences.clone();
+        Ok(())
     }
 
     /// Reads the current preferences snapshot.
@@ -2399,6 +2540,31 @@ impl PreferencesDataStore {
         Ok(())
     }
 
+    /// Uses the common sync log as a write-ahead journal for a Space record.
+    /// Failed metadata writes leave the previous complete record/cache intact;
+    /// retry reuses matching durable entity-state operations before publication.
+    #[allow(non_snake_case)]
+    pub fn replaceRecoverably(&self, mut preferences: Preferences) -> Result<(), PreferencesDataStoreError> {
+        let _transaction = self.sharedState.transaction.lock()
+            .expect("PreferencesDataStore transaction mutex must not be poisoned");
+        self.loadUnlocked()?;
+        self.migratePreferencesToCurrentSchema(&mut preferences)?;
+        let current = self.loadedPreferences().expect("PreferencesDataStore must be loaded before replacement");
+        // Recheck the complete snapshot, including after reboot with a partially
+        // persisted journal. Identical entries reuse their existing operation.
+        self.recordSyncOperationsInternal(&current, &preferences, true)?;
+        self.recordSyncOperationsInternal(&emptyPreferences(), &preferences, true)?;
+        if current == preferences { return Ok(()); }
+        self.writeStoredPreferencesUnlocked(&preferences)?;
+        let mut loaded = self.sharedState.preferences.lock()
+            .expect("PreferencesDataStore shared state mutex must not be poisoned");
+        loaded.loaded = true;
+        loaded.preferences = preferences;
+        drop(loaded);
+        self.notifyChanged();
+        Ok(())
+    }
+
     /// Writes one preferences snapshot while the caller owns the shared transaction lock.
     fn writeStoredPreferencesUnlocked(
         &self,
@@ -2432,6 +2598,11 @@ impl PreferencesDataStore {
         previous: &Preferences,
         preferences: &Preferences,
     ) -> Result<(), PreferencesDataStoreError> {
+        self.recordSyncOperationsInternal(previous, preferences, false)
+    }
+
+    #[allow(non_snake_case)]
+    fn recordSyncOperationsInternal(&self, previous: &Preferences, preferences: &Preferences, recoverable: bool) -> Result<(), PreferencesDataStoreError> {
         let Some(syncOperationStore) = &self.syncOperationStore else {
             return Ok(());
         };
@@ -2476,6 +2647,7 @@ impl PreferencesDataStore {
                                 None,
                                 mutation.path,
                                 mutation.value,
+                                recoverable,
                             )?;
                         }
                         continue;
@@ -2490,6 +2662,7 @@ impl PreferencesDataStore {
                 nextValue.cloned(),
                 Vec::new(),
                 None,
+                recoverable,
             )?;
         }
         Ok(())
@@ -2506,6 +2679,7 @@ impl PreferencesDataStore {
         value: Option<String>,
         jsonPath: Vec<PreferencesSyncJsonPathSegment>,
         jsonValue: Option<Value>,
+        recoverable: bool,
     ) -> Result<(), PreferencesDataStoreError> {
         let structured = !jsonPath.is_empty();
         let jsonMutation = if structured {
@@ -2534,9 +2708,7 @@ impl PreferencesDataStore {
         } else {
             "delete"
         };
-        syncOperationStore.appendLocalOperation(
-            deviceId,
-            NewSyncOperation {
+        let mutation = NewSyncOperation {
                 domain: descriptor.domain.clone(),
                 entityType: descriptor.entityType.clone(),
                 entityId: preferenceMutationEntityId(&descriptor.storagePath, key, &jsonPath)?,
@@ -2550,8 +2722,9 @@ impl PreferencesDataStore {
                     jsonPath,
                     jsonMutation,
                 })?,
-            },
-        )?;
+            };
+        if recoverable { syncOperationStore.appendLocalStateIfChanged(deviceId, mutation)?; }
+        else { syncOperationStore.appendLocalOperation(deviceId, mutation)?; }
         Ok(())
     }
 
@@ -2674,6 +2847,44 @@ fn preferenceMutationEntityId(
         return preferenceEntryEntityId(storagePath, key);
     }
     serde_json::to_string(&(storagePath, key, jsonPath)).map_err(PreferencesDataStoreError::from)
+}
+
+/// Groups incoming mutations by file while preserving their replay order.
+/// The resulting path order is also the transaction-lock acquisition order.
+#[allow(non_snake_case)]
+fn preferencesSyncBatchesByPath(
+    entries: &[PreferencesSyncedEntry],
+) -> Result<BTreeMap<&str, Vec<&PreferencesSyncedEntry>>, PreferencesDataStoreError> {
+    let mut batchesByPath: BTreeMap<&str, Vec<&PreferencesSyncedEntry>> = BTreeMap::new();
+    for entry in entries {
+        let batch = batchesByPath.entry(entry.storagePath.as_str()).or_default();
+        if batch
+            .first()
+            .is_some_and(|first| first.encrypted != entry.encrypted)
+        {
+            return Err(PreferencesDataStoreError::Message(
+                "synchronized preferences file has inconsistent encryption modes".to_string(),
+            ));
+        }
+        batch.push(entry);
+    }
+    Ok(batchesByPath)
+}
+
+/// Returns the whole-entry and JSON-parent identities that replace this location.
+/// Reading the canonical entity id also works before encrypted payload decoding.
+#[allow(non_snake_case)]
+pub(crate) fn preferenceMutationAncestorEntityIds(
+    operation: &SyncOperation,
+) -> Option<Vec<String>> {
+    if operation.domain != "preferences" {
+        return None;
+    }
+    let (storagePath, key, path): (String, String, Vec<PreferencesSyncJsonPathSegment>) =
+        serde_json::from_str(&operation.entityId).ok()?;
+    (0..path.len())
+        .map(|length| preferenceMutationEntityId(&storagePath, &key, &path[..length]).ok())
+        .collect()
 }
 
 /// Produces independently mergeable mutations for every changed JSON location.

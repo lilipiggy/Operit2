@@ -1,0 +1,26 @@
+{
+  "private": true,
+  "scripts": {
+    "build:web": "node web/scripts/build.mjs",
+    "pack:toolpkg": "tsc -p tsconfig.json && tsc -p web/tsconfig.json && pnpm run build:web && node web/scripts/pack.mjs",
+    "test:web": "node --test web/tests/editor.test.mjs web/tests/performance.test.mjs web/tests/templates.test.mjs"
+  },
+  "dependencies": {
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@mui/material": "7.3.2",
+    "@mui/icons-material": "7.3.2",
+    "@xyflow/react": "12.8.5",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "@types/react": "19.1.16",
+    "@types/react-dom": "19.1.9",
+    "typescript": "5.9.2",
+    "fflate": "0.8.2",
+    "playwright": "1.55.1"
+  },
+  "packageManager": "pnpm@10.7.0"
+}

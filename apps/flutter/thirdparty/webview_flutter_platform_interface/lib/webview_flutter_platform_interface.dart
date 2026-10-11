@@ -6,6 +6,11 @@ export 'src/platform_navigation_delegate.dart';
 export 'src/platform_ssl_auth_error.dart';
 export 'src/platform_webview_controller.dart';
 export 'src/platform_webview_cookie_manager.dart';
+export 'src/platform_webview_data_manager.dart';
 export 'src/platform_webview_widget.dart';
 export 'src/types/types.dart';
 export 'src/webview_platform.dart';
+
+export 'src/local_resource.dart';
+
+export 'src/native_webview_zoom.dart';

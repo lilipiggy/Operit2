@@ -14,6 +14,7 @@ class CanvasToolSummaryRow extends StatelessWidget {
     required this.titleColor,
     required this.summaryColor,
     this.onClick,
+    this.trailing,
   });
 
   final String toolName;
@@ -23,6 +24,7 @@ class CanvasToolSummaryRow extends StatelessWidget {
   final Color titleColor;
   final Color summaryColor;
   final VoidCallback? onClick;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +33,7 @@ class CanvasToolSummaryRow extends StatelessWidget {
       button: onClick != null,
       label: semanticDescription,
       child: Padding(
-        padding: const EdgeInsets.only(top: 4),
+        padding: const EdgeInsets.symmetric(vertical: 2),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: <Widget>[
@@ -59,6 +61,10 @@ class CanvasToolSummaryRow extends StatelessWidget {
                 style: theme.textTheme.bodySmall?.copyWith(color: summaryColor),
               ),
             ),
+            if (trailing != null) ...<Widget>[
+              const SizedBox(width: 6),
+              trailing!,
+            ],
           ],
         ),
       ),

@@ -1,6 +1,6 @@
 // ignore_for_file: file_names
 
 import 'CoreProxy.dart';
-import 'MethodChannelCoreProxy.dart';
+import 'FfiCoreProxy.dart';
 
-const CoreProxy platformCoreProxy = MethodChannelCoreProxy();
+const CoreProxy platformCoreProxy = FfiCoreProxy();

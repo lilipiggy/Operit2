@@ -68,6 +68,10 @@ export namespace Memory {
    */
   function getByTitle(options: GetByTitleOptions): Promise<MemoryQueryResultData>;
   /**
+   * Resolves the memory owner bound to the specified calling character card.
+   */
+  function getOwnerKey(callerCardId: string): Promise<string>;
+  /**
    * Create a link between two memories inside one memory owner.
    */
   function link(sourceTitle: string, targetTitle: string, targetOwnerKey: string, linkType?: string, weight?: number, description?: string): Promise<MemoryLinkResultData>;
