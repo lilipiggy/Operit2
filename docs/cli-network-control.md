@@ -77,8 +77,9 @@ space sync
 `space sync` 手动等待一次同步，常驻会话正常情况下也会响应业务数据和设备变化自动同步。
 
 设备操作使用统一词汇：`space` 与 `control device` 两棵命令树、TUI 的 `/network` 及 Flutter 控制面板对下列动词含义一致。
+命令动词保持 `disconnect`/`admit`；TUI 设备窗口与 Flutter 设备菜单的显示文案为「隔离设备 / 解除隔离设备」（Isolate device / Lift isolation），与下述语义一一对应。
 
-- `disconnect <device>`：策略级隔离。立即断开该设备，并禁止其直连与路由中转；成员资格、身份与配对保留，`admit <device>` 解除限制后才允许重连。
+- `disconnect <device>`：策略级隔离。立即断开该设备，并禁止其直连与路由中转；成员资格、身份与配对保留，`admit <device>` 解除隔离后才允许重连。
 - `admit <device>`：解除上一行的隔离；不对该设备发起连接，链路由其自身恢复。
 - `remove <device>`：彻底遗忘，不是“断开连接”。清除策略记录、成员资格、加入申请历史与本侧配对凭证，设备回到陌生人状态。
 - `unpair <node-id>`（`link unpair`）：只删除配对授权，保留空间成员资格；它删的是本机与该设备之间的那条直连边，不影响其它成员。
