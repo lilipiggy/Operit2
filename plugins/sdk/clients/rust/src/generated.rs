@@ -354,6 +354,8 @@ pub struct SdkToolPkgContainerRuntime {
     pub chatViewHooks: Vec<SdkToolPkgFunctionHookRuntime>,
     #[serde(rename = "chatMessageHooks")]
     pub chatMessageHooks: Vec<SdkToolPkgFunctionHookRuntime>,
+    #[serde(rename = "chatLifecycleHooks")]
+    pub chatLifecycleHooks: Vec<SdkToolPkgFunctionHookRuntime>,
     #[serde(rename = "chatMessageMenuItems")]
     pub chatMessageMenuItems: Vec<SdkToolPkgChatMessageMenuItemRuntime>,
     #[serde(rename = "chatRuntimeHooks")]
@@ -517,6 +519,8 @@ pub struct SdkToolPkgNavigationEntryRuntime {
     pub id: String,
     #[serde(rename = "routeId")]
     pub routeId: String,
+    #[serde(rename = "params")]
+    pub params: Option<operit_link::CoreValue>,
     #[serde(rename = "surface")]
     pub surface: String,
     #[serde(rename = "title")]
@@ -614,6 +618,8 @@ pub struct SdkToolPkgUiModuleRuntime {
     pub runtime: String,
     #[serde(rename = "screen")]
     pub screen: String,
+    #[serde(rename = "screenExport")]
+    pub screenExport: Option<String>,
     #[serde(rename = "title")]
     pub title: SdkLocalizedText,
     #[serde(rename = "keepAlive")]
@@ -631,6 +637,8 @@ pub struct SdkToolPkgUiRouteRuntime {
     pub runtime: String,
     #[serde(rename = "screen")]
     pub screen: String,
+    #[serde(rename = "screenExport")]
+    pub screenExport: Option<String>,
     #[serde(rename = "title")]
     pub title: SdkLocalizedText,
     #[serde(rename = "keepAlive")]

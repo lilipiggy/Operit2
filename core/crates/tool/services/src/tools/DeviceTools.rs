@@ -2,7 +2,7 @@
 use crate::tools::AIToolHandler::{AIToolHandler, ToolRegistrationVisibility};
 use crate::tools::ToolResultDataClasses::ToolResultData;
 use crate::ConversationMarkupManager::ToolResult;
-use crate::ToolExecutionManager::{AITool, ToolParameter};
+use crate::ToolExecutionManager::{AITool, ToolCall, ToolExecutionPolicy, ToolParameter};
 use operit_link::{
     toCoreValue, CoreEvent, CoreEventKind, CoreEventStream, CoreLinkError, CoreWatchRequest,
 };
@@ -64,6 +64,7 @@ pub fn tool_from_request(request: &JsToolCallRequest) -> AITool {
 
 pub fn result_to_js(result: ToolResult) -> JsToolCallResult {
     let data = match result.result {
+        ToolResultData::JsonResultData(data) => JsToolCallResultData::Value(data.value),
         ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
         ToolResultData::StringResultData(data) => JsToolCallResultData::Value(data.value.into()),
         ToolResultData::BooleanResultData(data) => JsToolCallResultData::Value(data.value.into()),
@@ -103,8 +104,10 @@ impl AIToolHandler {
                 _ => {}
             }
         }
-        if !self.getToolExecutorOrActivate(&name).await {
-            return failure(format!("Tool not found on target device: {name}"));
+        match self.getToolExecutorOrActivate(&name).await {
+            Ok(true) => {},
+            Ok(false) => return failure(format!("Tool not found on target device: {name}")),
+            Err(error) => return failure(error),
         }
         if self.getToolVisibility(&name) != Some(ToolRegistrationVisibility::PUBLIC) {
             return failure(format!("Tool is not public on target device: {name}"));
@@ -114,7 +117,12 @@ impl AIToolHandler {
             "DeviceTools",
             &format!("Execute {} from authenticated node {origin}", tool.name),
         );
-        result_to_js(self.executeToolWithPermissions(tool).await)
+        let call = ToolCall { name, parameters: request.parameters };
+        match self.executeToolInvocation(&call, ToolExecutionPolicy::Device).await {
+            Ok(results) => result_to_js(results.into_iter().last()
+                .expect("The invocation pipeline rejects empty results")),
+            Err(error) => failure(error),
+        }
     }
 
     fn device_tool_catalog(&self) -> JsToolCallResult {

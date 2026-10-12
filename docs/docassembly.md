@@ -1466,7 +1466,6 @@ SendMessageOptions
   functionType
   promptFunctionType
   enableThinking
-  enableMemoryAutoUpdate
   customSystemPromptTemplate
   isSubTask
   characterName
@@ -1679,7 +1678,6 @@ ToolPkgParser.rs
 ToolPkgLoader.rs
 ToolPkgManager.rs
 ToolPkgMainRegistrationScriptParser.rs
-ToolPkgComposeDslParser.rs
 ToolPkgTemplateModels.rs
 ToolPkgHookModels.rs
 ```

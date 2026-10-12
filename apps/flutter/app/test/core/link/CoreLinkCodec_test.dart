@@ -10,6 +10,217 @@ import 'package:operit2/core/link/CoreLinkProtocol.dart';
 
 /// Verifies Dart preserves MessagePack bin values as Uint8List.
 void main() {
+  test('full stream events reach typed decoding with the original bytes', () {
+    final decoder = CoreLinkStreamEventValueDecoder();
+    for (final kind in ['Snapshot', 'Changed']) {
+      final bytes = encodeCoreLink({'text': 'full value'});
+      final event = CoreEvent.raw(
+        requestId: 'stream-1',
+        target: 'core/test7',
+        propertyName: 'updates',
+        kind: kind,
+        valueBytes: bytes,
+        decodeValue: (_) => throw StateError('generic decoding must stay lazy'),
+      );
+      var typedCalls = 0;
+      final result = decoder.decode(
+        event,
+        decode: (received) {
+          expect(identical(received, bytes), isTrue);
+          typedCalls++;
+          return decodeCoreLink<String>(
+            received,
+            decode: (reader) {
+              expect(reader.readMapLength(), 1);
+              expect(reader.readString(), 'text');
+              return reader.readString();
+            },
+          );
+        },
+      );
+      expect(result, 'full value');
+      expect(typedCalls, 1);
+    }
+  });
+
+  test('full stream lists replace earlier values without retaining a base', () {
+    final decoder = CoreLinkStreamEventValueDecoder();
+    List<List<int>> read(Uint8List bytes) => decodeCoreLink<List<List<int>>>(
+      bytes,
+      decode: (reader) => List.generate(
+        reader.readArrayLength(),
+        (_) => List.generate(reader.readArrayLength(), (_) => reader.readInt()),
+      ),
+    );
+    final first = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Changed',
+        value: [
+          [1, 2],
+        ],
+      ),
+      decode: read,
+    );
+    first.single[0] = 99;
+    final second = decoder.decode(
+      _rawCoreEvent(
+        kind: 'Changed',
+        value: [
+          [],
+          [3],
+        ],
+      ),
+      decode: read,
+    );
+    expect(second, [
+      [],
+      [3],
+    ]);
+    second.last.add(4);
+    expect(first, [
+      [99, 2],
+    ]);
+    expect(
+      decoder.decode(
+        _rawCoreEvent(kind: 'Changed', value: []),
+        decode: read,
+      ),
+      isEmpty,
+    );
+  });
+
+  test(
+    'full stream decoding rejects delta and terminal events before decoding',
+    () {
+      final decoder = CoreLinkStreamEventValueDecoder();
+      for (final kind in ['Delta', 'Completed', 'Unknown']) {
+        expect(
+          () => decoder.decode(
+            _rawCoreEvent(kind: kind, value: {r'$coreDelta': []}),
+            decode: (_) =>
+                fail('unsupported event must never reach typed decoding'),
+          ),
+          throwsFormatException,
+        );
+      }
+      expect(
+        () => decoder.decode(
+          CoreEvent(
+            requestId: null,
+            target: 'core/test7',
+            propertyName: 'updates',
+            kind: 'Changed',
+            value: null,
+          ),
+          decode: (_) => fail('missing bytes must never reach typed decoding'),
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
+  test('full stream decoding preserves typed payload validation', () {
+    final decoder = CoreLinkStreamEventValueDecoder();
+    expect(
+      () => decoder.decode(
+        _rawCoreEvent(kind: 'Changed', value: 'wrong scalar type'),
+        decode: (bytes) =>
+            decodeCoreLink<int>(bytes, decode: (reader) => reader.readInt()),
+      ),
+      throwsFormatException,
+    );
+    final bytes = Uint8List.fromList([
+      ...encodeCoreLink(1),
+      ...encodeCoreLink(2),
+    ]);
+    expect(
+      () => decoder.decode(
+        CoreEvent.raw(
+          requestId: null,
+          target: 'core/test7',
+          propertyName: 'updates',
+          kind: 'Changed',
+          valueBytes: bytes,
+          decodeValue: (bytes) => decodeCoreLink<Object?>(bytes),
+        ),
+        decode: (bytes) =>
+            decodeCoreLink<int>(bytes, decode: (reader) => reader.readInt()),
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test('full stream decoding preserves embedded stream routing', () async {
+    final decoder = CoreLinkStreamEventValueDecoder();
+    final factory = _EmbeddedStreamFactoryRecorder();
+    final event = _rawCoreEvent(
+      kind: 'Changed',
+      value: [
+        {
+          'contentStream': {
+            r'$coreStream': {
+              'streamId': 'stream-ai',
+              'target': 'core/test64',
+              'propertyName': 'openCoreStream',
+              'args': {'streamId': 'stream-ai'},
+            },
+          },
+        },
+      ],
+    );
+    final result = decoder.decode(
+      event,
+      decode: (bytes) => decodeCoreLink<List<Stream<String>?>>(
+        bytes,
+        decode: _decodeStreamList,
+        target: event.target,
+        embeddedStreamFactory: factory.open,
+      ),
+    );
+    expect(factory.openedStreamIds, ['stream-ai']);
+    expect(await result.single!.single, 'stream chunk');
+  });
+
+  test(
+    'message outcomes preserve native tags through JSON and MessagePack',
+    () {
+      final payloads = <Map<String, Object?>>[
+        {
+          'type': 'committed',
+          'status': 'completed',
+          'userMessageTimestamp': 123,
+          'assistant': {'messageTimestamp': 456, 'variantIndex': 2},
+        },
+        {
+          'type': 'committed',
+          'status': 'cancelled',
+          'userMessageTimestamp': null,
+          'assistant': null,
+        },
+        {'type': 'not_persisted', 'status': 'completed'},
+        {'type': 'blocked', 'message': 'Blocked by input hook'},
+        {'type': 'blocked', 'message': null},
+        {
+          'type': 'consumed',
+          'metadata': {'owner': 'character_cards'},
+        },
+      ];
+      for (final payload in payloads) {
+        final fromJson = MessageSendOutcome.fromJson(payload);
+        expect(fromJson.toJson(), payload);
+        final fromMessagePack = decodeCoreLink<MessageSendOutcome>(
+          encodeCoreLink(payload),
+          decode: MessageSendOutcome.fromMessagePack,
+        );
+        expect(fromMessagePack.toJson(), payload);
+        if (payload['type'] == 'blocked' || payload['type'] == 'consumed') {
+          expect(fromJson.status, isNull);
+          expect(fromMessagePack.status, isNull);
+        }
+      }
+    },
+  );
+
   /// Verifies arrays are growable at decode time without copying the decoded tree.
   test('raw decoding creates independently growable nested arrays', () {
     final bytes = encodeCoreLink([

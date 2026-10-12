@@ -2,12 +2,11 @@
 
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
 import 'package:operit2/l10n/generated/app_localizations.dart';
 
-import '../../../../../common/CharacterAvatar.dart';
+import '../../../../../common/ChatAvatarImage.dart';
 import '../../../../../common/markdown/MarkdownImageRenderer.dart';
 import '../../../../../common/markdown/MarkdownRemoteImage.dart';
 import '../../../../../common/markdown/MarkdownNodeGrouper.dart';
@@ -42,6 +41,7 @@ class BubbleAiMessageComposable extends StatefulWidget {
     this.isHidden = false,
     this.enableDialogs = true,
     this.onAvatarLongPressMention,
+    this.onIdentityTap,
     this.splitMarkdownContent,
   });
 
@@ -62,6 +62,7 @@ class BubbleAiMessageComposable extends StatefulWidget {
   final bool isHidden;
   final bool enableDialogs;
   final void Function(String roleName)? onAvatarLongPressMention;
+  final VoidCallback? onIdentityTap;
   final MarkdownContentSplitter? splitMarkdownContent;
 
   @override
@@ -130,7 +131,11 @@ class _BubbleAiMessageComposableState extends State<BubbleAiMessageComposable> {
         ? widget.message.roleName
         : '';
     final metadataText = _metadataText(widget.message, snapshot, l10n: l10n);
-    final tooltipText = formatMessageMetadataTooltip(widget.message, snapshot, l10n: l10n);
+    final tooltipText = formatMessageMetadataTooltip(
+      widget.message,
+      snapshot,
+      l10n: l10n,
+    );
     final avatarImagePath = widget.avatarImagePath;
     final messageFontFamily = operitMessageFontFamily(snapshot, isUser: false);
     final messageFontFamilyFallback = operitMessageFontFamilyFallback(
@@ -199,6 +204,7 @@ class _BubbleAiMessageComposableState extends State<BubbleAiMessageComposable> {
             avatarShape: snapshot.avatarShape,
             avatarCornerRadius: snapshot.avatarCornerRadius,
             onAvatarLongPress: _avatarLongPressCallback(),
+            onIdentityTap: widget.enableDialogs ? widget.onIdentityTap : null,
             roleNameText: roleNameText,
             metadataText: metadataText,
             tooltipText: tooltipText,
@@ -219,7 +225,12 @@ class _BubbleAiMessageComposableState extends State<BubbleAiMessageComposable> {
             avatarShape: snapshot.avatarShape,
             avatarCornerRadius: snapshot.avatarCornerRadius,
             onAvatarLongPress: _avatarLongPressCallback(),
-            displayText: _normalDisplayText(widget.message, snapshot, l10n: l10n),
+            onIdentityTap: widget.enableDialogs ? widget.onIdentityTap : null,
+            displayText: _normalDisplayText(
+              widget.message,
+              snapshot,
+              l10n: l10n,
+            ),
             tooltipText: tooltipText,
             isInteracting: isInteracting,
             imageUrl: imageUrl,
@@ -317,6 +328,7 @@ class _WideAiBubbleLayout extends StatelessWidget {
     required this.avatarShape,
     required this.avatarCornerRadius,
     required this.onAvatarLongPress,
+    required this.onIdentityTap,
     required this.roleNameText,
     required this.metadataText,
     required this.tooltipText,
@@ -337,6 +349,7 @@ class _WideAiBubbleLayout extends StatelessWidget {
   final String avatarShape;
   final double avatarCornerRadius;
   final VoidCallback? onAvatarLongPress;
+  final VoidCallback? onIdentityTap;
   final String roleNameText;
   final String metadataText;
   final String tooltipText;
@@ -369,6 +382,7 @@ class _WideAiBubbleLayout extends StatelessWidget {
                     avatarShape: avatarShape,
                     cornerRadius: avatarCornerRadius,
                     onLongPress: onAvatarLongPress,
+                    onTap: onIdentityTap,
                   ),
                   const SizedBox(width: 8),
                 ],
@@ -377,16 +391,20 @@ class _WideAiBubbleLayout extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       if (roleNameText.isNotEmpty)
-                        Text(
-                          roleNameText,
-                          softWrap: true,
-                          style: Theme.of(context).textTheme.titleSmall
-                              ?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: Theme.of(context).colorScheme.onSurface,
-                              ),
+                        InkWell(
+                          onTap: onIdentityTap,
+                          child: Text(
+                            roleNameText,
+                            softWrap: true,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurface,
+                                ),
+                          ),
                         ),
-
                     ],
                   ),
                 ),
@@ -441,6 +459,7 @@ class _NormalAiBubbleLayout extends StatelessWidget {
     required this.avatarShape,
     required this.avatarCornerRadius,
     required this.onAvatarLongPress,
+    required this.onIdentityTap,
     required this.displayText,
     required this.tooltipText,
     required this.isInteracting,
@@ -460,6 +479,7 @@ class _NormalAiBubbleLayout extends StatelessWidget {
   final String avatarShape;
   final double avatarCornerRadius;
   final VoidCallback? onAvatarLongPress;
+  final VoidCallback? onIdentityTap;
   final String displayText;
   final String tooltipText;
   final bool isInteracting;
@@ -487,6 +507,7 @@ class _NormalAiBubbleLayout extends StatelessWidget {
               avatarShape: avatarShape,
               cornerRadius: avatarCornerRadius,
               onLongPress: onAvatarLongPress,
+              onTap: onIdentityTap,
             ),
             const SizedBox(width: 8),
           ],
@@ -528,10 +549,13 @@ class _NormalAiBubbleLayout extends StatelessWidget {
                   if (displayText.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 4, left: 4),
-                      child: _BubbleMetadataLabel(
-                        text: displayText,
-                        tooltip: tooltipText,
-                        externalActive: isInteracting,
+                      child: InkWell(
+                        onTap: onIdentityTap,
+                        child: _BubbleMetadataLabel(
+                          text: displayText,
+                          tooltip: tooltipText,
+                          externalActive: isInteracting,
+                        ),
                       ),
                     ),
                 ],
@@ -598,10 +622,9 @@ class _AiImageOnlyBubble extends StatelessWidget {
       image = const Icon(Icons.broken_image_outlined);
     } else {
       image = switch (uri.scheme) {
-        'http' || 'https' || 'data' => MarkdownRemoteImage(
-          url: imageUrl,
-          fit: BoxFit.contain,
-        ),
+        'http' ||
+        'https' ||
+        'data' => MarkdownRemoteImage(url: imageUrl, fit: BoxFit.contain),
         'file' => Image.file(
           File(uri.toFilePath()),
           fit: BoxFit.contain,
@@ -628,18 +651,21 @@ class _MessageAvatar extends StatelessWidget {
     required this.avatarShape,
     required this.cornerRadius,
     this.onLongPress,
+    this.onTap,
   });
 
   final String? imagePath;
   final String avatarShape;
   final double cornerRadius;
   final VoidCallback? onLongPress;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final square = avatarShape == UserPreferencesManager.AVATAR_SHAPE_SQUARE;
     return GestureDetector(
       onLongPress: onLongPress,
+      onTap: onTap,
       child: Container(
         width: 32,
         height: 32,
@@ -648,7 +674,7 @@ class _MessageAvatar extends StatelessWidget {
           borderRadius: square ? BorderRadius.circular(cornerRadius) : null,
         ),
         clipBehavior: Clip.antiAlias,
-        child: CharacterAvatarImage(avatarUri: imagePath, fit: BoxFit.cover),
+        child: ChatAvatarImage(avatarUri: imagePath, fit: BoxFit.cover),
       ),
     );
   }

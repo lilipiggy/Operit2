@@ -3,6 +3,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+
 import 'CoreLinkProtocol.dart';
 
 typedef CoreEmbeddedStreamFactory =
@@ -38,6 +40,44 @@ T decodeCoreLink<T>(
   return value;
 }
 
+/// Decodes independent full values emitted by a Core Stream protocol.
+///
+/// Flow and State protocols use the incremental decoders below instead.
+class CoreLinkStreamEventValueDecoder {
+  /// Passes the original payload directly to the typed decoder without a base.
+  T decode<T>(CoreEvent event, {required T Function(Uint8List bytes) decode}) {
+    if (event.kind != 'Snapshot' && event.kind != 'Changed') {
+      throw FormatException(
+        'Unsupported Core stream event kind: ${event.kind}',
+      );
+    }
+    final bytes = event.valueBytes;
+    if (bytes == null) {
+      throw StateError('Core stream event has no payload bytes');
+    }
+    return _decodeCoreLinkEventBytes(
+      bytes,
+      decode,
+      stage: 'dart-stream-messagepack',
+    );
+  }
+}
+
+/// Measures typed watch decoding independently of the value or stream protocol.
+T _decodeCoreLinkEventBytes<T>(
+  Uint8List bytes,
+  T Function(Uint8List bytes) decode, {
+  String stage = 'dart-messagepack',
+}) {
+  const profile = bool.fromEnvironment('OPERIT_PROFILE_COMPOSE_STAGES');
+  final watch = profile ? (Stopwatch()..start()) : null;
+  final result = decode(bytes);
+  if (watch != null) {
+    _profileCoreLinkDecode(stage, watch, bytes.length);
+  }
+  return result;
+}
+
 /// Reconstructs complete typed watch payloads from ordered Core events.
 class CoreLinkEventValueDecoder {
   Object? _previousValue;
@@ -45,7 +85,9 @@ class CoreLinkEventValueDecoder {
 
   /// Decodes one watch event after applying protocol-level incremental payloads.
   T decode<T>(CoreEvent event, {required T Function(Uint8List bytes) decode}) {
-    return decode(completeValueBytes(event));
+    const profile = bool.fromEnvironment('OPERIT_PROFILE_COMPOSE_STAGES');
+    final bytes = completeValueBytes(event, profileStages: profile);
+    return _decodeCoreLinkEventBytes(bytes, decode);
   }
 
   /// Decodes one complete event with the typed Link reader API.
@@ -65,8 +107,17 @@ class CoreLinkEventValueDecoder {
   }
 
   /// Returns complete MessagePack bytes for one ordered Core watch event.
-  Uint8List completeValueBytes(CoreEvent event) {
+  Uint8List completeValueBytes(CoreEvent event, {bool profileStages = false}) {
+    final watch = profileStages ? (Stopwatch()..start()) : null;
     final currentValue = _readEventValue(event);
+    if (watch != null) {
+      _profileCoreLinkDecode(
+        'dart-watch-read',
+        watch,
+        event.valueBytes!.length,
+      );
+      watch.reset();
+    }
     final completeValue = switch (event.kind) {
       'Snapshot' || 'Changed' => _replacePreviousValue(currentValue),
       'Delta' => _applyDeltaEvent(currentValue),
@@ -74,7 +125,19 @@ class CoreLinkEventValueDecoder {
         'Unsupported Core watch event kind: ${event.kind}',
       ),
     };
-    return encodeCoreLink(completeValue);
+    if (watch != null) {
+      _profileCoreLinkDecode(
+        'dart-watch-retain',
+        watch,
+        event.valueBytes!.length,
+      );
+      watch.reset();
+    }
+    final bytes = encodeCoreLink(completeValue);
+    if (watch != null) {
+      _profileCoreLinkDecode('dart-watch-reencode', watch, bytes.length);
+    }
+    return bytes;
   }
 
   /// Reads one event payload as an untyped Link value.
@@ -1568,4 +1631,13 @@ class _CoreLinkMessagePackReader implements CoreLinkValueReader {
       throw FormatException('Unexpected end of Link payload');
     }
   }
+}
+
+/// Measures generic watch decoding when the diagnostic flag is enabled.
+void _profileCoreLinkDecode(String stage, Stopwatch watch, int bytes) {
+  final duration = watch.elapsedMicroseconds / 1000;
+  debugPrintSynchronously(
+    'event=compose_pipeline_stage stage=$stage durationMs=${duration.toStringAsFixed(3)} '
+    'wallMicros=${DateTime.now().microsecondsSinceEpoch} bytes=$bytes',
+  );
 }

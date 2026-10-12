@@ -102,19 +102,27 @@ import { Files as FilesType } from './files';
 import { Net as NetType } from './network';
 import { System as SystemType } from './system';
 import { SoftwareSettings as SoftwareSettingsType } from './software_settings';
+import { Models as ModelsType } from './models';
+import { Tts as TtsType } from './tts';
+import { Theme as ThemeType } from './theme';
+import { Catalog as CatalogType } from './catalog';
 import { UI as UIType } from './ui';
 import { Chat as ChatType } from './chat';
-import { Memory as MemoryType } from './memory';
+import { Storage as StorageType } from './storage';
 
 export { Net } from './network';
 export { System } from './system';
 export { SoftwareSettings } from './software_settings';
+export { Models } from './models';
+export { Tts } from './tts';
+export { Theme } from './theme';
+export { Catalog } from './catalog';
 export { UI, UINode } from './ui';
 export { ToolPkg } from './toolpkg';
 export { Chat } from './chat';
-export { Memory } from './memory';
 export { Edge, Io } from './edge';
 export type { EdgeInterfaceInfo, IoInterfaceInfo, EdgeActionEvent, EdgeEventBatch, EdgeEventPayload, EdgeEventHookEvent, EdgeEventAck } from './edge';
+export * from './storage';
 
 // Export Android utilities
 export {
@@ -250,7 +258,8 @@ declare global {
 
     function getChatId(): string | undefined;
 
-    function getCallerCardId(): string | undefined;
+    /** Returns the opaque execution participant authenticated by the host. */
+    function getCallerParticipantId(): string | undefined;
 
     const OPERIT_DOWNLOAD_DIR: string;
     /**
@@ -284,7 +293,11 @@ declare global {
         System: typeof SystemType;
         SoftwareSettings: typeof SoftwareSettingsType;
         Chat: typeof ChatType;
-        Memory: typeof MemoryType;
+        Models: typeof ModelsType;
+        Tts: typeof TtsType;
+        Theme: typeof ThemeType;
+        Catalog: typeof CatalogType;
+        Storage: typeof StorageType;
         Edge: DeviceEdge;
         Io: DeviceIo;
         call<T extends string>(name: T, params?: Record<string, unknown>): Promise<ToolReturnType<T>>;
@@ -300,9 +313,13 @@ declare global {
         Net: typeof NetType;
         System: typeof SystemType;
         SoftwareSettings: typeof SoftwareSettingsType;
+        Models: typeof ModelsType;
+        Tts: typeof TtsType;
+        Theme: typeof ThemeType;
+        Catalog: typeof CatalogType;
         UI: typeof UIType;
         Chat: typeof ChatType;
-        Memory: typeof MemoryType;
+        Storage: typeof StorageType;
     };
 
     /** Lowercase alias of the existing Core plugin Tools object. */

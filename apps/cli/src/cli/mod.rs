@@ -11,13 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use operit_link::CoreLinkError;
-use operit_model::ActivePrompt::ActivePrompt;
 use operit_model::ApiKeyInfo::ApiKeyInfo;
 use operit_model::AttachmentInfo::AttachmentInfo;
-use operit_model::CharacterCard::{
-    CharacterCard, CharacterCardChatModelBindingMode, CharacterCardToolAccessConfig,
-};
-use operit_model::CharacterGroupCard::{CharacterGroupCard, GroupMemberConfig};
 use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatTurnOptions::ChatTurnOptions;
 use operit_model::FunctionType::FunctionType;
@@ -25,19 +20,14 @@ use operit_model::InputProcessingState::InputProcessingState;
 use operit_model::ModelConfigData::ApiProviderType;
 use operit_model::ModelParameter::ModelParameter;
 use operit_model::PromptFunctionType::PromptFunctionType;
-use operit_model::PromptTag::TagType;
 use operit_model::TtsConfig::{TtsConfig, TtsProviderType};
 use operit_providers::chat::enhance::ConversationService::ConversationService;
 use operit_providers::chat::EnhancedAIService::EnhancedAIService;
 use operit_providers::market::MarketStatsApiService::{MarketEntrySummary, MarketListPage};
 use operit_runtime::core::chat::ChatRuntimeSlot::ChatRuntimeSlot;
-use operit_runtime::data::preferences::ActivePromptManager::ActivePromptManager;
 use operit_runtime::data::preferences::ApiPreferences::ApiPreferences;
-use operit_runtime::data::preferences::CharacterCardManager::CharacterCardManager;
-use operit_runtime::data::preferences::CharacterGroupCardManager::CharacterGroupCardManager;
 use operit_runtime::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
 use operit_runtime::data::preferences::ModelConfigManager::ModelConfigManager;
-use operit_runtime::data::preferences::PromptTagManager::PromptTagManager;
 use operit_runtime::data::preferences::TtsConfigManager::TtsConfigManager;
 use operit_runtime::services::core::MessageCoordinationDelegate::MessageCoordinationDelegate;
 use operit_runtime::services::GitHubOAuthBrokerService::GitHubOAuthBrokerLoginCompletion;
@@ -69,7 +59,7 @@ use crate::bootstrap::{
 };
 use crate::browser_callback::CliOAuthCallback;
 use crate::chat_runtime::{
-    run_chat_send_command_with_core, run_chat_shell_command_with_core, run_shell_command,
+    run_chat_shell_command_with_core, run_shell_command,
 };
 use crate::core_proxy::local_cli_core;
 use host_ops::{schedule_cli_uninstall, schedule_cli_update};
@@ -181,9 +171,6 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
         "export" => run_export_command(&mut core, &args[1..]).await,
         "import" => run_import_command(&mut core, &args[1..]).await,
         "backup" => run_backup_command(&mut core, &args[1..]).await,
-        "chat" if args.get(1).map(String::as_str) == Some("send") => {
-            run_chat_send_command_with_core(&mut core, &args[2..]).await
-        }
         "chat" if args.get(1).map(String::as_str) == Some("shell") => {
             run_chat_shell_command_with_core(&mut core, &args[2..]).await
         }
@@ -461,25 +448,16 @@ fn run_tts_config_cli_command(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Synthesizes speech through a character or exact TTS configuration.
-/// Synthesizes speech through the selected character or TTS configuration.
+/// Synthesizes speech through an explicit TTS configuration.
 fn run_tts_synthesize_cli_command(
     core: &crate::core_proxy::CliCore,
     args: &[String],
 ) -> Result<(), String> {
-    let mut characterId: Option<String> = None;
     let mut configId: Option<String> = None;
     let mut text: Option<String> = None;
     let mut index = 0usize;
     while index < args.len() {
         match args[index].as_str() {
-            "--character" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "--character requires a value".to_string())?;
-                characterId = Some(value.clone());
-            }
             "--text" => {
                 index += 1;
                 let value = args
@@ -500,15 +478,8 @@ fn run_tts_synthesize_cli_command(
     }
     let text = text.ok_or_else(|| "--text is required".to_string())?;
     let service = TtsSynthesisService::getInstance(core.localHostManager()?);
-    let result = match (characterId, configId) {
-        (Some(characterId), None) => service.synthesizeForCharacter(&characterId, &text)?,
-        (None, Some(configId)) => service.synthesizeWithConfig(&configId, &text)?,
-        _ => {
-            return Err(
-                "tts synthesize requires exactly one of --character or --config".to_string(),
-            )
-        }
-    };
+    let configId = configId.ok_or_else(|| "tts synthesize requires --config <id>".to_string())?;
+    let result = service.synthesizeWithConfig(&configId, &text)?;
     if cli_json_mode() {
         emit_cli_json(serde_json::json!({ "audioPaths": result.audioPaths }));
     } else {
@@ -534,7 +505,6 @@ fn print_tts_usage() {
     println!("operit2 cli tts config create-local <name> <model-id> <version> <voice> <speed>");
     println!("operit2 cli tts config update <id> <name|endpoint|api-key|model|voice|response-format|speed|http-method|request-body|content-type> <value>");
     println!("operit2 cli tts config delete <id>");
-    println!("operit2 cli tts synthesize --character <id> --text <text>");
     println!("operit2 cli tts synthesize --config <id> --text <text>");
 }
 
@@ -2029,7 +1999,6 @@ fn print_chat_history_header(chat: &operit_model::ChatHistory::ChatHistory) {
     println!("Input tokens: {}", chat.inputTokens);
     println!("Output tokens: {}", chat.outputTokens);
     println!("Context window: {}", chat.currentWindowSize);
-    println!("Group: {}", chat.group.clone().unwrap_or_default());
     println!("Display order: {}", chat.displayOrder);
     println!(
         "Workspace: {}",
@@ -2038,14 +2007,6 @@ fn print_chat_history_header(chat: &operit_model::ChatHistory::ChatHistory) {
     println!(
         "Parent chat: {}",
         chat.parentChatId.clone().unwrap_or_default()
-    );
-    println!(
-        "Character: {}",
-        chat.characterCardName.clone().unwrap_or_default()
-    );
-    println!(
-        "Character group: {}",
-        chat.characterGroupId.clone().unwrap_or_default()
     );
     println!("Locked: {}", chat.locked);
     println!("Pinned: {}", chat.pinned);
@@ -2073,111 +2034,12 @@ fn print_chat_message(message: &operit_model::ChatMessage::ChatMessage) {
     println!("Content: {}", message.displayText());
 }
 
-/// Prints one prompt tag for a human reader.
-fn print_tag(tag: &operit_model::PromptTag::PromptTag) {
-    println!("Tag {}", tag.id);
-    println!("Name: {}", tag.name);
-    println!("Description: {}", tag.description);
-    println!("Prompt: {}", tag.promptContent);
-    println!("Type: {}", tagTypeName(&tag.tagType));
-    println!("Created: {}", tag.createdAt);
-    println!("Updated: {}", tag.updatedAt);
-}
-
-/// Prints one character card for a human reader.
-fn print_character_card(card: &CharacterCard) {
-    println!("Character {}", card.id);
-    println!("Name: {}", card.name);
-    println!("Description: {}", card.description);
-    println!("Character setting: {}", card.characterSetting);
-    println!("Opening statement: {}", card.openingStatement);
-    println!("Chat content: {}", card.otherContentChat);
-    println!("Voice content: {}", card.otherContentVoice);
-    println!("Tags: {}", card.attachedTagIds.join(","));
-    println!("Advanced prompt: {}", card.advancedCustomPrompt);
-    println!("Marks: {}", card.marks);
-    println!("Chat model binding: {}", card.chatModelBindingMode);
-    println!(
-        "Chat model: {}",
-        card.chatModelId.clone().unwrap_or_default()
-    );
-    println!(
-        "TTS config: {}",
-        card.ttsConfigId.clone().unwrap_or_default()
-    );
-    println!(
-        "Shared memory mounts: {}",
-        serde_json::to_string(&card.sharedMemoryMounts).expect("sharedMemoryMounts must serialize")
-    );
-    println!(
-        "Tool access: {}",
-        serde_json::to_string(&card.toolAccessConfig).expect("toolAccessConfig must serialize")
-    );
-    println!("Default: {}", card.isDefault);
-    println!("Created: {}", card.createdAt);
-    println!("Updated: {}", card.updatedAt);
-}
-
-/// Prints one character group card for a human reader.
-fn print_character_group_card(group: &CharacterGroupCard) {
-    println!("Character group {}", group.id);
-    println!("Name: {}", group.name);
-    println!("Description: {}", group.description);
-    println!(
-        "Members: {}",
-        group
-            .members
-            .iter()
-            .map(|member| format!("{}:{}", member.characterCardId, member.orderIndex))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    println!("Created: {}", group.createdAt);
-    println!("Updated: {}", group.updatedAt);
-}
-
-fn parse_group_members(value: &str) -> Vec<GroupMemberConfig> {
-    let mut result = Vec::new();
-    for (index, item) in value.split(',').enumerate() {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        result.push(GroupMemberConfig {
-            characterCardId: trimmed.to_string(),
-            orderIndex: index as i32,
-        });
-    }
-    result
-}
-
-fn parseTagType(value: Option<&str>) -> Result<TagType, String> {
-    match value.unwrap_or("CUSTOM") {
-        "TONE" => Ok(TagType::TONE),
-        "CHARACTER" => Ok(TagType::CHARACTER),
-        "FUNCTION" => Ok(TagType::FUNCTION),
-        "CUSTOM" => Ok(TagType::CUSTOM),
-        other => Err(format!(
-            "invalid tagType: {other}; expected TONE | CHARACTER | FUNCTION | CUSTOM"
-        )),
-    }
-}
-
 fn parse_permission_level_arg(value: Option<&str>) -> Result<AiPermissionMode, String> {
     match value {
         Some("allow") | Some("ALLOW") => Ok(AiPermissionMode::Full),
         Some("ask") | Some("ASK") => Ok(AiPermissionMode::WorkspaceWrite),
         Some("forbid") | Some("FORBID") => Ok(AiPermissionMode::ReadOnly),
         _ => Err("expected allow, ask, or forbid".to_string()),
-    }
-}
-
-fn tagTypeName(tagType: &TagType) -> &'static str {
-    match tagType {
-        TagType::TONE => "TONE",
-        TagType::CHARACTER => "CHARACTER",
-        TagType::FUNCTION => "FUNCTION",
-        TagType::CUSTOM => "CUSTOM",
     }
 }
 
@@ -2281,50 +2143,6 @@ fn parseCsvList(value: &str) -> Vec<String> {
         }
     }
     result
-}
-
-/// Prints one memory in compact human-readable list form.
-fn print_memory_item_line(memory: &operit_model::Memory::Memory) {
-    println!(
-        "{}\t{}\t{}\t{}",
-        memory.id,
-        memory.title,
-        memory.folderPath.clone().unwrap_or_else(String::new),
-        memory
-            .tags
-            .iter()
-            .map(|tag| tag.name.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-}
-
-/// Prints one memory with labeled fields for a human reader.
-fn print_memory_item(memory: &operit_model::Memory::Memory) {
-    println!("Memory {}", memory.id);
-    println!("UUID: {}", memory.uuid);
-    println!("Title: {}", memory.title);
-    println!("Content: {}", memory.content);
-    println!("Content type: {}", memory.contentType);
-    println!("Source: {}", memory.source);
-    println!("Credibility: {}", memory.credibility);
-    println!("Importance: {}", memory.importance);
-    println!(
-        "Folder: {}",
-        memory.folderPath.clone().unwrap_or_else(String::new)
-    );
-    println!("Created: {}", memory.createdAt);
-    println!("Updated: {}", memory.updatedAt);
-    println!("Last accessed: {}", memory.lastAccessedAt);
-    println!(
-        "Tags: {}",
-        memory
-            .tags
-            .iter()
-            .map(|tag| tag.name.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
 }
 
 /// Returns a trimmed string only when the value is non-empty.

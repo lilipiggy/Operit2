@@ -3,11 +3,14 @@
 pub mod AtomicCounter;
 pub mod FileSystemResource;
 pub mod HostManager;
+pub mod PluginStorage;
 pub mod HttpServer;
 pub mod PluginSdkIpc;
 pub mod Tcp;
 pub mod TerminalWorkingDirectory;
 pub mod TimeUtils;
+pub mod JavaScriptBootstrap;
+pub use JavaScriptBootstrap::HostJavaScriptBootstrap;
 pub use Tcp::{TcpConnection, TcpHost, TcpListener};
 pub mod SerialPort;
 pub use SerialPort::{SerialPortConnection, SerialPortHost};
@@ -1880,6 +1883,8 @@ pub trait RuntimeSqliteTransaction {
     fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>>;
     fn lastInsertRowId(&self) -> HostResult<i64>;
     fn commit(self: Box<Self>) -> HostResult<()>;
+    /// Aborts this transaction explicitly and reports any rollback failure.
+    fn rollback(self: Box<Self>) -> HostResult<()>;
 }
 
 pub trait RuntimeSqliteHost: Send + Sync {
@@ -1956,6 +1961,9 @@ pub type HostJavaScriptInterruptHandler = Arc<dyn Fn() -> bool + Send + Sync + '
 
 /// Owns one concrete JavaScript runtime created by the active platform host.
 pub trait HostJavaScriptRuntime {
+    /// Executes shared trusted bootstrap bytecode in this runtime's independent global scope.
+    fn evaluateHostJavaScriptBootstrap(&mut self, source: &'static str) -> HostResult<()>;
+
     /// Evaluates one script without reading its return value.
     fn evaluateHostJavaScriptVoid(&mut self, scriptName: &str, script: &str) -> HostResult<()>;
 

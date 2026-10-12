@@ -5,6 +5,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/bridge/OperitRuntimeBridge.dart';
+import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../components/CollapsedDrawerContent.dart';
 import '../components/DrawerConversationState.dart';
 import '../components/DrawerContent.dart';
@@ -15,6 +17,7 @@ import '../../theme/OperitGlassSurface.dart';
 class TabletLayout extends StatefulWidget {
   const TabletLayout({
     super.key,
+    this.bridge = const ProxyCoreRuntimeBridge(),
     required this.content,
     required this.navigationEntries,
     required this.pluginSidebarEntries,
@@ -27,6 +30,7 @@ class TabletLayout extends StatefulWidget {
     required this.onConversationActivated,
   });
 
+  final OperitRuntimeBridge bridge;
   final Widget content;
   final List<NavigationEntrySpec> navigationEntries;
   final List<NavigationEntrySpec> pluginSidebarEntries;
@@ -139,6 +143,7 @@ class _TabletLayoutState extends State<TabletLayout> {
                       valueListenable: widget.drawerConversationState,
                       builder: (context, drawerState, _) {
                         return DrawerContent(
+                          bridge: widget.bridge,
                           key: const ValueKey<String>('expandedDrawerContent'),
                           navigationEntries: widget.navigationEntries,
                           pluginEntries: widget.pluginSidebarEntries,
@@ -147,10 +152,6 @@ class _TabletLayoutState extends State<TabletLayout> {
                           histories: drawerState.histories,
                           activeStreamingChatIds:
                               drawerState.activeStreamingChatIds,
-                          characterGroupNamesById:
-                              drawerState.characterGroupNamesById,
-                          characterCardAvatarUrisByName:
-                              drawerState.characterCardAvatarUrisByName,
                           currentChatId: drawerState.currentChatId,
                           errorMessage: drawerState.errorMessage,
                           loading: drawerState.loading,
@@ -161,15 +162,23 @@ class _TabletLayoutState extends State<TabletLayout> {
                         );
                       },
                     )
-                  : CollapsedDrawerContent(
+                  : ValueListenableBuilder<DrawerConversationState>(
                       key: const ValueKey<String>('collapsedSidebarContent'),
-                      navigationEntries: widget.navigationEntries,
-                      pluginEntries: widget.pluginSidebarEntries,
-                      selectedRouteId: widget.selectedRouteId,
-                      appearance: appearance,
-                      onNavigationEntrySelected:
-                          widget.onNavigationEntrySelected,
-                      onConversationActivated: widget.onConversationActivated,
+                      valueListenable: widget.drawerConversationState,
+                      builder: (context, drawerState, _) {
+                        return CollapsedDrawerContent(
+                          bridge: widget.bridge,
+                          navigationEntries: widget.navigationEntries,
+                          pluginEntries: widget.pluginSidebarEntries,
+                          selectedRouteId: widget.selectedRouteId,
+                          appearance: appearance,
+                          currentChatId: drawerState.currentChatId,
+                          onNavigationEntrySelected:
+                              widget.onNavigationEntrySelected,
+                          onConversationActivated:
+                              widget.onConversationActivated,
+                        );
+                      },
                     ),
             ),
           ),

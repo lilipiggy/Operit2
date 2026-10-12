@@ -127,8 +127,17 @@ pub(crate) fn native_result_error_vec(code: &str, message: impl Into<String>) ->
 
 /// Encodes one compact CoreProxy watch channel event.
 pub(crate) fn native_watch_event_vec(subscription_id: &str, event: CoreEvent) -> Vec<u8> {
-    operit_link::encodeLink((subscription_id, native_watch_event_payload(event)))
-        .expect("compact native watch event must encode")
+    let profile = std::env::var_os("OPERIT_PROFILE_COMPOSE_STAGES").is_some();
+    let started = profile.then(std::time::Instant::now);
+    let bytes = operit_link::encodeLink((subscription_id, native_watch_event_payload(event)))
+        .expect("compact native watch event must encode");
+    if let Some(started) = started {
+        let line = format!("event=compose_pipeline_stage stage=rust-messagepack durationMs={:.3} wallMicros={} bytes={}\n",
+            started.elapsed().as_secs_f64() * 1000.0,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros(), bytes.len());
+        let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
+    }
+    bytes
 }
 
 /// Converts one CoreProxy event into its compact native payload tuple.

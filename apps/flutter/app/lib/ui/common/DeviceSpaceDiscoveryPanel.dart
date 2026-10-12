@@ -739,6 +739,9 @@ class _RemotePairDialogState extends State<_RemotePairDialog> {
               enabled: pairing == null,
               decoration: InputDecoration(
                 labelText: l10n.settingsRuntimeBaseUrl,
+                helperText: _transport == generated.PeerTransport.tcp
+                    ? l10n.settingsRuntimeTcpAddressHint
+                    : null,
                 border: const OutlineInputBorder(),
                 isDense: true,
               ),
@@ -962,6 +965,10 @@ class _LinkTransportSelector extends StatelessWidget {
         DropdownMenuItem(
           value: generated.PeerTransport.webSocket,
           child: Text('WebSocket'),
+        ),
+        DropdownMenuItem(
+          value: generated.PeerTransport.tcp,
+          child: Text('TCP'),
         ),
       ],
       onChanged: (selected) {

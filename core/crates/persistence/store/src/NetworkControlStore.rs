@@ -53,6 +53,12 @@ pub enum NetworkControlCommand {
     DefineRole {
         role: NetworkControlRole,
     },
+    UpdateRole {
+        role: NetworkControlRole,
+    },
+    RemoveRole {
+        roleId: String,
+    },
     GrantRole {
         grant: NetworkControlIdentityAssignment,
     },
@@ -280,6 +286,21 @@ impl NetworkControlStore {
     #[allow(non_snake_case)]
     pub fn defineRole(&self, role: NetworkControlRole) -> Result<SyncOperation, String> {
         self.submitLocalCommand(NetworkControlCommand::DefineRole { role })
+    }
+
+    /// Updates one existing custom role after checking that the issuer can define every requested ability.
+    #[allow(non_snake_case)]
+    pub fn updateRole(&self, role: NetworkControlRole) -> Result<SyncOperation, String> {
+        self.submitLocalCommand(NetworkControlCommand::UpdateRole { role })
+    }
+
+    /// Removes one custom role. Devices still holding the role fall back to
+    /// the default user identity, mirroring the RevokeRole guard that keeps
+    /// every member holding an identity at all times.
+    #[allow(non_snake_case)]
+    pub fn removeRole(&self, roleId: String) -> Result<SyncOperation, String> {
+        validateIdentifier("role id", &roleId, 120)?;
+        self.submitLocalCommand(NetworkControlCommand::RemoveRole { roleId })
     }
 
     /// Sets one existing identity on a device after checking capability limits.
@@ -836,6 +857,11 @@ fn controlAuditSummary(
             controlDeviceLabel(profiles, initialAdminNodeId)?
         ),
         NetworkControlCommand::DefineRole { role } => format!("Define role {}", role.displayName),
+        NetworkControlCommand::UpdateRole { role } => format!("Update role {}", role.displayName),
+        NetworkControlCommand::RemoveRole { roleId } => format!(
+            "Remove role {}",
+            controlRoleLabel(state, roleId).unwrap_or_else(|_| roleId.clone())
+        ),
         NetworkControlCommand::GrantRole { grant: assignment } => format!(
             "Set identity {} on {}",
             controlRoleLabel(state, &assignment.roleId)?,
@@ -939,6 +965,10 @@ fn validateCommandRecord(record: &NetworkControlCommandRecord) -> Result<(), Str
             validateNodeId(initialAdminNodeId)
         }
         NetworkControlCommand::DefineRole { role } => validateRole(role),
+        NetworkControlCommand::UpdateRole { role } => validateRole(role),
+        NetworkControlCommand::RemoveRole { roleId } => {
+            validateIdentifier("role id", roleId, 120)
+        }
         NetworkControlCommand::GrantRole { grant: assignment } => {
             validateIdentityAssignment(assignment)
         }
@@ -1024,6 +1054,54 @@ fn authorizeAndApplyCommand(
                 requireGlobalCapability(state, &record.issuerNodeId, capability)?;
             }
             state.roles.insert(role.roleId.clone(), role.clone());
+            Ok(())
+        }
+        NetworkControlCommand::UpdateRole { role } => {
+            requireGlobalCapability(
+                state,
+                &record.issuerNodeId,
+                NETWORK_IDENTITY_MANAGE_CAPABILITY,
+            )?;
+            if builtinRoles().contains_key(&role.roleId) {
+                return Err("built-in roles cannot be redefined".to_string());
+            }
+            if !state.roles.contains_key(&role.roleId) {
+                return Err(format!(
+                    "network control role does not exist: {}",
+                    role.roleId
+                ));
+            }
+            for capability in &role.capabilities {
+                requireGlobalCapability(state, &record.issuerNodeId, capability)?;
+            }
+            state.roles.insert(role.roleId.clone(), role.clone());
+            Ok(())
+        }
+        NetworkControlCommand::RemoveRole { roleId } => {
+            requireGlobalCapability(
+                state,
+                &record.issuerNodeId,
+                NETWORK_IDENTITY_MANAGE_CAPABILITY,
+            )?;
+            if builtinRoles().contains_key(roleId) {
+                return Err("built-in roles cannot be removed".to_string());
+            }
+            if !state.roles.contains_key(roleId) {
+                return Err(format!("network control role does not exist: {roleId}"));
+            }
+            // Members keep an identity at all times: devices still assigned
+            // to the removed role fall back to the default user identity,
+            // mirroring the RevokeRole guard.
+            let reassignedNodeIds: Vec<String> = state
+                .deviceIdentityIds
+                .iter()
+                .filter(|(_, identityId)| *identityId == roleId)
+                .map(|(nodeId, _)| nodeId.clone())
+                .collect();
+            for nodeId in reassignedNodeIds {
+                state.deviceIdentityIds.insert(nodeId, "user".to_string());
+            }
+            state.roles.remove(roleId);
             Ok(())
         }
         NetworkControlCommand::GrantRole { grant: assignment } => {

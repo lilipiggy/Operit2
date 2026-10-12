@@ -336,6 +336,18 @@ impl RuntimeRemoteLinkService {
         self.networkControlStore.defineRole(role).map(|_| ())
     }
 
+    /// Updates one existing custom role from named capabilities.
+    #[allow(non_snake_case)]
+    pub fn updateDeviceSpaceRole(&self, role: NetworkControlRole) -> Result<(), String> {
+        self.networkControlStore.updateRole(role).map(|_| ())
+    }
+
+    /// Removes one custom role; devices holding it fall back to the default user identity.
+    #[allow(non_snake_case)]
+    pub fn removeDeviceSpaceRole(&self, roleId: String) -> Result<(), String> {
+        self.networkControlStore.removeRole(roleId).map(|_| ())
+    }
+
     /// Sets one existing identity as the device's current identity.
     #[allow(non_snake_case)]
     pub fn setDeviceSpaceIdentity(

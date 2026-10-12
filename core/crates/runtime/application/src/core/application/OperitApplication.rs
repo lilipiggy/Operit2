@@ -3,6 +3,7 @@ use crate::core::chat::ChatRuntimeHolder::ChatRuntimeHolder;
 use crate::core::events::RuntimeEvent::RuntimeEvent;
 use crate::data::preferences::ApiPreferences::ApiPreferences;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
+use crate::data::preferences::ThemeConfigManager::ThemeConfigManager;
 use crate::plugins::toolpkg::ToolPkgAppLifecycleHookBridge::ToolPkgAppLifecycleHookBridge;
 use crate::plugins::toolpkg::ToolPkgChatComposerSlotBridge::ToolPkgChatComposerSlotBridge;
 use crate::plugins::toolpkg::ToolPkgHookBridgeSupport::ToolPkgBridgeRuntime;
@@ -20,14 +21,13 @@ use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_host_api::{HostRuntimeEventRegistration, HostRuntimeTaskSchedulerHost};
 #[cfg(feature = "javascript")]
 use operit_js_bridge::javascript::JsExecutionProvider::QuickJsExecutionProvider;
-use operit_providers::chat::library::MemoryAutoSaveScheduler::MemoryAutoSaveScheduler;
 use operit_providers::chat::llmprovider::ModelConfigConnectionTester::ModelConnectionTestReport;
 use operit_providers::runtime_support::ProviderRuntimeContext;
-use operit_store::repository::UserMarkdownRepository::UserMarkdownRepository;
 use operit_store::sync::SqlChatSyncStore::{SqlChatSyncStore, CHAT_SYNC_DOMAIN};
 use operit_store::CoreNodeBindingStore::{CoreNodeBindingStore, BINDING_SYNC_DOMAIN};
 use operit_store::NetworkControlStore::{NetworkControlStore, NETWORK_CONTROL_SYNC_DOMAIN};
-use operit_store::ObjectBoxStore::{applyObjectBoxSyncOperation, OBJECTBOX_SYNC_DOMAIN};
+use operit_store::PluginStorage::{self, PLUGIN_STORAGE_SYNC_DOMAIN};
+use operit_store::RuntimeStorePaths::RuntimeStorePaths;
 use operit_store::PreferencesDataStore::StateFlow;
 use operit_store::PreferencesDataStore::{PreferencesDataStore, PreferencesSyncedEntry};
 use operit_store::RuntimeFileSyncStore::{
@@ -178,14 +178,22 @@ impl OperitApplication {
         runtimeToolSupport
             .bindRuntimeServices(toolHandler.clone(), providerRuntimeContext.clone())
             .expect("tool runtime services must bind exactly once");
+        let initializedChatRuntimeHolder = ChatRuntimeHolder::newWithRuntimeDependencies(
+            chatFileSystemHost,
+            toolHandler.clone(),
+            providerRuntimeContext.clone(),
+        );
+        runtimeToolSupport
+            .bindChatHistoryManager(
+                initializedChatRuntimeHolder
+                    .chatHistoryManager()
+                    .expect("initialized chat runtime must expose its actual main record manager")
+                    .clone(),
+            )
+            .expect("tool runtime must bind the canonical chat record manager exactly once");
         *chatRuntimeHolder
             .try_lock()
-            .expect("new chat runtime holder must be unlocked") =
-            ChatRuntimeHolder::newWithRuntimeDependencies(
-                chatFileSystemHost,
-                toolHandler.clone(),
-                providerRuntimeContext.clone(),
-            );
+            .expect("new chat runtime holder must be unlocked") = initializedChatRuntimeHolder;
         Self {
             appStartupTimeMs: 0,
             hostManager,
@@ -295,6 +303,9 @@ impl OperitApplication {
         self.initializeJsonSerializer();
         self.initializeAppLanguage();
         self.initAndroidPermissionPreferences();
+        operit_store::db::AppDatabase::AppDatabase::getDatabase(RuntimeStorePaths::default())
+            .map_err(|error| error.to_string())?;
+        crate::data::backup::CharacterPluginMigration::migrateLegacyCharacters(RuntimeStorePaths::default())?;
         self.preloadDatabase();
         AppLogger::i(
             "OperitApplication",
@@ -317,6 +328,7 @@ impl OperitApplication {
         let pluginInitializationStartedAt = currentTimeMillis();
         AppLogger::i("OperitApplication", "built-in plugin initialization start");
         PluginRegistry::initializeBuiltins(self.toolPkgBridgeRuntime.clone());
+        crate::plugins::toolpkg::ToolPkgChatLifecycleHookBridge::ToolPkgChatLifecycleHookBridge::register(self.toolPkgBridgeRuntime.clone())?;
         AppLogger::i(
             "OperitApplication",
             &format!(
@@ -352,9 +364,8 @@ impl OperitApplication {
         self.extensionChanges = crate::services::ExtensionRuntimeService::start(
             self.hostManager.clone(), self.toolHandler.clone(),
         );
+        self.dispatchPluginLoading()?;
         self.initialized = true;
-        MemoryAutoSaveScheduler::schedule(self.providerRuntimeContext.clone());
-        self.dispatchPluginLoading();
         AppLogger::i(
             "OperitApplication",
             &format!(
@@ -399,27 +410,49 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn preloadDatabase(&self) {}
 
-    /// Starts deployed MCP plugins according to the configured startup timeout.
+    /// Schedules the single initial package and MCP load and returns its submission error.
     #[allow(non_snake_case)]
-    pub fn initMcpPlugins(&self) {
-        self.dispatchPluginLoading();
+    pub fn initMcpPlugins(&self) -> Result<(), String> {
+        self.dispatchPluginLoading()
     }
 
-    /// Loads ToolPkg packages and starts MCP plugins in the background with overlay progress.
-    fn dispatchPluginLoading(&self) {
-        let hostManager = self.hostManager.clone();
+    /// Claims and schedules the owning initial load task that publishes canonical registry readiness.
+    fn dispatchPluginLoading(&self) -> Result<(), String> {
         let packageManager = self.toolHandler.getOrCreatePackageManager();
+        let readiness = {
+            let manager = packageManager.lock().map_err(|error| error.to_string())?;
+            if !manager.claimInitialPackageRegistryLoad()? {
+                return Ok(());
+            }
+            manager.packageRegistryReadiness()
+        };
         let taskScheduler = self
             .hostManager
             .hostRuntimeTaskSchedulerHost
             .clone()
-            .expect("runtime task scheduler host must be configured for plugin startup");
+            .ok_or_else(|| {
+                let error =
+                    "runtime task scheduler host must be configured for plugin startup".to_string();
+                readiness.fail(error.clone());
+                error
+            })?;
+        let hostManager = self.hostManager.clone();
+        let taskReadiness = readiness.clone();
         let startup = move || Box::pin(async move {
             let loadingGeneration = showPluginLoading();
-            packageManager
+            let loadOutcome = packageManager
                 .lock()
-                .expect("package manager mutex poisoned")
-                .loadAvailablePackages();
+                .map_err(|error| error.to_string())
+                .and_then(|mut manager| {
+                    manager.loadAvailablePackages();
+                    manager.packageRegistryReadiness().require_ready()
+                });
+            if let Err(error) = loadOutcome {
+                taskReadiness.fail(error.clone());
+                completePluginLoadingSession(loadingGeneration);
+                AppLogger::e("OperitApplication", &error);
+                return;
+            }
             let starter = MCPStarter::new(hostManager);
             let timeoutSeconds = ApiPreferences::getInstance()
                 .getMcpStartupTimeoutSeconds()
@@ -429,7 +462,11 @@ impl OperitApplication {
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
         taskScheduler
             .scheduleHostRuntimeAsyncTask("operit-plugin-startup", Box::new(startup))
-            .expect("plugin startup task must be scheduled");
+            .map_err(|error| {
+                let error = error.to_string();
+                readiness.fail(error.clone());
+                error
+            })
     }
 
     /// Observes package and plugin loading overlay progress.
@@ -549,16 +586,6 @@ impl OperitApplication {
         }
     }
 
-    /// Creates owner-scoped memory scheduling, profile and history-rebuild controls.
-    pub fn memoryManagementService(&self, ownerKey: String) -> crate::services::MemoryManagementService::MemoryManagementService {
-        crate::services::MemoryManagementService::MemoryManagementService::new(ownerKey,self.providerRuntimeContext.clone())
-    }
-
-    /// Creates a user-markdown repository using this runtime's configured storage host.
-    #[allow(non_snake_case)]
-    pub fn userMarkdownRepository(&self, ownerKey: String) -> UserMarkdownRepository {
-        UserMarkdownRepository::new(ownerKey, defaultRuntimeStorageHost())
-    }
 
     /// Creates an input menu bridge backed by this application's tool package runtime.
     #[allow(non_snake_case)]
@@ -570,6 +597,15 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn chatComposerSlotBridge(&self) -> ToolPkgChatComposerSlotBridge {
         ToolPkgChatComposerSlotBridge::new(self.toolPkgBridgeRuntime.clone())
+    }
+
+    /// Creates an independent theme manager over this application's actual ordinary preference host.
+    #[allow(non_snake_case)]
+    pub fn themeConfigManager(&self) -> Result<ThemeConfigManager, String> {
+        let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
+            "RuntimeStorageHost is not registered for theme configuration".to_string()
+        })?;
+        Ok(ThemeConfigManager::new(storageHost))
     }
 
     /// Returns the shared package manager owned by the initialized tool handler.
@@ -655,15 +691,18 @@ impl OperitApplication {
     }
 
     /// Tests one model connection using this application's provider runtime.
-    pub async fn test_model_connection(
+    pub fn test_model_connection(
         &self,
         provider_id: String,
         model_id: String,
-    ) -> Result<ModelConnectionTestReport, String> {
-        ModelConfigManager::default()
-            .testModelConnection(&provider_id, &model_id, self.providerRuntimeContext.clone())
-            .await
-            .map_err(|error| error.to_string())
+    ) -> impl std::future::Future<Output = Result<ModelConnectionTestReport, String>> + 'static {
+        let runtime = self.providerRuntimeContext.clone();
+        async move {
+            ModelConfigManager::default()
+                .testModelConnection(&provider_id, &model_id, runtime)
+                .await
+                .map_err(|error| error.to_string())
+        }
     }
 
     /// Returns the Cargo package version compiled into the runtime crate.
@@ -754,6 +793,7 @@ impl OperitApplication {
             &mut clock,
             sqlStore.localClock().map_err(|error| error.to_string())?,
         );
+        mergeSyncClock(&mut clock, PluginStorage::localClock(self.pluginSqliteHost()?).map_err(|e|e.to_string())?);
         serde_json::to_value(clock).map_err(|error| error.to_string())
     }
 
@@ -776,6 +816,8 @@ impl OperitApplication {
                 .operationsSince(&clock, &domains, limit)
                 .map_err(|error| error.to_string())?,
         );
+        operations.extend(PluginStorage::operationsSince(self.pluginSqliteHost()?, &clock, &domains, limit).map_err(|e|e.to_string())?);
+        operations.retain(|operation| !crate::data::backup::CharacterPluginMigration::isRetiredCharacterOperation(operation));
         operations.sort_by(|left, right| {
             left.createdAt
                 .cmp(&right.createdAt)
@@ -807,6 +849,10 @@ impl OperitApplication {
         };
         let mut operations: Vec<SyncOperation> =
             serde_json::from_value(operationsValue).map_err(|error| error.to_string())?;
+        if operations.iter().any(crate::data::backup::CharacterPluginMigration::isRetiredCharacterOperation) {
+            return Err("Synchronization contains retired Core character or memory data; migrate the source node before synchronizing".to_string());
+        }
+
         let synchronizedChatIds = operations
             .iter()
             .filter(|operation| operation.domain == CHAT_SYNC_DOMAIN)
@@ -828,6 +874,7 @@ impl OperitApplication {
         let store = self.runtimeSyncOperationStore()?;
         let sqlStore = SqlChatSyncStore::default().map_err(|error| error.to_string())?;
         if forceApply && operations.is_empty() {
+            PluginStorage::prepareSpaceJoin(self.pluginSqliteHost()?).map_err(|e|e.to_string())?;
             store
                 .markLocalOperationsUnexportable()
                 .map_err(|error| error.to_string())?;
@@ -860,7 +907,7 @@ impl OperitApplication {
         for operation in operations {
             if matches!(
                 operation.domain.as_str(),
-                CHAT_SYNC_DOMAIN | BINDING_SYNC_DOMAIN | NETWORK_CONTROL_SYNC_DOMAIN
+                CHAT_SYNC_DOMAIN | BINDING_SYNC_DOMAIN | NETWORK_CONTROL_SYNC_DOMAIN | PLUGIN_STORAGE_SYNC_DOMAIN
             ) {
                 observedDomainOperations.push(operation);
             } else {
@@ -918,8 +965,14 @@ impl OperitApplication {
         // These domain stores record their own clocks. A newer chat/binding
         // operation must not make an earlier failed preference delta disappear
         // from the next synchronization retry.
+        let mut appliedPluginOperations = Vec::new();
         for operation in observedDomainOperations {
             match (operation.domain.as_str(), forceApply) {
+                (PLUGIN_STORAGE_SYNC_DOMAIN, force) => PluginStorage::applyOperation(
+                    self.pluginSqliteHost()?,
+                    self.hostManager.runtimeStorageHost.clone().ok_or("RuntimeStorageHost is not registered")?,
+                    &operation, force,
+                ).map_err(|e|e.to_string()),
                 (CHAT_SYNC_DOMAIN, true) => sqlStore
                     .applyBootstrapOperation(&operation)
                     .map_err(|error| error.to_string()),
@@ -936,6 +989,7 @@ impl OperitApplication {
                 }
                 _ => unreachable!("observed sync domains are classified before materialization"),
             }?;
+            if operation.domain == PLUGIN_STORAGE_SYNC_DOMAIN { appliedPluginOperations.push(operation); }
         }
         if forceApply {
             store
@@ -951,6 +1005,7 @@ impl OperitApplication {
             .map_err(|error| error.to_string())?;
         if let Some(storage) = self.hostManager.runtimeStorageHost.as_ref() {
             operit_store::SyncAppliedChanges::publish(storage, &appliedPersistentOperations);
+            operit_store::SyncAppliedChanges::publish(storage, &appliedPluginOperations);
         }
         self.refreshSynchronizedChatFlows(&synchronizedChatIds)?;
         AppLogger::trace(
@@ -1150,6 +1205,12 @@ impl OperitApplication {
         ))
     }
 
+    /// Requires the existing runtime SQLite Host for plugin storage synchronization.
+    #[allow(non_snake_case)]
+    fn pluginSqliteHost(&self) -> Result<std::sync::Arc<dyn operit_host_api::RuntimeSqliteHost>,String> {
+        self.hostManager.runtimeSqliteHost.clone().ok_or_else(|| "RuntimeSqliteHost is not registered for plugin storage".to_string())
+    }
+
     /// Applies one non-preferences persistent operation to its owning domain.
     #[allow(non_snake_case)]
     fn applyNonPreferenceSyncOperation(&self, operation: &SyncOperation) -> Result<(), String> {
@@ -1158,9 +1219,6 @@ impl OperitApplication {
             operation.entityType.as_str(),
             operation.operation.as_str(),
         ) {
-            (OBJECTBOX_SYNC_DOMAIN, _, _) => {
-                applyObjectBoxSyncOperation(operation).map_err(|error| error.to_string())
-            }
             (RUNTIME_FILE_SYNC_DOMAIN, "file", "upsert" | "delete") => {
                 let storageHost = self.hostManager.runtimeStorageHost.clone().ok_or_else(|| {
                     "RuntimeStorageHost is not registered for persistent sync".to_string()
