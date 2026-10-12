@@ -109,9 +109,8 @@ fn canReview(service: &dyn NodeSpaceContext, node: &str) -> Result<bool, String>
         && service.networkControlStore().nodeHasCapability(node, "network.members.join", None)?
         && service.networkControlStore().nodeHasCapability(node, "network.approval", None)?)
 }
-fn paired(service: &dyn NodeSpaceContext, peer: &str, inbound: bool) -> Result<(), String> {
-    if !service.peers()?.pairedPeers().map_err(|e| e.to_string())?.iter()
-        .any(|p| p.nodeId == peer && if inbound { p.inbound } else { p.outbound }) {
+fn paired(service: &dyn NodeSpaceContext, peer: &str, direction: crate::NodeServices::PairingDirection) -> Result<(), String> {
+    if !service.peers()?.hasPairing(peer, direction).map_err(|e| e.to_string())? {
         return Err("Join request requires a current directional pairing".into());
     }
     Ok(())
@@ -479,7 +478,7 @@ pub(crate) fn leave(service: &dyn NodeSpaceContext) -> Result<CoreSpace, String>
 pub(crate) async fn request(service: &dyn NodeSpaceContext, deviceId: String) -> Result<SpaceJoinRequest, String> {
     let mut retiredStaleSplit = false;
     loop {
-    paired(service, &deviceId, false)?;
+    paired(service, &deviceId, crate::NodeServices::PairingDirection::Outbound)?;
     if let Some(old) = outgoing(service)?.into_iter().find(|r| r.targetDeviceId == deviceId && active(&r.status)) {
         return refresh(service, old.requestId).await;
     }
@@ -619,7 +618,7 @@ pub(crate) fn purgePeerRecords(store: &PeerStateStore, deviceId: &str) -> Result
 /// Receives applicant commands; cancellation never depends on reviewer discovery.
 pub(crate) fn receive(service: &dyn NodeSpaceContext, peer: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
     let _lock = MUTATION.lock().map_err(|e| e.to_string())?;
-    paired(service, peer, true)?;
+    paired(service, peer, crate::NodeServices::PairingDirection::Inbound)?;
     let current = service.spaceStore().initialize()?;
     let now = currentTimeMillis();
     let cancellation = request.methodName == "cancelJoin";
@@ -852,7 +851,7 @@ fn claimDecision(service: &dyn NodeSpaceContext, origin: &str, decision: Decisio
             saveRecord(service, INBOUND, &decision.requestId, &record)?;
             validateAssignment(service, &record, origin, &decision)?;
             if record.request.status == SpaceJoinStatus::Pending {
-                paired(service, &record.request.applicantDeviceId, true)?;
+                paired(service, &record.request.applicantDeviceId, crate::NodeServices::PairingDirection::Inbound)?;
                 record.request.status = SpaceJoinStatus::Approving;
                 record.approvedDecision = Some(decision.approve);
                 record.request.decisionApprove = Some(decision.approve);
@@ -989,7 +988,7 @@ pub(crate) async fn refresh(service: &dyn NodeSpaceContext, id: String) -> Resul
         local = load(service, OUTBOUND, &id)?;
         if !active(&local.request.status) { return Ok(local.request); }
     }
-    paired(service, &local.request.targetDeviceId, false)?;
+    paired(service, &local.request.targetDeviceId, crate::NodeServices::PairingDirection::Outbound)?;
     let mut remote = sendSubmission(service, &local).await?;
     validateResponse(&local, &remote)?;
     // A user cancellation may have committed while this network request was in

@@ -31,8 +31,6 @@ const HOST_TRAITS: &[(&str, &str, &str)] = &[
     ),
     ("js_sdk/chat.rs", "ChatHost", "Chat"),
     ("js_sdk/memory.rs", "MemoryHost", "Memory"),
-    ("js_sdk/edge.rs", "EdgeHost", "Edge"),
-    ("js_sdk/edge.rs", "IoHost", "Io"),
 ];
 
 /// Generates concrete active Tools host trait implementations from canonical Rust signatures.
@@ -419,8 +417,13 @@ function __operitToolsBuildParameters(namespace, method, overloads, args) {
     return parameters;
 }
 
-function __operitInvokeToolsBinding(namespace, method, toolName, overloads, args) {
-    return toolCall(toolName, __operitToolsBuildParameters(namespace, method, overloads, args));
+function __operitInvokeToolsBinding(namespace, method, toolName, overloads, args, receiver) {
+    var parameters = __operitToolsBuildParameters(namespace, method, overloads, args);
+    if (receiver && receiver.__operitDeviceContext) {
+        var device = receiver.__operitDeviceContext;
+        return __operitDeviceToolCall(device.nodeId, "default", toolName, parameters, device.options);
+    }
+    return toolCall(toolName, parameters);
 }
 
 "#,
@@ -440,11 +443,7 @@ function __operitInvokeToolsBinding(namespace, method, toolName, overloads, args
             for segment in namespace.split('.') {
                 expression.push_str(&format!("[\"{segment}\"]"));
                 if initialized_namespaces.insert(expression.clone()) {
-                    if matches!(namespace.as_str(), "Edge" | "Io") {
-                        output.push_str(&format!("{expression} = class {segment} {{ constructor() {{ throw new Error('{segment} is a static class'); }} }};\n"));
-                    } else {
-                        output.push_str(&format!("{expression} = {expression} || {{}};\n"));
-                    }
+                    output.push_str(&format!("{expression} = {expression} || {{}};\n"));
                 }
             }
         }
@@ -536,12 +535,24 @@ function __operitInvokeToolsBinding(namespace, method, toolName, overloads, args
     if chat_namespace_open {
         output.push_str("});\n");
     }
+    output.push_str(r#"
+function __operitCopyToolsNamespaces(source) {
+    var target = {};
+    Object.keys(source).forEach(function(key) {
+        var value = source[key];
+        target[key] = value && typeof value === "object" ? __operitCopyToolsNamespaces(value) : value;
+    });
+    return target;
+}
+var __operitCanonicalTools = __operitCopyToolsNamespaces(Tools);
+"#);
     // Embed the handwritten legacy adapters after the canonical Tools namespace exists.
     for relative_path in [
         "compat/v1/files.js",
         "compat/v1/chat.js",
         "compat/v1/workflow.js",
         "compat/v1/install.js",
+        "DeviceTools.script.js",
     ] {
         output.push('\n');
         output.push_str(&fs::read_to_string(sdk_src.join(relative_path))?);
@@ -560,7 +571,7 @@ fn generated_js_function(
     overloads: &str,
 ) -> String {
     format!(
-        "function({signature}) {{\n    return __operitInvokeToolsBinding(\"{namespace}\", \"{method}\", \"{tool}\", [{overloads}], Array.prototype.slice.call(arguments));\n}}"
+        "function({signature}) {{\n    return __operitInvokeToolsBinding(\"{namespace}\", \"{method}\", \"{tool}\", [{overloads}], Array.prototype.slice.call(arguments), this);\n}}"
     )
 }
 

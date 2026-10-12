@@ -26,7 +26,7 @@
 | 用户硬件界面的持久化设计 | `../../apps/esp32/ui/layout.json` |
 | 控件实际绘制、字体、动作 | `../../apps/esp32/ui_port/operit_mini_ui.c` |
 
-修改网页 CSS 只改变编辑器，不改变设备画面。布局 API 或 JSON 修改只保存草稿；修改当前设备系统页面需编辑共用 C 实现并重建。插件场景由 Core JS/TS 通过 `Tools.Edge` 更新。
+修改网页 CSS 只改变编辑器，不改变设备画面。布局 API 或 JSON 修改只保存草稿；修改当前设备系统页面需编辑共用 C 实现并重建。插件场景由 Core JS/TS 通过 `Tools.device(nodeId).Edge` 更新。
 不要手改 `generated/` 产物；当前固件不生成或应用布局描述头文件。新增前端模块必须同时注册 `src/server.mts` 的静态路由。
 
 ## 布局草稿工具（当前固件不应用）
@@ -133,7 +133,7 @@ OUI2 导出。`pages.js`、`editor.js` 等模块是历史草稿工具，当前�
 
 `scene-renderer.js` 通过开发镜像 `/api/simulator/scene-view` 显示模拟器场景；
 这是网页开发功能，不是市场插件接口。插件仍使用 Core 上的 JS/TS、
-`Tools.Edge.execute` 和 `on_edge_event`，通过现有 Space/Binding 与端侧通信。
+`Tools.device(nodeId).Edge.execute` 和 `on_edge_event`，通过现有 Space/Binding 与端侧通信。
 显示协议与渲染位于端侧可选库 `hosts/common/operit-edge-scene`，Core 不依赖该库。
 
 固定 UI 的 C 静态 RAM、动态分配与 Wasm C 栈读数只描述相应渲染器，

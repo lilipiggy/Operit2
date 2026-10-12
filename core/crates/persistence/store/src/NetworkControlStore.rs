@@ -395,6 +395,21 @@ impl NetworkControlStore {
         self.orderedCommands(&space.spaceId)
     }
 
+    /// Counts the peer control operations this store currently projects.
+    ///
+    /// Projected operations never advance the replication journal, so this
+    /// count is the cheap local signal that this device learned authority
+    /// changes through relaying and owes its peers a projection exchange.
+    #[allow(non_snake_case)]
+    pub fn projectionEntryCount(&self) -> Result<usize, String> {
+        Ok(self
+            .controlProjection
+            .data()
+            .map_err(|error| error.to_string())?
+            .entries()
+            .len())
+    }
+
     /// Reads an archived local policy without transmitting unrelated Spaces.
     #[allow(non_snake_case)]
     pub fn spaceOperations(&self, spaceId: &str) -> Result<Vec<SyncOperation>, String> {

@@ -28,7 +28,7 @@ use crate::{
 pub use crate::NodeSpaceService::{SpaceJoinRequest, SpaceJoinStatus};
 pub(crate) use crate::NodeSpaceService::PeerSpaceSnapshot;
 pub(crate) use crate::NodeSpaceService::{
-    NODE_SPACE_TARGET, NODE_SPACE_APPROVAL_TARGET, NODE_SPACE_CONTROL_TARGET, space_reconcile,
+    NODE_SPACE_TARGET, NODE_SPACE_APPROVAL_TARGET, NODE_SPACE_CONTROL_TARGET,
 };
 use crate::NodeSpaceService::space_join;
 
@@ -669,14 +669,7 @@ impl RuntimeRemoteLinkService {
 
     /// Captures member profiles and control history for direct Space propagation.
     pub(crate) fn peerSpaceSnapshot(&self) -> Result<PeerSpaceSnapshot, String> {
-        let snapshot = PeerSpaceSnapshot {
-            space: self.deviceSpace()?,
-            deviceProfiles: self.spaceStore.deviceProfiles()?.into_values().collect(),
-            controlOperations: self.networkControlStore.currentSpaceOperations()?,
-            topology: self.spaceStore.topologyRecords()?.into_values().collect(),
-        };
-        CoreSpaceStore::validateSpaceProfiles(&snapshot.space, &snapshot.deviceProfiles)?;
-        Ok(snapshot)
+        crate::NodeSpaceService::peerSpaceSnapshot(self)
     }
 
     /// Applies a complete peer projection, following only an approved cross-Space merge.
@@ -688,24 +681,7 @@ impl RuntimeRemoteLinkService {
     pub(crate) fn acceptPeerSpaceCall(
         &self, peerNodeId: &str, request: CoreCallRequest,
     ) -> Result<CoreValue, String> {
-        match request.methodName.as_str() {
-            "snapshot" => toCoreValue(self.peerSpaceSnapshot()?).map_err(|error| error.to_string()),
-            "observeSpaceSnapshot" => {
-                let snapshot: PeerSpaceSnapshot = fromCoreValue(request.args).map_err(|error| error.to_string())?;
-                toCoreValue(self.observePeerSpaceSnapshot(peerNodeId, snapshot)?)
-                    .map_err(|error| error.to_string())
-            },
-            "deviceSpace" => toCoreValue(self.deviceSpace()?).map_err(|error| error.to_string()),
-            "observePairedDeviceSpace" => {
-                let space: CoreSpace = fromCoreValue(request.args).map_err(|error| error.to_string())?;
-                toCoreValue(self.spaceStore.observePairedDeviceSpace(peerNodeId.to_string(), space)?)
-                    .map_err(|error| error.to_string())
-            },
-            "requestJoin" | "joinStatus" | "cancelJoin" => space_join::receive(self, peerNodeId, request),
-            "reconcileSharedSpace" => space_reconcile::receive(self, peerNodeId, request),
-            "join" => Err("SPACE_JOIN_APPROVAL_REQUIRED: Submit a join request for local approval first".into()),
-            _ => Err("Unknown node Space method".into()),
-        }
+        crate::NodeSpaceService::dispatchPeerSpaceCall(self, peerNodeId, request)
     }
 
     pub(crate) async fn acceptSpaceApprovalCall(&self, origin: &str, request: CoreCallRequest) -> Result<CoreValue, String> {

@@ -15,7 +15,7 @@ use operit_plugin_sdk_ipc::PluginSdkLinkTarget;
 use operit_plugin_sdk_ipc_bridge::OperitPluginSdkIpcBridge;
 use operit_runtime::core::application::OperitApplication::OperitApplication;
 
-mod edge_tools;
+mod device_tools;
 
 type LocalClientConfigurator = Box<dyn FnOnce(&mut LocalCoreProxy) -> Result<(), String> + Send>;
 
@@ -129,10 +129,13 @@ impl CoreApplication {
     ) -> Result<Self, String> {
         let nodeRuntime = localClient.coreNodeLocalRuntime();
         let nodeRouter = Arc::new(CoreNodeRouter::new(nodeRuntime.clone()));
-        // Reduced/test hosts may omit asynchronous hardware support. Do not
-        // break Core startup or invent a global scheduler; port calls then fail explicitly.
+        nodeRouter.bindDeviceToolService(localClient.deviceToolService())?;
+        // Reduced/test hosts may omit task scheduling. Device calls then fail
+        // explicitly, while Core startup and synchronous local tools remain available.
         if let Some(scheduler) = localClient.hostManager().hostRuntimeTaskSchedulerHost.clone() {
-            localClient.bindEdgeToolRuntime(Arc::new(edge_tools::CoreEdgeToolRuntime::new(Arc::downgrade(&nodeRouter), scheduler)))?;
+            localClient.bindDeviceToolRuntime(Arc::new(device_tools::CoreDeviceToolRuntime::new(
+                Arc::downgrade(&nodeRouter), scheduler,
+            )))?;
         }
         let accessServices = RuntimeRemoteLinkService::newWithRouter(
             nodeRuntime.clone(), (*nodeRouter).clone(),

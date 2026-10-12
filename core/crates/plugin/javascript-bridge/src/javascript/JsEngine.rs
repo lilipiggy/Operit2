@@ -2117,10 +2117,12 @@ fn dispatchStructuredToolCall(
             reject: false,
         })
     };
+    let mut arguments = arguments;
+    let device = if arguments.len() == 4 { arguments.pop() } else { None };
     let [toolType, toolName, params]: [Value; 3] = match arguments.try_into() {
         Ok(arguments) => arguments,
         Err(_) => {
-            fail("Structured tool call requires three arguments".to_string());
+            fail("Structured tool call requires three arguments and optional device metadata".to_string());
             return;
         }
     };
@@ -2128,23 +2130,39 @@ fn dispatchStructuredToolCall(
         fail("Tool type and name must be strings".to_string());
         return;
     };
-    let request = match JsHostOperations::parseToolCallValue(toolType, toolName, params) {
+    let mut request = match JsHostOperations::parseToolCallValue(toolType, toolName, params) {
         Ok(request) => request,
         Err(error) => {
             fail(error);
             return;
         }
     };
+    if let Some(device) = device {
+        let metadata = serde_json::from_value::<operit_plugin_sdk::javascript::JsDeviceToolCall>(device)
+            .map_err(|error| format!("Invalid device metadata: {error}"))
+            .and_then(|metadata| { metadata.validate()?; Ok(metadata) });
+        match metadata {
+            Ok(metadata) => request.device = Some(metadata),
+            Err(error) => { fail(error); return; }
+        }
+    }
     let Some(executionHost) = executionHost else {
         fail("JavaScript execution host is unavailable".to_string());
         return;
+    };
+    // Reserve device invocations before scheduling so an immediate cancel cannot overtake
+    // the original call. Execution itself remains asynchronous on the host scheduler.
+    let completion = if request.device.is_some() {
+        executionHost.execute_tool_call(request)
+    } else {
+        Box::pin(async move { executionHost.execute_tool_call(request).await })
     };
     let sink = callbackSink.clone();
     let scheduled = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
         "operit-js-tool-call",
         Box::new(move || {
             Box::pin(async move {
-                let result = executionHost.execute_tool_call(request).await;
+                let result = completion.await;
                 sink(JsAsyncCallback::Promise {
                     requestId,
                     result: JsHostOperations::toolExecutionResultValue(result),

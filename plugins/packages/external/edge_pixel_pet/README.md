@@ -1,6 +1,6 @@
 # 像素桌宠 Core ToolPkg 示例
 
-随 Core 分发在「内置更多包」，**不会默认导入或开启**。使用现有 ToolPkg 运行时与 `Tools.Edge.execute`，不在 Edge 执行 JS。
+随 Core 分发在「内置更多包」，**不会默认导入或开启**。使用现有 ToolPkg 运行时与 `Tools.device(nodeId).Edge.execute`，不在 Edge 执行 JS。
 协议见 `plugins/docs/edge-scene.md`。原件保存在本包的 `resources/demo.esp`；
 生成器、源代码和编译后的 CommonJS 同包分发。
 
@@ -48,7 +48,7 @@ core plugin enable com.operit.edge_pixel_pet
 
 ## 端侧前提与示例范围
 
-Core SDK 需提供 `Tools.Edge` 与 `on_edge_event`；已配对的目标 Edge 需有现有
+Core SDK 需提供 `Tools.device(nodeId).Edge` 与 `on_edge_event`；已配对的目标 Edge 需有现有
 设备空间/Binding 和兼容 `display.scene` 服务。公共 Edge 节点库不内置渲染器，
 端侧应用通过可选 `hosts/common/operit-edge-scene` 注册服务。场景下发和事件使用
 原有设备空间连接，插件不使用编辑器的 HTTP 镜像或另建网络后端。

@@ -16,6 +16,54 @@ pub struct JsToolCallRequest {
     pub tool_type: String,
     pub tool_name: String,
     pub parameters: BTreeMap<String, Value>,
+    /// Transport-owned device selection, kept separate from tool arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<JsDeviceToolCall>,
+}
+
+/// Selects an explicit Core device and the lifetime of one invocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JsDeviceToolCall {
+    pub node_id: String,
+    pub invocation_id: String,
+    #[serde(default)]
+    pub action: JsDeviceToolAction,
+    #[serde(default = "defaultDeviceToolTimeout")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JsDeviceToolAction {
+    #[default]
+    Execute,
+    /// Executes a firmware-declared hardware port on the selected device.
+    Port,
+    Catalog,
+    Cancel,
+}
+
+#[allow(non_snake_case)]
+fn defaultDeviceToolTimeout() -> u64 {
+    120_000
+}
+
+impl JsDeviceToolCall {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [("nodeId", &self.node_id), ("invocationId", &self.invocation_id)] {
+            if value.is_empty()
+                || value.len() > 256
+                || value.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(format!("Invalid device tool {name}"));
+            }
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > 86_400_000 {
+            return Err("Device timeoutMs must be an integer between 1 and 86400000".into());
+        }
+        Ok(())
+    }
 }
 
 impl JsToolCallRequest {

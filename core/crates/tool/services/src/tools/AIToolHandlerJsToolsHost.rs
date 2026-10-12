@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use operit_plugin_sdk::javascript::{JsExecutionHost, JsToolCallRequest, JsToolCallResultData};
 use operit_plugin_sdk::js_sdk::chat::*;
 use operit_plugin_sdk::js_sdk::files::*;
-use operit_plugin_sdk::js_sdk::edge::*;
 use operit_plugin_sdk::js_sdk::memory::*;
 use operit_plugin_sdk::js_sdk::network::*;
 use operit_plugin_sdk::js_sdk::results::*;
@@ -197,6 +196,7 @@ where
         tool_type: "default".to_string(),
         tool_name: name.as_str().to_string(),
         parameters,
+        device: None,
     });
     let host = host.clone();
     Box::pin(async move {

@@ -3,7 +3,7 @@
 > 当前能力说明（2026-10-10）：唯一系统 UI 渲染器是
 > `apps/esp32/ui_port/operit_mini_ui.c`，C ABI 为 `operit_ui_*`。
 > 以下布局/组件协议保留为草稿与存储工具；当前固定自绘 UI 不应用布局包，
-> 固定 UI 不应用布局草稿，不提供拖拽控件或软键盘。聊天图片预览和插件场景是独立能力；系统页面修改需重建，插件场景使用 Core 上的 Tools.Edge。
+> 固定 UI 不应用布局草稿，不提供拖拽控件或软键盘。聊天图片预览和插件场景是独立能力；系统页面修改需重建，插件场景使用 Core 上的 Tools.device(nodeId).Edge。
 > 历史控件布局能力不能视为当前设备能力；以 `/api/board` capabilities 为准。
 
 
@@ -102,7 +102,7 @@ The user's request is to implement behavior in the project, not merely generate 
 
 补丁新增 `addPage {page}`、`updatePage {id,changes}`、`removePage {id}`；`add` 可带 pageId。删除页面清除所有入向路由，首页/当前启动页不能直接删除。矩阵推荐 panel+独立 child button；不要把用户交互做成不可选中的内部控件。
 
-保存只修改 `apps/esp32/ui/layout.json` 草稿，不自动改写 C，不启动编译，也不应用到固定 UI。`package-layout.mts` 仅导出 OUI2 草稿；`/api/deploy/layout` 与 `/api/deploy/usb-layout` 当前在联系设备前拒绝。改变系统页面需修改 C/Rust 并显式构建；插件素材/业务更新则走 Core ToolPkg 和 `Tools.Edge`。详见 FRONTEND.md 与 `plugins/docs/edge-plugin-guide.md`。
+保存只修改 `apps/esp32/ui/layout.json` 草稿，不自动改写 C，不启动编译，也不应用到固定 UI。`package-layout.mts` 仅导出 OUI2 草稿；`/api/deploy/layout` 与 `/api/deploy/usb-layout` 当前在联系设备前拒绝。改变系统页面需修改 C/Rust 并显式构建；插件素材/业务更新则走 Core ToolPkg 和 `Tools.device(nodeId).Edge`。详见 FRONTEND.md 与 `plugins/docs/edge-plugin-guide.md`。
 
 AI 开发任务 kind `operit.hardware.task` 带 task/context；context 包含当前完整草稿、页面/组件ID、JSON pointer、实际源码行号与 revision。默认发到软件当前对话；独立API通过 `/api/ai/develop` 返回审阅提案。密钥不得写入项目。
 

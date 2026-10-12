@@ -2,7 +2,8 @@ use crate::PeerSync::{PeerSyncMethod, NODE_SYNC_TARGET};
 use async_trait::async_trait;
 use operit_link::{RoutedCoreRequest, RoutedCoreRequestKind};
 use crate::RuntimePeerService::RuntimePeerService;
-use crate::NodeServices::NodeServices;
+use crate::NodeServices::{NodeServices, PairingDirection};
+use crate::space_policy::RoutingPolicy;
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::RuntimeStorageHost;
 use operit_link::route_runtime::CoreRouteRuntime;
@@ -28,6 +29,12 @@ use crate::RuntimeRemoteLinkService::{
 
 #[path = "peer/sync_dispatch.rs"]
 mod sync_dispatch;
+#[path = "route_forwarding.rs"]
+mod route_forwarding;
+use route_forwarding::{requireRouteMember, requireRoutableTarget, RouteParticipant};
+#[path = "device_tools.rs"]
+mod device_tools;
+use operit_tools::tools::DeviceTools::{DeviceToolService, DEVICE_TOOL_TARGET};
 
 // An event sender may not impersonate another Edge or use Target to bypass the
 // Binding permission path. Called only after normal incoming-route validation.
@@ -83,6 +90,7 @@ struct CoreNodePushState {
 /// Routes incoming Core Link traffic through CoreNode Binding and Space routing state.
 #[derive(Clone)]
 pub struct CoreNodeRouter {
+    deviceToolService: Arc<std::sync::OnceLock<Arc<dyn DeviceToolService>>>,
     peerServices: Arc<std::sync::OnceLock<NodeServices>>,
     localCore: Arc<CoreNodeLocalRuntime>,
     bindingStore: Arc<dyn CoreNodeBindingRuntime>,
@@ -307,6 +315,7 @@ impl CoreNodeRouter {
             }))
             .expect("CoreNodeRouter requires tool routing state registration");
         let router = Self {
+            deviceToolService: Arc::new(std::sync::OnceLock::new()),
             peerServices,
             localCore,
             bindingStore,
@@ -328,6 +337,21 @@ impl CoreNodeRouter {
     #[allow(non_snake_case)]
     pub fn targetForSchema(&self, schema: &str) -> Option<&'static str> {
         self.localCore.targetForSchema(schema)
+    }
+
+    /// Test support: installs a minimal application call client so contract
+    /// fixtures can exercise persistence synchronization without the full
+    /// application runtime. Must run before the router is wired into endpoints.
+    #[cfg(test)]
+    pub(crate) fn installTestApplicationClient(
+        &mut self,
+        client: Arc<dyn operit_link::CoreLinkSharedClient + Send + Sync>,
+    ) {
+        let runtime = Arc::make_mut(&mut self.localCore);
+        runtime.targetForSchema = Arc::new(|schema: &str| {
+            if schema == "application" { Some("core/server.application") } else { None }
+        });
+        runtime.applicationClient = client;
     }
 
     /// Opens a push stream whose CoreNode route remains fixed for its lifetime.
@@ -579,16 +603,7 @@ impl CoreNodeRouter {
     /// A transport grant is usable only after both memberships have been
     /// admitted by the current Space control log; mere pairing is insufficient.
     pub(crate) fn spaceChannelScope(&self, peer: &str) -> Result<Option<String>, CoreLinkError> {
-        let space = self.spaceStore.space().map_err(CoreLinkError::internal)?;
-        let control = self.networkControlStore.currentState().map_err(CoreLinkError::internal)?;
-        let members = [&self.localNodeId, &peer.to_string()];
-        if peer == self.localNodeId || !control.initialized || control.spaceId != space.spaceId
-            || members.iter().any(|node| !space.members.contains(node)
-                || !control.memberNodeIds.contains(*node)
-                || control.disconnectedNodeIds.contains(*node)) {
-            return Ok(None);
-        }
-        Ok(Some(space.spaceId))
+        crate::space_policy::spaceChannelScope(&self.spaceStore, &self.networkControlStore, &self.localNodeId, peer)
     }
 
     /// Reports whether the active Peer Link graph currently proves one device reachable.
@@ -663,22 +678,8 @@ impl CoreNodeRouter {
                 "Explicit routed target is the local CoreNode",
             ));
         }
-        if !space.members.iter().any(|member| member == &targetNodeId) {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_NOT_IN_SPACE",
-                format!("CoreNode is not a Space member: {targetNodeId}"),
-            ));
-        }
-        if self
-            .networkControlStore
-            .nodeIsDisconnected(&targetNodeId)
-            .map_err(CoreLinkError::internal)?
-        {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_REVOKED",
-                format!("CoreNode is revoked from routing: {targetNodeId}"),
-            ));
-        }
+        let policy = RoutingPolicy::load(&self.networkControlStore).map_err(CoreLinkError::internal)?;
+        requireRouteMember(&space, &policy, &targetNodeId, RouteParticipant::Target)?;
         let ttl = routeTtl(&space)?;
         Ok(RoutedCoreRequest {
             spaceId: space.spaceId.clone(),
@@ -710,42 +711,9 @@ impl CoreNodeRouter {
         excludedPeerNodeIds: &BTreeSet<String>,
         mut request: RoutedCoreRequest<T>,
     ) -> Result<(Arc<dyn RuntimePeerService>, String, RoutedCoreRequest<T>), CoreLinkError> {
-        let space = self
-            .spaceStore
-            .initialize()
-            .map_err(CoreLinkError::internal)?;
-        if request.spaceId != space.spaceId {
-            return Err(CoreLinkError::new(
-                "SPACE_ID_MISMATCH",
-                format!(
-                    "Routed request targets Space {}, local Space is {}",
-                    request.spaceId, space.spaceId
-                ),
-            ));
-        }
-        if !space
-            .members
-            .iter()
-            .any(|member| member == &request.targetNodeId)
-        {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_NOT_IN_SPACE",
-                format!("CoreNode is not a Space member: {}", request.targetNodeId),
-            ));
-        }
-        if self
-            .networkControlStore
-            .nodeIsDisconnected(&request.targetNodeId)
-            .map_err(CoreLinkError::internal)?
-        {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_REVOKED",
-                format!(
-                    "Routed request targets a revoked CoreNode: {}",
-                    request.targetNodeId
-                ),
-            ));
-        }
+        let space = self.requireRouteSpace(&request.spaceId)?;
+        let policy = RoutingPolicy::load(&self.networkControlStore).map_err(CoreLinkError::internal)?;
+        requireRouteMember(&space, &policy, &request.targetNodeId, RouteParticipant::Target)?;
         if request.ttl == 0 {
             return Err(CoreLinkError::new(
                 "CORE_NODE_ROUTE_TTL_EXHAUSTED",
@@ -756,13 +724,8 @@ impl CoreNodeRouter {
             request.targetNodeId.clone(),
             previousNodeId,
             excludedPeerNodeIds,
+            &policy,
         )?;
-        if previousNodeId == Some(nextNodeId.as_str()) {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_ROUTE_LOOP",
-                format!("Routed Core request would return to {nextNodeId}"),
-            ));
-        }
         request.ttl -= 1;
         let services = self.peerServices.get().ok_or_else(||
             CoreLinkError::new("PEER_SERVICE_UNAVAILABLE", "RuntimePeerService has not been installed"))?;
@@ -776,6 +739,7 @@ impl CoreNodeRouter {
         targetNodeId: String,
         previousNodeId: Option<&str>,
         excludedPeerNodeIds: &BTreeSet<String>,
+        policy: &RoutingPolicy,
     ) -> Result<String, CoreLinkError> {
         let mut peers = self.nodeServices().map_err(CoreLinkError::internal)?.peers().activePeerNodeIds()?;
         if let Some(previousNodeId) = previousNodeId {
@@ -784,22 +748,9 @@ impl CoreNodeRouter {
         for peerNodeId in excludedPeerNodeIds {
             peers.remove(peerNodeId);
         }
-        let (blockedNodeIds, transitNodeIds) = self
-            .networkControlStore
-            .routingPolicySnapshot()
-            .map_err(CoreLinkError::internal)?;
-        for peerNodeId in blockedNodeIds {
-            peers.remove(&peerNodeId);
-        }
         let activePeers = peers.iter().cloned().collect::<Vec<_>>();
-        let nextHop = self
-            .spaceStore
-            .reachableNextHopThroughPeersWithTransitNodes(
-                targetNodeId.clone(),
-                peers,
-                transitNodeIds,
-            )
-            .map_err(CoreLinkError::internal)?;
+        let nextHop = policy.routePlan(&self.localNodeId, &self.spaceStore, &targetNodeId, &peers)
+            .map_err(CoreLinkError::internal)?.map(|plan| plan.firstHop().to_owned());
         if nextHop.is_none() {
             AppLogger::v_with_level(
                 "CoreNodeRouter",
@@ -818,92 +769,33 @@ impl CoreNodeRouter {
         })
     }
 
+    fn requireRouteSpace(&self, spaceId: &str) -> Result<CoreSpace, CoreLinkError> {
+        let space = self.spaceStore.initialize().map_err(CoreLinkError::internal)?;
+        if spaceId != space.spaceId {
+            return Err(CoreLinkError::new(
+                "SPACE_ID_MISMATCH",
+                format!("Routed request targets Space {spaceId}, local Space is {}", space.spaceId),
+            ));
+        }
+        Ok(space)
+    }
+
     /// Validates an incoming routed envelope and reports whether this CoreNode is the target.
     fn validateIncomingRoute<T>(
         &self,
         previousNodeId: &str,
         request: &RoutedCoreRequest<T>,
     ) -> Result<bool, CoreLinkError> {
-        let space = self
-            .spaceStore
-            .initialize()
-            .map_err(CoreLinkError::internal)?;
-        if request.spaceId != space.spaceId {
-            return Err(CoreLinkError::new(
-                "SPACE_ID_MISMATCH",
-                format!(
-                    "Routed request targets Space {}, local Space is {}",
-                    request.spaceId, space.spaceId
-                ),
-            ));
+        let space = self.requireRouteSpace(&request.spaceId)?;
+        let policy = RoutingPolicy::load(&self.networkControlStore).map_err(CoreLinkError::internal)?;
+        for (node, role) in [
+            (previousNodeId, RouteParticipant::Previous),
+            (request.originNodeId.as_str(), RouteParticipant::Origin),
+            (request.targetNodeId.as_str(), RouteParticipant::Target),
+        ] {
+            requireRouteMember(&space, &policy, node, role)?;
         }
-        if !space.members.iter().any(|member| member == previousNodeId) {
-            return Err(CoreLinkError::new(
-                "PREVIOUS_CORE_NODE_NOT_IN_SPACE",
-                format!("Previous CoreNode is not a Space member: {previousNodeId}"),
-            ));
-        }
-        if self
-            .networkControlStore
-            .nodeIsDisconnected(previousNodeId)
-            .map_err(CoreLinkError::internal)?
-        {
-            return Err(CoreLinkError::new(
-                "PREVIOUS_CORE_NODE_REVOKED",
-                format!("Previous CoreNode is revoked: {previousNodeId}"),
-            ));
-        }
-        if !space
-            .members
-            .iter()
-            .any(|member| member == &request.originNodeId)
-        {
-            return Err(CoreLinkError::new(
-                "ORIGIN_CORE_NODE_NOT_IN_SPACE",
-                format!(
-                    "Origin CoreNode is not a Space member: {}",
-                    request.originNodeId
-                ),
-            ));
-        }
-        if self
-            .networkControlStore
-            .nodeIsDisconnected(&request.originNodeId)
-            .map_err(CoreLinkError::internal)?
-        {
-            return Err(CoreLinkError::new(
-                "ORIGIN_CORE_NODE_REVOKED",
-                format!(
-                    "Origin CoreNode is revoked: {}",
-                    request.originNodeId
-                ),
-            ));
-        }
-        if !space
-            .members
-            .iter()
-            .any(|member| member == &request.targetNodeId)
-        {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_NOT_IN_SPACE",
-                format!("CoreNode is not a Space member: {}", request.targetNodeId),
-            ));
-        }
-        if self
-            .networkControlStore
-            .nodeIsDisconnected(&request.targetNodeId)
-            .map_err(CoreLinkError::internal)?
-        {
-            return Err(CoreLinkError::new(
-                "CORE_NODE_REVOKED",
-                format!(
-                    "Routed request targets a revoked CoreNode: {}",
-                    request.targetNodeId
-                ),
-            ));
-        }
-        let atTarget = request.targetNodeId == self.localNodeId;
-        Ok(atTarget)
+        Ok(request.targetNodeId == self.localNodeId)
     }
 
     /// Executes one call on an explicit target CoreNode.
@@ -915,7 +807,7 @@ impl CoreNodeRouter {
     ) -> CoreCallResponse {
         if request.target == NODE_SPACE_TARGET {
             let requestId = request.requestId.clone();
-            if let Err(error) = self.requireDirectPeer(&targetNodeId, false) {
+            if let Err(error) = self.requireDirectPeer(&targetNodeId, PairingDirection::Outbound) {
                 return CoreCallResponse::err(requestId, error);
             }
             let space = match self.spaceStore.initialize() {
@@ -983,26 +875,7 @@ impl CoreNodeRouter {
             Ok(value) => value,
             Err(error) => return CoreCallResponse::err(requestId, error),
         };
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                match self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone()) {
-                    Ok(value) => value,
-                    Err(error) => return CoreCallResponse::err(requestId, error),
-                };
-            let response = peer.call(&peerNodeId, forwardedRoute).await;
-            if response
-                .result
-                .as_ref()
-                .err()
-                .map(isRouteUnavailableError)
-                .unwrap_or(false)
-            {
-                excludedPeerNodeIds.insert(peerNodeId);
-                continue;
-            }
-            return response;
-        }
+        self.forwardCall(None, route).await
     }
 
     /// Executes one annotation-addressed Space call through Binding-selected routing.
@@ -1156,17 +1029,7 @@ impl CoreNodeRouter {
         originNodeId: String,
     ) -> Result<CoreEvent, CoreLinkError> {
         let route = self.initialRouteWithOrigin(targetNodeId, request, originNodeId)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.watchSnapshot(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatchSnapshot(None, route).await
     }
 
     /// Opens one watch on an explicit target CoreNode.
@@ -1188,17 +1051,7 @@ impl CoreNodeRouter {
         originNodeId: String,
     ) -> Result<CoreEventStream, CoreLinkError> {
         let route = self.initialRouteWithOrigin(targetNodeId, request, originNodeId)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.watch(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatch(None, route).await
     }
 
     /// Reads one annotation-addressed Space watch snapshot through Binding routing.
@@ -1338,17 +1191,7 @@ impl CoreNodeRouter {
         request: CorePushRequest,
     ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
         let route = self.initialRoute(targetNodeId, request)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.openPush(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardPush(None, route).await
     }
 
     /// Reads one Space watch snapshot while preserving its original caller identity.
@@ -1359,17 +1202,7 @@ impl CoreNodeRouter {
         originNodeId: String,
     ) -> Result<CoreEvent, CoreLinkError> {
         let route = self.initialSpaceRouteWithOrigin(targetNodeId, request, originNodeId)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.watchSnapshot(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatchSnapshot(None, route).await
     }
 
     /// Opens one Space watch while preserving its original caller identity.
@@ -1380,17 +1213,7 @@ impl CoreNodeRouter {
         originNodeId: String,
     ) -> Result<CoreEventStream, CoreLinkError> {
         let route = self.initialSpaceRouteWithOrigin(targetNodeId, request, originNodeId)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.watch(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatch(None, route).await
     }
 
     /// Opens one Space push on an explicit CoreNode while preserving its caller.
@@ -1401,17 +1224,7 @@ impl CoreNodeRouter {
         originNodeId: String,
     ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
         let route = self.initialSpaceRouteWithOrigin(targetNodeId, request, originNodeId)?;
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRoute) =
-                self.forwardRouteAvoiding(None, &excludedPeerNodeIds, route.clone())?;
-            match peer.openPush(&peerNodeId, forwardedRoute).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardPush(None, route).await
     }
 
     /// Opens one annotation-addressed Space push through Binding routing.
@@ -1454,6 +1267,9 @@ impl CoreNodeRouter {
     #[allow(non_snake_case)]
     async fn executeLocalCall(&self, request: CoreCallRequest) -> CoreCallResponse {
         let requestId = request.requestId.clone();
+        if request.target == DEVICE_TOOL_TARGET {
+            return CoreCallResponse::err(requestId, CoreLinkError::new("DEVICE_TOOL_MODE_INVALID", "Device tools require a cancellable watch"));
+        }
         let applicationObjectId = self.localCore.targetForSchema("application");
         let isApplicationCall =
             applicationObjectId.is_some_and(|objectId| objectId == request.target);
@@ -1901,18 +1717,13 @@ impl CoreNodeToolRuntime for CoreNodeToolRouteRuntime {
         let peers = self.peerServices.get()
             .ok_or_else(|| "Node services are not installed".to_string())?
             .peers().activePeerNodeIds().map_err(|error| error.to_string())?;
+        let policy = RoutingPolicy::load(&self.networkControlStore)?;
         let mut nodes = Vec::with_capacity(space.members.len());
         for nodeId in space.members {
             let profile = profiles.get(&nodeId).ok_or_else(|| {
                 format!("Device profile is missing in the current device space: {nodeId}")
             })?;
-            let plan = coreNodeRoutePlanThroughPeers(
-                &self.localNodeId,
-                &self.spaceStore,
-                &self.networkControlStore,
-                &nodeId,
-                &peers,
-            )?;
+            let plan = policy.routePlan(&self.localNodeId, &self.spaceStore, &nodeId, &peers)?;
             // Any resolved plan proves reachability, including the single-hop
             // plan of a directly paired peer; relay metadata stays multi-hop only.
             let reachable = nodeId == self.localNodeId || plan.is_some();
@@ -1971,37 +1782,7 @@ fn coreNodeRoutePlanThroughPeers(
     targetNodeId: &str,
     peers: &BTreeSet<String>,
 ) -> Result<Option<CoreSpaceRoutePlan>, String> {
-    if targetNodeId == localNodeId {
-        return Ok(None);
-    }
-    if networkControlStore.nodeIsDisconnected(targetNodeId)? {
-        return Ok(None);
-    }
-    if !spaceStore.contains(targetNodeId.to_string())? {
-        return Ok(None);
-    }
-    let permittedPeers = permittedActivePeers(networkControlStore, peers)?;
-    let transitNodeIds = networkControlStore.relayNodeIds()?;
-    spaceStore.routePlanThroughPeersWithTransitNodes(
-        targetNodeId.to_string(),
-        permittedPeers,
-        transitNodeIds,
-    )
-}
-
-/// Removes peers the current Space policy has disconnected from one active Peer Link snapshot.
-#[allow(non_snake_case)]
-fn permittedActivePeers(
-    networkControlStore: &NetworkControlStore,
-    peers: &BTreeSet<String>,
-) -> Result<BTreeSet<String>, String> {
-    let mut permittedPeers = peers.clone();
-    for nodeId in peers {
-        if networkControlStore.nodeIsDisconnected(nodeId)? {
-            permittedPeers.remove(nodeId);
-        }
-    }
-    Ok(permittedPeers)
+    RoutingPolicy::load(networkControlStore)?.routePlan(localNodeId, spaceStore, targetNodeId, peers)
 }
 
 /// Resolves the route that produced one embedded stream descriptor.
@@ -2096,19 +1877,6 @@ fn routeTtl(space: &CoreSpace) -> Result<u32, CoreLinkError> {
         .map_err(|_| CoreLinkError::new("SPACE_TOO_LARGE", "Space member count exceeds u32"))
 }
 
-/// Returns whether a routed operation failed before reaching its selected device.
-#[allow(non_snake_case)]
-fn isRouteUnavailableError(error: &CoreLinkError) -> bool {
-    matches!(
-        error.code.as_str(),
-        "CORE_NODE_UNREACHABLE"
-            | "PEER_LINK_CLOSED"
-            | "PEER_RESPONSE_CLOSED"
-            | "PEER_SEND_FAILED"
-            | "PEER_WATCH_SOURCE_CLOSED"
-    )
-}
-
 #[async_trait(?Send)]
 impl CoreLinkClient for CoreNodeRouter {
     /// Executes a one-shot request through the route selected by runtime state.
@@ -2142,11 +1910,10 @@ impl CoreLinkClient for CoreNodeRouter {
 // 接收入口只接受 runtime 已鉴权的相邻节点；传输层不能直接把自报身份传进来。
 impl CoreNodeRouter {
     /// Space 加入前只允许直接配对的业务 Call；出入授权不互相推导。
-    fn requireDirectPeer(&self, peerNodeId: &str, inbound: bool) -> Result<(), CoreLinkError> {
-        let peers = self.nodeServices().map_err(CoreLinkError::internal)?.peers().pairedPeers()?;
-        if peerNodeId == self.localNodeId || !peers.iter().any(|peer|
-            peer.nodeId == peerNodeId && if inbound { peer.inbound } else { peer.outbound }
-        ) {
+    fn requireDirectPeer(&self, peerNodeId: &str, direction: PairingDirection) -> Result<(), CoreLinkError> {
+        if peerNodeId == self.localNodeId || !self.nodeServices()
+            .map_err(CoreLinkError::internal)?.peers().hasPairing(peerNodeId, direction)?
+        {
             return Err(CoreLinkError::new("PEER_NOT_AUTHORIZED", "Direct directional pairing is required"));
         }
         if self.networkControlStore.nodeIsDisconnected(peerNodeId).map_err(CoreLinkError::internal)? {
@@ -2164,10 +1931,8 @@ impl CoreNodeRouter {
         request: RoutedCoreRequest<CoreCallRequest>,
     ) -> CoreCallResponse {
         let requestId = request.payload.requestId.clone();
-        if request.payload.target.starts_with("core/server.") {
-            return CoreCallResponse::err(requestId, CoreLinkError::new(
-                "LOCAL_MANAGEMENT_ONLY", "Node management is only available to the local application",
-            ));
+        if let Err(error) = requireRoutableTarget(&request.payload.target) {
+            return CoreCallResponse::err(requestId, error);
         }
         if request.payload.target == NODE_SPACE_TARGET {
             let result = (|| {
@@ -2178,7 +1943,7 @@ impl CoreNodeRouter {
                 {
                     return Err(CoreLinkError::new("PEER_DIRECT_CALL_REQUIRED", "Node Space calls cannot be relayed"));
                 }
-                self.requireDirectPeer(&previousNodeId, true)?;
+                self.requireDirectPeer(&previousNodeId, PairingDirection::Inbound)?;
                 RuntimeRemoteLinkService::newWithRouter((*self.localCore).clone(), self.clone())
                     .acceptPeerSpaceCall(&previousNodeId, request.payload)
                     .map_err(CoreLinkError::internal)
@@ -2197,11 +1962,14 @@ impl CoreNodeRouter {
             {
                 Err(error) => return CoreCallResponse::err(requestId, error),
                 Ok((true, method)) => return self.dispatchPeerSyncCall(method, request.payload).await,
-                Ok((false, _)) => {} // Preserve the protocol target when relaying.
+                Ok((false, _)) => return self.forwardCall(Some(&previousNodeId), request).await,
             }
         }
         match self.validateIncomingRoute(&previousNodeId, &request) {
             Ok(true) => {
+                if request.payload.target == DEVICE_TOOL_TARGET {
+                    return CoreCallResponse::err(requestId, CoreLinkError::new("DEVICE_TOOL_MODE_INVALID", "Device tools require a cancellable watch"));
+                }
                 if let Err(error) = validateEdgeEventOrigin(&request.payload, &request.originNodeId, request.routeKind) {
                     return CoreCallResponse::err(requestId, error);
                 }
@@ -2238,31 +2006,7 @@ impl CoreNodeRouter {
                     self.executeLocalCall(request.payload).await
                 }
             }
-            Ok(false) => {
-                let mut excludedPeerNodeIds = BTreeSet::new();
-                loop {
-                    let (peer, peerNodeId, forwardedRequest) = match self.forwardRouteAvoiding(
-                        Some(&previousNodeId),
-                        &excludedPeerNodeIds,
-                        request.clone(),
-                    ) {
-                        Ok(value) => value,
-                        Err(error) => return CoreCallResponse::err(requestId, error),
-                    };
-                            let response = peer.call(&peerNodeId, forwardedRequest).await;
-                    if response
-                        .result
-                        .as_ref()
-                        .err()
-                        .map(isRouteUnavailableError)
-                        .unwrap_or(false)
-                    {
-                        excludedPeerNodeIds.insert(peerNodeId);
-                        continue;
-                    }
-                    return response;
-                }
-            }
+            Ok(false) => self.forwardCall(Some(&previousNodeId), request).await,
             Err(error) => CoreCallResponse::err(requestId, error),
         }
     }
@@ -2275,9 +2019,7 @@ impl CoreNodeRouter {
         request: RoutedCoreRequest<CoreWatchRequest>,
     ) -> Result<CoreEvent, CoreLinkError> {
         // 节点控制 Service 是本机 Proxy 表面；远端只能进入业务路由。
-        if request.payload.target.starts_with("core/server.") {
-            return Err(CoreLinkError::new("LOCAL_MANAGEMENT_ONLY", "Node management is only available to the local application"));
-        }
+        requireRoutableTarget(&request.payload.target)?;
 
         if self.validateIncomingRoute(&previousNodeId, &request)? {
             if request.routeKind == RoutedCoreRequestKind::SpaceBinding {
@@ -2292,20 +2034,7 @@ impl CoreNodeRouter {
                 operit_link::withCoreForceLocal(self.localCore.watchSnapshot(request.payload)).await
             };
         }
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRequest) = self.forwardRouteAvoiding(
-                Some(&previousNodeId),
-                &excludedPeerNodeIds,
-                request.clone(),
-            )?;
-            match peer.watchSnapshot(&peerNodeId, forwardedRequest).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatchSnapshot(Some(&previousNodeId), request).await
     }
 
     /// Executes or forwards one routed watch.
@@ -2316,9 +2045,7 @@ impl CoreNodeRouter {
         request: RoutedCoreRequest<CoreWatchRequest>,
     ) -> Result<CoreEventStream, CoreLinkError> {
         // 节点控制 Service 是本机 Proxy 表面；远端只能进入业务路由。
-        if request.payload.target.starts_with("core/server.") {
-            return Err(CoreLinkError::new("LOCAL_MANAGEMENT_ONLY", "Node management is only available to the local application"));
-        }
+        requireRoutableTarget(&request.payload.target)?;
 
         let atTarget = self.validateIncomingRoute(&previousNodeId, &request)?;
         operit_util::AppLogger::AppLogger::trace(
@@ -2337,6 +2064,9 @@ impl CoreNodeRouter {
             ),
         );
         if atTarget {
+            if request.payload.target == DEVICE_TOOL_TARGET {
+                return self.openDeviceToolWatch(request.payload, request.originNodeId, request.routeKind);
+            }
             if request.routeKind == RoutedCoreRequestKind::SpaceBinding {
                 return self
                     .watchSpaceWithOrigin(request.payload, request.originNodeId)
@@ -2351,20 +2081,7 @@ impl CoreNodeRouter {
                 operit_link::withCoreForceLocal(self.localCore.watch(request.payload)).await
             };
         }
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRequest) = self.forwardRouteAvoiding(
-                Some(&previousNodeId),
-                &excludedPeerNodeIds,
-                request.clone(),
-            )?;
-            match peer.watch(&peerNodeId, forwardedRequest).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardWatch(Some(&previousNodeId), request).await
     }
 
     /// Executes or forwards one routed push open.
@@ -2375,9 +2092,7 @@ impl CoreNodeRouter {
         request: RoutedCoreRequest<CorePushRequest>,
     ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
         // 节点控制 Service 是本机 Proxy 表面；远端只能进入业务路由。
-        if request.payload.target.starts_with("core/server.") {
-            return Err(CoreLinkError::new("LOCAL_MANAGEMENT_ONLY", "Node management is only available to the local application"));
-        }
+        requireRoutableTarget(&request.payload.target)?;
 
         if request.payload.target == NODE_SYNC_TARGET {
             let atTarget = self.validatePeerSyncRoute(&previousNodeId, &request)?;
@@ -2387,6 +2102,7 @@ impl CoreNodeRouter {
                 let inner = self.dispatchPeerSyncPush(request.payload)?;
                 return Ok(self.guardPeerSyncPush(request.originNodeId, request.targetNodeId, request.spaceId, inner));
             }
+            return self.forwardPush(Some(&previousNodeId), request).await;
         }
         if self.validateIncomingRoute(&previousNodeId, &request)? {
             if request.routeKind == RoutedCoreRequestKind::SpaceBinding {
@@ -2401,20 +2117,7 @@ impl CoreNodeRouter {
                 self.localCore.openPush(request.payload)
             };
         }
-        let mut excludedPeerNodeIds = BTreeSet::new();
-        loop {
-            let (peer, peerNodeId, forwardedRequest) = self.forwardRouteAvoiding(
-                Some(&previousNodeId),
-                &excludedPeerNodeIds,
-                request.clone(),
-            )?;
-            match peer.openPush(&peerNodeId, forwardedRequest).await {
-                Err(error) if isRouteUnavailableError(&error) => {
-                    excludedPeerNodeIds.insert(peerNodeId);
-                }
-                result => return result,
-            }
-        }
+        self.forwardPush(Some(&previousNodeId), request).await
     }
 }
 
@@ -2512,6 +2215,9 @@ impl CoreLinkSharedClient for CoreNodeRouter {
 
     /// Opens a watch stream on the CoreNode selected by generated metadata.
     async fn watch(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
+        if request.target == DEVICE_TOOL_TARGET {
+            return self.openDeviceToolWatch(request, self.localNodeId.clone(), RoutedCoreRequestKind::Target);
+        }
         if request.target == CORE_STREAM_TARGET {
             operit_util::AppLogger::AppLogger::trace(
                 "CoreNodeRouteTrace",
@@ -2834,6 +2540,7 @@ mod tests {
 
     mod peer_fixture { include!("router_peer_fixture.rs"); }
     use peer_fixture::{TestRouteTarget, TestPeerService, installTestPeer};
+    include!("device_tools_tests.rs");
 
     /// Stores runtime records in memory for route and Space integration tests.
     #[derive(Clone)]
@@ -3977,6 +3684,7 @@ mod tests {
             targetNodeId.to_string(),
         ));
         CoreNodeRouter {
+            deviceToolService: Arc::new(std::sync::OnceLock::new()),
             peerServices: Arc::new(OnceLock::new()),
             localCore: Arc::new(testLocalRuntime(storage)),
             bindingStore,
@@ -4093,6 +3801,7 @@ mod tests {
         let bindingRuntime: Arc<dyn CoreNodeBindingRuntime> = bindingStore.clone();
         (
             CoreNodeRouter {
+                deviceToolService: Arc::new(std::sync::OnceLock::new()),
                 peerServices: Arc::new(OnceLock::new()),
                 localCore: Arc::new(localRuntime),
                 bindingStore: bindingRuntime,

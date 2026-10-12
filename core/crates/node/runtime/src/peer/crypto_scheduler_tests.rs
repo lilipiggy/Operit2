@@ -81,7 +81,7 @@ fn channel(scheduler: Arc<RecordingScheduler>) -> Arc<MultiplexedChannel> {
     }));
     let encrypted = Channel::new(raw, &[7; 32], b"test", true).unwrap();
     let live = super::super::LiveChannel::start(encrypted, scheduler.clone(), || {}).unwrap();
-    MultiplexedChannel::start(live, scheduler).unwrap()
+    MultiplexedChannel::start(live, scheduler, None).unwrap()
 }
 
 /// No Tokio runtime exists on this thread: a dropped watch must use its own Host.

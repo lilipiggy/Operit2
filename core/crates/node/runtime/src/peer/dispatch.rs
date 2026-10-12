@@ -47,7 +47,60 @@ impl CoreLinkClient for RoutedClient {
         self.router()?.routedOpenPush(self.peer.clone(), r).await
     }
 }
-pub(super) enum Authorization { Pairing, SpaceChannel, SessionReturn }
+pub(super) enum Authorization { Pairing, SpaceChannel, SessionReturn, SpaceDuplex }
+
+/// Answers the inbound direction of one authenticated channel: requests are
+/// executed here and watch events are flushed by whoever drives the frames.
+/// Vendored to both roles so the dialing side can be called back over the
+/// connection it opened, instead of dialing an address that may not be
+/// routable from here.
+pub(super) struct InboundSide {
+    service: HostRuntimePeerService, peer: String, sessionId: String, authorization: Authorization,
+    session: CoreLinkSession<RoutedClient>,
+}
+impl InboundSide {
+    pub(super) fn new(service: HostRuntimePeerService, peer: String, sessionId: String, authorization: Authorization) -> Self {
+        let session = CoreLinkSession::new(RoutedClient { router: service.state.router.clone(), peer: peer.clone() }, 32);
+        Self { service, peer, sessionId, authorization, session }
+    }
+    pub(super) fn hasWatches(&self) -> bool { self.session.hasWatches() }
+    pub(super) async fn nextWatchEvent(&mut self) -> Option<CoreLinkResponse> { self.session.nextWatchEvent().await }
+
+    /// Re-checks the channel's authorization before one business entry. Every
+    /// entry re-confirms it: a revocation must not be bypassed by a connection
+    /// that is already open.
+    pub(super) fn validate(&self, channel: &Arc<Channel>) -> Result<(), CoreLinkError> {
+        let valid = match self.authorization {
+            Authorization::SpaceChannel => self.service.spaceInbound(&self.sessionId, &self.peer).is_ok(),
+            Authorization::Pairing => self.service.inboundCredentials()?.get(&self.sessionId)
+                .is_some_and(|c| c.deviceId == self.peer && c.pairingServiceVersion == PAIRING_SERVICE_VERSION),
+            Authorization::SessionReturn => self.service.outbound(&self.peer).is_ok_and(|c| c.sessionId == self.sessionId)
+                && self.service.sessionScopeAllowed(&self.peer, channel)?,
+            // The dialing side answers a peer that granted it this channel: the
+            // grant that let this device dial is what lets the peer call back,
+            // so both directions end when that grant is revoked.
+            Authorization::SpaceDuplex => self.service.spaceOutbound(&self.peer).is_ok(),
+        };
+        if !valid { return Err(error("Inbound authorization revoked")); }
+        Ok(())
+    }
+
+    /// Answers one inbound request. The caller validated this channel first.
+    pub(super) async fn answer(&mut self, channel: &Arc<Channel>, request: CoreLinkRequest) -> CoreLinkResponse {
+        match request {
+            CoreLinkRequest::Call(r) if r.target == "$peer.keepalive" && r.methodName == "ping" && r.args == CoreValue::Null => {
+                CoreLinkResponse::Call(CoreCallResponse { requestId: r.requestId, result: Ok(CoreValue::Null) })
+            },
+            CoreLinkRequest::Call(request) if request.target == space_channel::TARGET => {
+                let result = if !matches!(self.authorization, Authorization::Pairing) { Err(error("Return channels cannot issue pairing-scoped offers")) }
+                else { self.service.acceptSessionManagement(&self.peer, &self.sessionId, channel, &request) };
+                CoreLinkResponse::Call(CoreCallResponse { requestId: request.requestId, result })
+            }
+            request => self.session.dispatch(request).await,
+        }
+    }
+}
+
 pub(super) async fn serve(service: HostRuntimePeerService, channel: Arc<Channel>, peer: String, sessionId: String, spaceChannel: bool) -> Result<(), CoreLinkError> {
     serveAuthorized(service, channel, peer, sessionId, if spaceChannel { Authorization::SpaceChannel } else { Authorization::Pairing }).await
 }
@@ -64,37 +117,19 @@ async fn serveChannel(service: HostRuntimePeerService, channel: Arc<Channel>, li
     let send = |message| async {
         match &live { Some(live) => live.send(message).await, None => channel.send(message).await }
     };
-    let mut session = CoreLinkSession::new(RoutedClient { router: service.state.router.clone(), peer: peer.clone() }, 32);
+    let mut side = InboundSide::new(service, peer, sessionId, authorization);
     loop {
         enum Incoming { Message(Option<PeerMessage>), Event(Option<CoreLinkResponse>) }
-        let incoming = if session.hasWatches() {
+        let incoming = if side.hasWatches() {
             tokio::select! {
                 message = receive() => Incoming::Message(message?),
-                event = session.nextWatchEvent() => Incoming::Event(event),
+                event = side.nextWatchEvent() => Incoming::Event(event),
             }
         } else { Incoming::Message(receive().await?) };
-        // 每次业务入口重新确认入站授权。撤销不能被存活中的旧连接绕过。
-        let valid = match authorization {
-            Authorization::SpaceChannel => service.spaceInbound(&sessionId, &peer).is_ok(),
-            Authorization::Pairing => service.inboundCredentials()?.get(&sessionId)
-                .is_some_and(|c| c.deviceId == peer && c.pairingServiceVersion == PAIRING_SERVICE_VERSION),
-            Authorization::SessionReturn => service.outbound(&peer).is_ok_and(|c| c.sessionId == sessionId)
-                && service.sessionScopeAllowed(&peer, &channel)?,
-        };
-        if !valid { return Err(error("Inbound authorization revoked")); }
+        side.validate(&channel)?;
         match incoming {
             Incoming::Message(Some(PeerMessage::Request(request))) => {
-                let response = match request {
-                    CoreLinkRequest::Call(r) if r.target == "$peer.keepalive" && r.methodName == "ping" && r.args == CoreValue::Null => {
-                        CoreLinkResponse::Call(CoreCallResponse { requestId: r.requestId, result: Ok(CoreValue::Null) })
-                    },
-                    CoreLinkRequest::Call(request) if request.target == space_channel::TARGET => {
-                        let result = if !matches!(authorization, Authorization::Pairing) { Err(error("Return channels cannot issue pairing-scoped offers")) }
-                        else { service.acceptSessionManagement(&peer, &sessionId, &channel, &request) };
-                        CoreLinkResponse::Call(CoreCallResponse { requestId: request.requestId, result })
-                    }
-                    request => session.dispatch(request).await,
-                };
+                let response = side.answer(&channel, request).await;
                 send(PeerMessage::Response(response)).await?;
             },
             Incoming::Event(Some(event)) => send(PeerMessage::Response(event)).await?,

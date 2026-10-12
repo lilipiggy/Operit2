@@ -237,7 +237,7 @@ npm run test:space --prefix tools/esp32-editor
 ## Core 插件与其他 Edge 平台
 
 本调试台模拟的是 ESP32-2432S028 的 320×240 呈现，不是所有 Edge 的通用屏幕模板。
-Core 的 `Tools.Edge`、`Tools.Io` 与 `on_edge_event` 不按芯片型号分支。
+Core 的 `Tools.device(nodeId).Edge`、`Tools.device(nodeId).Io` 与 `on_edge_event` 不按芯片型号分支。
 其他单片机或系统通过现有节点/Host 适配提供自己的能力和动作；无屏幕设备无需场景库。
 公共 Edge 节点/事件定义在 `core/crates/node/edge` 与 `edge-contract`，
 显示服务及其协议在端侧可选 `hosts/common/operit-edge-scene`。
@@ -248,7 +248,7 @@ ESP32/模拟器显式传入 320×240、24 像素顶部保留区和触摸能力�
 | 修改内容 | 验证方式 | 固件是否需要更新 |
 | --- | --- | --- |
 | Core JS/TS 插件业务、存档、action 处理 | 编译 ToolPkg 并在 Core 导入/启用；真实事件联调 | 已安装兼容服务时不需要 |
-| 插件场景素材 | 通过 `Tools.Edge.execute` 分块上传并更新场景 | 格式/容量符合能力时不需要 |
+| 插件场景素材 | 通过 `Tools.device(nodeId).Edge.execute` 分块上传并更新场景 | 格式/容量符合能力时不需要 |
 | ESP32 固定系统页面、屏幕适配、原生能力 | C/Wasm 预览、模拟器测试、固件构建及实机验证 | 需要 |
 | 历史布局 JSON / OUI2 草稿 | 仅校验与导出草稿 | 当前固件不应用草稿 |
 

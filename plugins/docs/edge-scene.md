@@ -8,13 +8,13 @@ Core 管理养成数据、素材原件和业务逻辑；具备显示能力的 Ed
 `ScenePlugin::new(width, height, reserved_top, touch)` 传入显示参数，
 无顶部系统栏可传 `reserved_top=0`。其他设备可复用此库或实现同一服务协议。
 模拟器现有开发者 HTTP 中的 `scene-view` 仅是浏览器显示镜像，可携带有界素材快照，
-不是固件入口或新的插件 API；Core ToolPkg 不依赖该路径，仍只调用 `Tools.Edge.execute`。
+不是固件入口或新的插件 API；Core ToolPkg 不依赖该路径，仍只调用 `Tools.device(nodeId).Edge.execute`。
 
 ## 入口与授权
 
 ```ts
 async function scene(nodeId: string, action: string, fields = {}) {
-  const {data} = await Tools.Edge.execute(nodeId,
+  const {data} = await Tools.device(nodeId).Edge.execute(
     {pluginId: 'display.scene', action}, {v: 1, ...fields});
   if (data.v !== 1 || !data.ok) throw new Error(`${data.error?.code}: ${data.error?.message}`);
   return data.result;
@@ -232,7 +232,7 @@ message 只供诊断，不作为稳定机器判断条件；依据 code 分支。
 
 自动测试覆盖：截断包、无效索引／SHA／偏移、原子提交与更新、满缓存／使用中保护、
 错误／过期租约、透明叠加／锚点／动画像素金样、事件分页丢失、系统退出、真实 C UI 内存预算，
-以及真实 Core ToolPkg → Tools.Edge → TCP 模拟器原生服务 → 渲染／触摸／Core 配置链路。
+以及真实 Core ToolPkg → Tools.device(nodeId).Edge → TCP 模拟器原生服务 → 渲染／触摸／Core 配置链路。
 
 ## 通用 Edge 事件传输中的场景适配
 

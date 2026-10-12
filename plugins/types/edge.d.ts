@@ -33,23 +33,21 @@ export interface IoInterfaceInfo {
 /**
  * Calls only firmware-declared native plugin actions on an explicit node.
  */
-export class Edge {
-  private constructor();
+export interface DeviceEdge {
   /**
    * Executes a declared action through authenticated node routing without adding application-level retries.
    */
-  static execute(nodeId: string, interfaceInfo: EdgeInterfaceInfo, args?: any): Promise<EdgePortResultData>;
+  execute(interfaceInfo: EdgeInterfaceInfo, args?: any): Promise<EdgePortResultData>;
 }
 
 /**
  * Executes hardware I/O through authenticated node routing, not the host's local serial port.
  */
-export class Io {
-  private constructor();
+export interface DeviceIo {
   /**
    * Executes one supported port operation. Missing ports reject instead of pretending success.
    */
-  static execute(nodeId: string, interfaceInfo: IoInterfaceInfo, args?: any): Promise<EdgePortResultData>;
+  execute(interfaceInfo: IoInterfaceInfo, args?: any): Promise<EdgePortResultData>;
 }
 
 /**

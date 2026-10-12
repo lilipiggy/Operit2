@@ -2,7 +2,7 @@
 //! PeerLink 只负责连接和传输；匿名准入、身份校验、配对状态和持久化由 runtime 负责。
 //! 配对使用标准 Link Call，不定义额外消息协议，不设置 HTTP 专用配对接口。
 
-use super::NodeServices::{PairedPeer, PairingPrompt, PendingPairing};
+use super::NodeServices::{PairedPeer, PairingDirection, PairingPrompt, PendingPairing};
 use async_trait::async_trait;
 use operit_link::{
     CoreCallRequest, CoreCallResponse, CoreEvent, CoreEventStream, CoreLinkError,
@@ -106,6 +106,13 @@ pub trait RuntimePeerService: Send + Sync {
 
     /// 列出本节点已配对的对端；同一对端的传输渠道不另算一个配对身份。
     fn pairedPeers(&self) -> Result<Vec<PairedPeer>, CoreLinkError>;
+
+    /// Uses the current pairing projection without inferring reverse authorization.
+    fn hasPairing(&self, node: &str, direction: PairingDirection) -> Result<bool, CoreLinkError> {
+        Ok(self.pairedPeers()?.iter().any(|peer| {
+            peer.nodeId == node && peer.authorizes(direction)
+        }))
+    }
 
     /// 返回允许本节点主动调用的已配对身份；按节点去重，不把入站授权推导成出站授权。
     /// 多个传输渠道属于同一个身份；调用方看不到端点、会话或密钥。

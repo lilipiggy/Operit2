@@ -78,6 +78,28 @@ pub trait NodeSpaceContext: Send + Sync {
     async fn afterJoined(&self, _peer: String) -> Result<(), String> { Ok(()) }
 }
 
+/// Shared Space protocol dispatch. Each receiver checks its authenticated direct peer first.
+pub(crate) fn dispatchPeerSpaceCall(
+    service: &dyn NodeSpaceContext, peer: &str, request: CoreCallRequest,
+) -> Result<CoreValue, String> {
+    match request.methodName.as_str() {
+        "snapshot" => toCoreValue(peerSpaceSnapshot(service)?).map_err(|e| e.to_string()),
+        "deviceSpace" => toCoreValue(service.spaceStore().initialize()?).map_err(|e| e.to_string()),
+        "observeSpaceSnapshot" => {
+            let snapshot: PeerSpaceSnapshot = fromCoreValue(request.args).map_err(|e| e.to_string())?;
+            toCoreValue(observePeerSpaceSnapshot(service, peer, snapshot)?).map_err(|e| e.to_string())
+        }
+        "observePairedDeviceSpace" => {
+            let space: CoreSpace = fromCoreValue(request.args).map_err(|e| e.to_string())?;
+            toCoreValue(service.spaceStore().observePairedDeviceSpace(peer.to_string(), space)?).map_err(|e| e.to_string())
+        }
+        "requestJoin" | "joinStatus" | "cancelJoin" => space_join::receive(service, peer, request),
+        "reconcileSharedSpace" => space_reconcile::receive(service, peer, request),
+        "join" => Err("SPACE_JOIN_APPROVAL_REQUIRED: Submit a join request for local approval first".into()),
+        _ => Err("Unknown node Space method".into()),
+    }
+}
+
 pub(crate) fn peerSpaceSnapshot(service: &dyn NodeSpaceContext) -> Result<PeerSpaceSnapshot, String> {
     let space = service.spaceStore().initialize()?;
     peerSpaceSnapshotFor(service, space)
@@ -188,25 +210,10 @@ impl NodeSpaceService {
         Ok(())
     }
     pub fn acceptPeerSpaceCall(&self, peer: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
-        if !self.peers.pairedPeers().map_err(|e| e.to_string())?.iter().any(|p| p.nodeId == peer && p.inbound) {
+        if !self.peers.hasPairing(peer, crate::NodeServices::PairingDirection::Inbound).map_err(|e| e.to_string())? {
             return Err("Node Space calls require direct inbound pairing".into());
         }
-        match request.methodName.as_str() {
-            "snapshot" => toCoreValue(peerSpaceSnapshot(self)?).map_err(|e| e.to_string()),
-            "deviceSpace" => toCoreValue(self.space.initialize()?).map_err(|e| e.to_string()),
-            "observeSpaceSnapshot" => {
-                let snapshot: PeerSpaceSnapshot = fromCoreValue(request.args).map_err(|e| e.to_string())?;
-                toCoreValue(observePeerSpaceSnapshot(self, peer, snapshot)?).map_err(|e| e.to_string())
-            }
-            "observePairedDeviceSpace" => {
-                let space: CoreSpace = fromCoreValue(request.args).map_err(|e| e.to_string())?;
-                toCoreValue(self.space.observePairedDeviceSpace(peer.to_string(), space)?).map_err(|e| e.to_string())
-            }
-            "requestJoin" | "joinStatus" | "cancelJoin" => space_join::receive(self, peer, request),
-            "reconcileSharedSpace" => space_reconcile::receive(self, peer, request),
-            "join" => Err("SPACE_JOIN_APPROVAL_REQUIRED: Submit a join request for local approval first".into()),
-            _ => Err("Unknown node Space method".into()),
-        }
+        dispatchPeerSpaceCall(self, peer, request)
     }
     pub async fn acceptSpaceApprovalCall(&self, origin: &str, request: CoreCallRequest) -> Result<CoreValue, String> {
         space_join::receiveApproval(self, origin, request)
@@ -225,13 +232,7 @@ impl NodeSpaceService {
     pub async fn refreshDeviceSpaceJoin(&self, id: String) -> Result<SpaceJoinRequest, String> { space_join::refresh(self, id).await }
     pub async fn cancelDeviceSpaceJoin(&self, id: String) -> Result<SpaceJoinRequest, String> { space_join::cancel(self, id).await }
     pub fn spaceChannelScope(&self, peer: &str) -> Result<Option<String>, CoreLinkError> {
-        let space = self.space.space().map_err(CoreLinkError::internal)?;
-        let control = self.control.currentState().map_err(CoreLinkError::internal)?;
-        if peer == self.localNodeId || !control.initialized || control.spaceId != space.spaceId
-            || [&self.localNodeId, &peer.to_string()].iter().any(|node| !space.members.contains(node)
-                || !control.memberNodeIds.contains(*node)
-                || control.disconnectedNodeIds.contains(*node)) { return Ok(None); }
-        Ok(Some(space.spaceId))
+        crate::space_policy::spaceChannelScope(&self.space, &self.control, &self.localNodeId, peer)
     }
 }
 #[async_trait::async_trait(?Send)]

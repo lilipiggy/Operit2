@@ -278,8 +278,6 @@ pub trait JsToolsHost:
     + software_settings::SoftwareSettingsHost
     + chat::ChatHost
     + memory::MemoryHost
-    + edge::EdgeHost
-    + edge::IoHost
     + Send
     + Sync
 {
@@ -297,8 +295,6 @@ impl<T> JsToolsHost for T where
         + software_settings::SoftwareSettingsHost
         + chat::ChatHost
         + memory::MemoryHost
-        + edge::EdgeHost
-        + edge::IoHost
         + Send
         + Sync
 {

@@ -7,9 +7,9 @@
 ## 开发前确认能力
 
 插件作者需确认用户安装的 Core SDK 和端侧服务版本匹配。现有入口为
-`Tools.Edge.execute(nodeId, {pluginId, action}, args)`、GPIO 专用 `Tools.Io.execute`
+`Tools.device(nodeId).Edge.execute({pluginId, action}, args)`、GPIO 专用 `Tools.device(nodeId).Io.execute`
 与 ToolPkg main 导出 `on_edge_event`。`Tools`、`Edge`、`Io` 均注意大小写；
-Edge/Io 是静态类，不创建实例。可达不等于授权：配对、设备空间与相应 Binding、
+Edge/Io 是设备视图上的接口，通过 `Tools.device(nodeId)` 选择执行节点。可达不等于授权：配对、设备空间与相应 Binding、
 工具权限都使用项目现有流程。
 
 从设备空间拓扑或 `toolCall("list_core_nodes", {})` 取得稳定节点 ID，由用户明确选择。
@@ -21,8 +21,7 @@ Edge/Io 是静态类，不创建实例。可达不等于授权：配对、设备
 
 ```ts
 async function scene(nodeId: string, action: string, fields = {}) {
-  const {data} = await Tools.Edge.execute(
-    nodeId, {pluginId: 'display.scene', action}, {v: 1, ...fields},
+  const {data} = await Tools.device(nodeId).Edge.execute({pluginId: 'display.scene', action}, {v: 1, ...fields},
   );
   if (data?.v !== 1 || data.ok !== true) {
     throw new Error(data?.error?.message ?? 'Invalid scene response');
@@ -32,9 +31,9 @@ async function scene(nodeId: string, action: string, fields = {}) {
 const capabilities = await scene(selectedNodeId, 'capabilities');
 ```
 
-`Tools.Edge` 外层完成传输不代表业务成功；检查 `data.ok`。离线、权限或动作声明失败
+`Tools.device(nodeId).Edge` 外层完成传输不代表业务成功；检查 `data.ok`。离线、权限或动作声明失败
 则拒绝 Promise。接口的参数最多 1024 UTF-8 JSON 字节，结果最多 4096 JSON 字节。
-通用串口事件不表示 `Tools.Io` 支持串口读写；新增端侧能力仍需端侧作者声明服务。
+通用串口事件不表示 `Tools.device(nodeId).Io` 支持串口读写；新增端侧能力仍需端侧作者声明服务。
 
 ## JS/TS 插件与端侧服务的分工
 

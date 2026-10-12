@@ -27,8 +27,37 @@ use live_channel::LiveChannel;
 const HANDSHAKE: &str = "$peer.pairing";
 
 const PAIRING_LIFETIME_MS: i64 = 300_000;
+/// Advertises that this device accepts calls over a connection the peer opened,
+/// so a peer behind NAT or a port-remapping proxy can be called back without
+/// anyone dialing an address that is not routable from this side. Kept off
+/// until both read loops handle the reverse direction: an older peer drops the
+/// connection on the first frame it does not expect, and this field defaults to
+/// false there, so a mixed pair simply never uses it.
+const DUPLEX_CHANNELS: bool = true;
+/// Consecutive failed dials after which a peer that can also be called over the
+/// connection it opened stops being dialed: reaching it by dialing is not the
+/// only way, so nobody should keep paying the connect timeout for it.
+const ACTIVE_DIAL_FAILURE_LIMIT: u32 = 3;
+/// How long that pause lasts before dialing is tried again, so a peer can always
+/// recover on its own instead of staying unreachable forever.
+const ACTIVE_DIAL_SUPPRESSION_MS: i64 = 60_000;
 const MAX_POOLED_CHANNELS_PER_PEER: usize = 8;
 const MAX_LOGICAL_LEASES_PER_CHANNEL: usize = 16;
+/// Establishing one authenticated connection is bounded here rather than by the
+/// caller, so a dial to an unreachable peer becomes an error for every business
+/// call, watch and push instead of holding whoever asked for it.
+const CONNECT_DEADLINE_MS: u64 = 30_000;
+/// Replaces the host of one dial endpoint, keeping its scheme, recorded port and
+/// path. The port is the peer's listener: a TCP source port is ephemeral.
+fn endpointWithHost(endpoint: &str, host: &str) -> Option<String> {
+    let (scheme, rest) = endpoint.split_once("://").map_or(("", endpoint), |(scheme, rest)| (scheme, rest));
+    let (authority, path) = rest.split_once('/').map_or((rest, None), |(authority, path)| (authority, Some(path)));
+    let (_, port) = authority.rsplit_once(':')?;
+    let prefix = if scheme.is_empty() { String::new() } else { format!("{scheme}://") };
+    let suffix = path.map_or(String::new(), |path| format!("/{path}"));
+    Some(format!("{prefix}{host}:{port}{suffix}"))
+}
+
 /// Last transport/session failure only; no credentials or message contents.
 pub fn peerSessionDiagnostic() -> Option<String> { duplex::diagnostic() }
 
@@ -43,9 +72,10 @@ struct Pending {
 struct Hello {
     version: u32, nodeId: String, expectedNodeId: String, info: LinkDeviceInfo,
     public: Vec<u8>, purpose: String, sessionId: String,
+    #[serde(default)] duplex: bool,
 }
 #[derive(Serialize, Deserialize)]
-struct HelloReply { transcript: crypto::Transcript, info: LinkDeviceInfo, tokenRequired: bool }
+struct HelloReply { transcript: crypto::Transcript, info: LinkDeviceInfo, tokenRequired: bool, #[serde(default)] duplex: bool }
 #[derive(Serialize, Deserialize)]
 struct Authorization { tokenProof: Vec<u8>, keyProof: Vec<u8> }
 #[derive(Serialize, Deserialize)]
@@ -66,6 +96,15 @@ impl PeerRuntimeLimits {
     pub fn constrained() -> Self { Self { incomingSessions: 2, pendingPairings: 2, concurrentProbes: 1, maxMessageBytes: 8 * 1024 } }
 }
 
+/// Active dialing state for one peer: the failure streak that decides whether a
+/// freshly observed address is worth adopting, and until when dialing is paused
+/// because the peer proved reachable over the connection it opened instead.
+#[derive(Clone, Default)]
+struct PeerDialState {
+    consecutiveFailures: u32,
+    suppressedUntil: i64,
+}
+
 struct State {
     limits: PeerRuntimeLimits,
     host: Arc<HostManager>,
@@ -78,6 +117,11 @@ struct State {
     connections: Mutex<BTreeMap<String, Vec<Weak<dyn PeerConnection>>>>,
     pooledChannels: Mutex<BTreeMap<String, Arc<AsyncMutex<Vec<Arc<MultiplexedChannel>>>>>>,
     liveChannels: Mutex<BTreeMap<String, Vec<Weak<LiveChannel>>>>,
+    /// Channels a peer opened to this device that may also carry calls back to
+    /// it, kept weak so a closed channel never stays usable.
+    callableInbound: Mutex<BTreeMap<String, Vec<Weak<MultiplexedChannel>>>>,
+    /// Per-peer active-dialing state: failure streaks and paused dialing.
+    dialStates: Mutex<BTreeMap<String, PeerDialState>>,
     advertisements: Mutex<Vec<Box<dyn operit_host_api::ServiceDiscovery::DiscoveryAdvertisement>>>,
     slots: Arc<tokio::sync::Semaphore>,
     active: Mutex<BTreeSet<String>>, changes: broadcast::Sender<()>,
@@ -126,6 +170,8 @@ impl HostRuntimePeerService {
                 connections: Mutex::new(BTreeMap::new()),
                 pooledChannels: Mutex::new(BTreeMap::new()),
                 liveChannels: Mutex::new(BTreeMap::new()),
+                callableInbound: Mutex::new(BTreeMap::new()),
+                dialStates: Mutex::new(BTreeMap::new()),
                 advertisements: Mutex::new(Vec::new()),
                 slots: Arc::new(tokio::sync::Semaphore::new(limits.incomingSessions)),
                 active: Mutex::new(BTreeSet::new()),
@@ -194,7 +240,7 @@ impl HostRuntimePeerService {
         let hello = Hello { version: PAIRING_SERVICE_VERSION, nodeId: self.state.nodeId.clone(),
             expectedNodeId: raw.target().nodeId.clone(),
             info: self.state.store.announcedDeviceInfo(&self.state.info), public: public.clone(),
-            purpose: purpose.into(), sessionId: sessionId.into() };
+            purpose: purpose.into(), sessionId: sessionId.into(), duplex: DUPLEX_CHANNELS };
         let reply: HelloReply = rawCall(&raw, "hello", &hello).await?;
         let t = &reply.transcript;
         if t.version != PAIRING_SERVICE_VERSION || t.clientNodeId != self.state.nodeId || t.clientPublic != public
@@ -215,8 +261,12 @@ impl HostRuntimePeerService {
         }).await?;
         crypto::verify(&key, &context, b"server", &accepted.proof)?;
         if accepted.pairingId != t.sessionId { return Err(error("Pairing correlation mismatch")); }
-        let id = t.sessionId.clone(); let peerNodeId = t.serverNodeId.clone(); let info = reply.info;
-        Ok((Channel::new(raw, &key, &context, true)?, id, info, root.to_vec(), peerNodeId))
+        let id = t.sessionId.clone(); let peerNodeId = t.serverNodeId.clone();
+        let peerDuplex = reply.duplex; let info = reply.info;
+        let channel = Channel::new(raw, &key, &context, true)?;
+        channel.setPeerDuplex(peerDuplex);
+        channel.setSpaceScoped(purpose == "space");
+        Ok((channel, id, info, root.to_vec(), peerNodeId))
     }
     /// Gets the per-peer pool lock without retaining a global lock during network I/O.
     fn channelPool(&self, node: &str) -> Arc<AsyncMutex<Vec<Arc<MultiplexedChannel>>>> {
@@ -265,8 +315,124 @@ impl HostRuntimePeerService {
         self.state.liveChannels.lock().unwrap().get(node).is_some_and(|channels| channels.iter()
             .filter_map(Weak::upgrade).any(|channel| channel.isAvailable()))
     }
-    /// Acquires a lazily created multiplexed channel from the fixed per-peer pool.
+
+    /// Registers one channel a peer opened that may also carry calls back to it.
+    fn registerInboundCallableChannel(&self, node: &str, channel: &Arc<MultiplexedChannel>) {
+        let mut registry = self.state.callableInbound.lock().unwrap();
+        let entries = registry.entry(node.into()).or_default();
+        entries.retain(|entry| entry.strong_count() > 0);
+        entries.push(Arc::downgrade(channel));
+    }
+
+    /// Per-peer active dialing: a working dial forgets the streak, a failing one
+    /// builds it, and a long enough streak beside a usable return connection
+    /// pauses dialing so no caller keeps paying the connect timeout.
+    fn recordDialFailed(&self, node: &str) {
+        let paused = {
+            let Ok(mut states) = self.state.dialStates.lock() else { return; };
+            let state = states.entry(node.into()).or_default();
+            state.consecutiveFailures = state.consecutiveFailures.saturating_add(1);
+            if state.consecutiveFailures >= ACTIVE_DIAL_FAILURE_LIMIT && self.inboundCallableChannel(node).is_some() {
+                state.suppressedUntil = currentTimeMillis() + ACTIVE_DIAL_SUPPRESSION_MS;
+                true
+            } else { false }
+        };
+        if paused {
+            operit_util::AppLogger::AppLogger::i("RuntimePeerService", &format!(
+                "Active dialing paused peer={node}: reachable over the connection it opened"));
+        }
+    }
+    fn recordDialSucceeded(&self, node: &str) {
+        if let Ok(mut states) = self.state.dialStates.lock() { states.remove(node); }
+    }
+    fn dialSuppressed(&self, node: &str) -> bool {
+        let Ok(states) = self.state.dialStates.lock() else { return false; };
+        states.get(node).is_some_and(|state| state.suppressedUntil > currentTimeMillis())
+    }
+    fn dialFailureCount(&self, node: &str) -> u32 {
+        self.state.dialStates.lock().map(|states| states.get(node).map_or(0, |state| state.consecutiveFailures)).unwrap_or(0)
+    }
+
+    /// Re-points one peer's dial endpoint at the address its own authenticated
+    /// connection came from. Only while the recorded address is failing (a working
+    /// one is never replaced), and only the host moves: the port stays the recorded
+    /// listening port, because a TCP source port is ephemeral and says nothing
+    /// about where the peer listens.
+    fn learnObservedEndpoint(&self, node: &str, observed: Option<std::net::SocketAddr>) {
+        let skip = |reason: String| operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Endpoint refresh skipped peer={node}: {reason}"));
+        let Some(address) = observed else { skip("the carrier reports no address".into()); return; };
+        let host = address.ip();
+        if host.is_loopback() || host.is_unspecified() || host.is_multicast() {
+            skip(format!("the observed address {host} is not routable"));
+            return;
+        }
+        if self.dialFailureCount(node) == 0 {
+            skip("the recorded address is not failing".into());
+            return;
+        }
+        let host = match host { std::net::IpAddr::V6(_) => format!("[{host}]"), _ => host.to_string() };
+        // Pairing writes this record under the same lock: never read-modify-write it beside one.
+        let _guard = self.state.mutation.lock().unwrap();
+        let records = match self.state.store.records::<StoredOutbound>(RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS_PATH) {
+            Ok(records) => records,
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::w("RuntimePeerService", &format!("Endpoint refresh failed peer={node}: {error}"));
+                return;
+            }
+        };
+        let Some((id, record)) = records.iter().find(|(_, record)|
+            record.peerNodeId == node && record.pairingServiceVersion == PAIRING_SERVICE_VERSION) else {
+            skip("no dial endpoint is recorded for this peer".into());
+            return;
+        };
+        let Some(endpoint) = endpointWithHost(&record.endpoint, &host) else {
+            operit_util::AppLogger::AppLogger::w("RuntimePeerService", &format!(
+                "Endpoint refresh failed peer={node}: cannot re-host the recorded endpoint {}", record.endpoint));
+            return;
+        };
+        if endpoint == record.endpoint {
+            skip(format!("the observed address is already recorded ({endpoint})"));
+            return;
+        }
+        let mut record = record.clone();
+        record.endpoint = endpoint.clone();
+        if let Err(error) = self.state.store.putRecord(RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS_PATH, id, &record) {
+            operit_util::AppLogger::AppLogger::w("RuntimePeerService", &format!("Endpoint refresh failed peer={node}: {error}"));
+            return;
+        }
+        // A failing streak is what admitted this address, so let its trial start clean.
+        self.recordDialSucceeded(node);
+        operit_util::AppLogger::AppLogger::i("RuntimePeerService", &format!(
+            "Dial endpoint refreshed from the peer's own connection peer={node} endpoint={endpoint}"));
+    }
+
+    /// Returns the least loaded channel that carries calls to a peer which dialed
+    /// us. Such a peer can be called without dialing an address of its own, which
+    /// is the only route available when that address is not routable from here.
+    fn inboundCallableChannel(&self, node: &str) -> Option<Arc<MultiplexedChannel>> {
+        let mut registry = self.state.callableInbound.lock().unwrap();
+        let entries = registry.get_mut(node)?;
+        entries.retain(|entry| entry.strong_count() > 0);
+        entries.iter().filter_map(Weak::upgrade).filter(|channel| !channel.isFailed())
+            .min_by_key(|channel| channel.activeLeases())
+    }
+    /// Acquires one channel for the peer within the connect deadline. The bound
+    /// belongs to the acquisition itself: only the availability worker used to
+    /// wrap it, so every other caller could wait on an unreachable address for
+    /// as long as the transport took to give up.
     pub(super) async fn acquirePooledChannel(&self, node: &str) -> Result<ChannelLease, CoreLinkError> {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(CONNECT_DEADLINE_MS),
+            self.acquirePooledChannelUnbounded(node),
+        ).await {
+            Ok(lease) => lease,
+            Err(_) => Err(CoreLinkError::new("PEER_CONNECT_TIMEOUT", "Authenticated connection establishment timed out")),
+        }
+    }
+
+    /// Acquires a lazily created multiplexed channel from the fixed per-peer pool.
+    /// Call acquirePooledChannel instead: this form waits without a deadline.
+    async fn acquirePooledChannelUnbounded(&self, node: &str) -> Result<ChannelLease, CoreLinkError> {
         self.requirePeerConnectionAllowed(node)?;
         if let Some(channel) = self.cachedSession(node) {
             if self.outbound(node).is_err() && !self.sessionScopeAllowed(node, &channel)? {
@@ -293,12 +459,31 @@ impl HostRuntimePeerService {
                 return Ok(channel.lease());
             }
         }
-        let raw = self.connectAuthorized(node).await?;
+        // A peer that dialed us can be called over the connection it opened, which
+        // is the only route that exists when its own address is not routable here.
+        if let Some(channel) = self.inboundCallableChannel(node) {
+            operit_util::AppLogger::AppLogger::trace("RuntimePeerService", &format!("Calling {node} over the connection it opened"));
+            return Ok(channel.lease());
+        }
+        if self.dialSuppressed(node) {
+            return Err(CoreLinkError::new("PEER_CALL_BACK_ONLY", "Active dialing is paused: the peer is reachable over the connection it opened"));
+        }
+        let raw = match self.connectAuthorized(node).await {
+            Ok(raw) => { self.recordDialSucceeded(node); raw }
+            Err(error) => { self.recordDialFailed(node); return Err(error); }
+        };
         if raw.duplex().is_some() { return Ok(ChannelLease::Shared(raw)); }
+        // A Space channel we dialed is one the peer offered, so the same grant
+        // that admits this dial admits the peer's calls back over it. The carrier
+        // is network by construction: a Space offer is only made over one.
+        let inbound = if DUPLEX_CHANNELS && raw.spaceScoped() {
+            let grant = self.spaceOutbound(node)?;
+            Some(dispatch::InboundSide::new(self.clone(), node.into(), grant.pairingId, dispatch::Authorization::SpaceDuplex))
+        } else { None };
         let raw = self.startLiveChannel(node, raw)?;
         let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
             .ok_or_else(|| error("Host scheduler is not installed"))?;
-        let channel = MultiplexedChannel::start(raw, scheduler)?;
+        let channel = MultiplexedChannel::start(raw, scheduler, inbound)?;
         channels.push(channel.clone());
         Ok(channel.lease())
     }
@@ -427,7 +612,7 @@ impl HostRuntimePeerService {
         let dh = crypto::agree(private, &transcript.clientPublic)?;
         let root = crypto::derive(&dh, &context, b"operit-pairing-root-v1")?;
         let key = match &saved { Some(saved) => crypto::derive(&dh, saved, &context)?, None => root };
-        sendValue(&raw, helloRequest.requestId, HelloReply { transcript,
+        sendValue(&raw, helloRequest.requestId, HelloReply { transcript, duplex: DUPLEX_CHANNELS,
             info: self.state.store.announcedDeviceInfo(&self.state.info), tokenRequired }).await?;
         let request = self.readHandshake(&raw, "authorize").await?;
         let authorization: Authorization = fromCoreValue(request.args).map_err(|e| error(e.to_string()))?;
@@ -454,6 +639,8 @@ impl HostRuntimePeerService {
         sendValue(&raw, request.requestId, Authorized { proof: crypto::proof(&key, &context, b"server"), pairingId: id.clone() }).await?;
         if hello.purpose == "start" { return Ok(()); }
         let channel = Channel::new(raw.clone(), &key, &context, false)?;
+        channel.setPeerDuplex(hello.duplex);
+        self.learnObservedEndpoint(&hello.nodeId, raw.remoteAddress());
         self.track(&hello.nodeId, &raw);
         if hello.purpose == "finish" {
             let Some(PeerMessage::Request(CoreLinkRequest::Call(request))) = channel.receive().await? else { return Err(error("Encrypted confirmation Call required")); };
@@ -487,8 +674,26 @@ impl HostRuntimePeerService {
             if let Some(d) = channel.duplex() { if let Err(e) = &result { d.fail(e.clone()); } channel.close().await; }
             result
         } else {
+            let spaceChannel = hello.purpose == "space";
+            channel.setSpaceScoped(spaceChannel);
             let live = self.startLiveChannel(&hello.nodeId, channel.clone())?;
-            dispatch::serveLive(self.clone(), live, channel, hello.nodeId, id, hello.purpose == "space").await
+            // A Space channel whose dialer accepts calls back becomes a route in
+            // its own right: one reader answers the peer and carries our calls.
+            // Network carriers only: duplex exists to replace a dial that cannot
+            // reach the peer, and the purpose here is the peer's own claim, so it
+            // does not by itself rule out a cable or a pairing.
+            if DUPLEX_CHANNELS && channel.peerDuplex() && spaceChannel && isNetworkTransport(raw.transport()) {
+                let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
+                    .ok_or_else(|| error("Host scheduler is not installed"))?;
+                let inbound = dispatch::InboundSide::new(self.clone(), hello.nodeId.clone(), id, dispatch::Authorization::SpaceChannel);
+                let multiplexed = MultiplexedChannel::start(live, scheduler, Some(inbound))?;
+                self.registerInboundCallableChannel(&hello.nodeId, &multiplexed);
+                // The accept path closes the connection as soon as this returns:
+                // wait for the reader that now serves the channel instead.
+                multiplexed.waitStopped().await;
+                return Ok(());
+            }
+            dispatch::serveLive(self.clone(), live, channel, hello.nodeId, id, spaceChannel).await
         }
     }
 }
@@ -784,6 +989,8 @@ impl RuntimePeerService for HostRuntimePeerService {
         for raw in connections.into_values().flatten().filter_map(|v| v.upgrade()) { raw.close().await; }
         self.state.pooledChannels.lock().unwrap().clear();
         self.state.liveChannels.lock().unwrap().clear();
+        self.state.callableInbound.lock().unwrap().clear();
+        self.state.dialStates.lock().unwrap().clear();
         self.state.active.lock().unwrap().clear(); self.changed(); Ok(())
     }
     async fn call(&self, node: &str, request: RoutedCoreRequest<CoreCallRequest>) -> CoreCallResponse {
@@ -825,6 +1032,8 @@ impl RuntimePeerService for HostRuntimePeerService {
         for raw in connections.into_iter().filter_map(|v| v.upgrade()) { raw.close().await; }
         self.state.pooledChannels.lock().unwrap().remove(node);
         self.state.liveChannels.lock().unwrap().remove(node);
+        self.state.callableInbound.lock().unwrap().remove(node);
+        self.state.dialStates.lock().unwrap().remove(node);
         self.state.active.lock().unwrap().remove(node); self.changed(); Ok(())
     }
     async fn removePairedPeer(&self, node: &str) -> Result<(), CoreLinkError> {
@@ -1085,5 +1294,160 @@ mod serial_response_deadline_tests {
             .expect("handshake has its own bounded response deadline");
         assert!(response.unwrap_err().message.contains("Serial pairing response timed out"));
         assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+
+#[cfg(test)]
+mod dial_route_tests {
+    use super::*;
+    use operit_host_api::{
+        HostError, HostResult, HostRuntimeAsyncTask, HostRuntimeTask, HostRuntimeTaskSchedulerHost,
+        HostRuntimeTurnFuture,
+    };
+    use std::sync::Mutex as StdMutex;
+
+    /// 只入队、不执行：被调度的任务永不运行，通道保持"可用"，测试线程上也不需要
+    /// 任何 Tokio 运行时。
+    #[derive(Default)]
+    struct QueuedScheduler { tasks: StdMutex<Vec<HostRuntimeAsyncTask>> }
+    impl operit_host_api::HostRuntimeTaskSchedulerHost for QueuedScheduler {
+        fn monotonicTimeMillis(&self) -> HostResult<u64> { Ok(100) }
+        fn scheduleHostRuntimeAsyncTask(&self, _: &str, task: HostRuntimeAsyncTask) -> HostResult<()> {
+            self.tasks.lock().unwrap().push(task); Ok(())
+        }
+        fn scheduleHostRuntimeCooperativeAsyncTask(&self, _: &str, task: HostRuntimeAsyncTask) -> HostResult<()> {
+            self.tasks.lock().unwrap().push(task); Ok(())
+        }
+        fn scheduleHostRuntimeTask(&self, _: &str, _: HostRuntimeTask) -> HostResult<()> { unreachable!() }
+        fn scheduleDelayedHostRuntimeTask(&self, _: &str, _: u64, _: HostRuntimeTask) -> HostResult<()> { unreachable!() }
+        fn waitForHostRuntimeTaskTurn(&self) -> HostRuntimeTurnFuture { unreachable!() }
+        fn waitForHostRuntimeDelay(&self, _: u64) -> HostRuntimeTurnFuture { unreachable!() }
+    }
+
+    /// 路由在这组测试里不会被真正触达，占位即可。
+    struct NoRouter;
+    #[async_trait::async_trait(?Send)]
+    impl PeerRouter for NoRouter {
+        fn localNodeId(&self) -> String { "self".into() }
+        async fn routedCall(&self, _: String, r: RoutedCoreRequest<CoreCallRequest>) -> CoreCallResponse {
+            CoreCallResponse { requestId: r.payload.requestId, result: Err(CoreLinkError::new("UNUSED", "no router in this test")) }
+        }
+        async fn routedWatchSnapshot(&self, _: String, _: RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEvent, CoreLinkError> { unreachable!() }
+        async fn routedWatch(&self, _: String, _: RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEventStream, CoreLinkError> { unreachable!() }
+        async fn routedOpenPush(&self, _: String, _: RoutedCoreRequest<CorePushRequest>) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> { unreachable!() }
+        fn spaceChannelScope(&self, _: &str) -> Result<Option<String>, CoreLinkError> { Ok(None) }
+    }
+
+    /// 永不收发的连接：读循环停在 receive 上，通道不会失败。
+    struct SilentPeer(PeerEndpoint);
+    #[async_trait::async_trait]
+    impl PeerConnection for SilentPeer {
+        fn source(&self) -> &PeerEndpoint { &self.0 }
+        fn target(&self) -> &PeerEndpoint { &self.0 }
+        fn transport(&self) -> PeerTransport { PeerTransport::WebSocket }
+        async fn send(&self, _: PeerMessage) -> Result<(), String> { unreachable!() }
+        async fn receive(&self) -> Result<Option<PeerMessage>, String> { unreachable!() }
+        async fn close(&self) { unreachable!() }
+    }
+
+    #[derive(Default)]
+    struct Storage(Mutex<BTreeMap<String, Vec<u8>>>);
+    impl operit_host_api::RuntimeStorageHost for Storage {
+        fn runtimeRootDir(&self) -> Option<std::path::PathBuf> { None }
+        fn workspaceRootDir(&self) -> Option<std::path::PathBuf> { None }
+        fn readBytes(&self, p: &str) -> HostResult<Vec<u8>> { self.0.lock().unwrap().get(p).cloned().ok_or_else(|| HostError::new("missing")) }
+        fn writeBytes(&self, p: &str, b: &[u8]) -> HostResult<()> { self.0.lock().unwrap().insert(p.into(), b.into()); Ok(()) }
+        fn appendBytes(&self, p: &str, b: &[u8]) -> HostResult<()> { self.0.lock().unwrap().entry(p.into()).or_default().extend_from_slice(b); Ok(()) }
+        fn delete(&self, p: &str, _: bool) -> HostResult<()> { self.0.lock().unwrap().remove(p); Ok(()) }
+        fn exists(&self, p: &str) -> HostResult<bool> { Ok(self.0.lock().unwrap().contains_key(p)) }
+        fn list(&self, p: &str) -> HostResult<Vec<operit_host_api::RuntimeStorageEntry>> { Ok(self.0.lock().unwrap().iter().filter(|(k, _)| k.starts_with(p)).map(|(k, v)| operit_host_api::RuntimeStorageEntry { path: k.clone(), isDirectory: false, size: v.len() as i64 }).collect()) }
+    }
+
+    fn service() -> HostRuntimePeerService {
+        let storage = Arc::new(Storage::default());
+        let _ = operit_store::CoreSpaceStore::CoreSpaceStore::newNodeLocal(storage.clone()).initialize();
+        HostRuntimePeerService { state: Arc::new(State {
+            limits: PeerRuntimeLimits::default(),
+            host: Arc::new(HostManager { runtimeStorageHost: Some(storage.clone()), ..HostManager::default() }),
+            link: HostPeerLink::default(),
+            store: PeerStateStore::new(storage),
+            nodeId: "self".into(),
+            info: LinkDeviceInfo { platform: "test".into(), model: "test".into(), pairingIncarnation: None },
+            router: Arc::downgrade(&(Arc::new(NoRouter) as Arc<dyn PeerRouter>)),
+            listeners: AsyncMutex::default(), connections: Mutex::default(), pooledChannels: Mutex::default(),
+            liveChannels: Mutex::default(), callableInbound: Mutex::default(), dialStates: Mutex::default(),
+            advertisements: Mutex::default(), slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            active: Mutex::default(), changes: broadcast::channel(32).0, availability: Mutex::new(None),
+            lifecycle: AsyncMutex::new(()), mutation: Mutex::new(()),
+            connectLocks: Mutex::default(), sharedSessions: Mutex::default(),
+        })}
+    }
+
+    fn storedOutbound(peer: &str, endpoint: &str) -> StoredOutbound {
+        StoredOutbound { endpoint: endpoint.into(), sessionId: format!("session-{peer}"), deviceId: "self".into(),
+            peerNodeId: peer.into(), peerDeviceInfo: LinkDeviceInfo { platform: "t".into(), model: "t".into(), pairingIncarnation: None },
+            pairingServiceVersion: PAIRING_SERVICE_VERSION, sessionSecret: BASE64.encode([9u8; 32]), transport: "ws".into() }
+    }
+
+    fn recordedEndpoint(service: &HostRuntimePeerService, peer: &str) -> Option<String> {
+        service.state.store.records::<StoredOutbound>(RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS_PATH).ok()
+            .and_then(|records| records.into_values().find(|record| record.peerNodeId == peer).map(|record| record.endpoint))
+    }
+
+    /// 一条登记为可回拨、但永不失联的通道。
+    fn callableChannel() -> Arc<MultiplexedChannel> {
+        let scheduler = Arc::new(QueuedScheduler::default());
+        let encrypted = Channel::new(
+            Arc::new(SilentPeer(PeerEndpoint { nodeId: "peer".into(), address: "unused".into() })),
+            &[7; 32], b"test", false).unwrap();
+        let live = live_channel::LiveChannel::start(encrypted, scheduler.clone(), || {}).unwrap();
+        MultiplexedChannel::start(live, scheduler, None).unwrap()
+    }
+
+    /// 拨号必然失败的对端（没有任何出站授权），回拨通道存在时调用必须成功：
+    /// 这就是"调用一个只会拨进来的对端"。
+    #[tokio::test]
+    async fn a_return_connection_carries_calls_when_dialing_cannot() {
+        let service = service();
+        let mux = callableChannel();
+        service.registerInboundCallableChannel("p1", &mux);
+        let lease = service.acquirePooledChannel("p1").await.unwrap();
+        assert!(Arc::ptr_eq(lease.pooled().unwrap(), &mux));
+        assert_eq!(mux.activeLeases(), 1);
+    }
+
+    /// 端点只在记录地址失败时被观测地址替换，且只替换 host。
+    #[test]
+    fn endpoint_moves_only_while_the_recorded_address_fails() {
+        let service = service();
+        service.state.store.putRecord(RUNTIME_LINK_ACCESS_OUTBOUND_SESSIONS_PATH, "s1",
+            &storedOutbound("p1", "ws://10.0.0.1:37195/link")).unwrap();
+        // 记录地址没有失败：工作中的地址不被覆盖。
+        service.learnObservedEndpoint("p1", Some("10.0.0.2:37195".parse().unwrap()));
+        assert_eq!(recordedEndpoint(&service, "p1").as_deref(), Some("ws://10.0.0.1:37195/link"));
+        // 失败之后才采纳观测地址，且 scheme、端口、路径原样保留。
+        for _ in 0..3 { service.recordDialFailed("p1"); }
+        service.learnObservedEndpoint("p1", Some("10.0.0.2:37195".parse().unwrap()));
+        assert_eq!(recordedEndpoint(&service, "p1").as_deref(), Some("ws://10.0.0.2:37195/link"));
+        // 新地址从干净的一次试用开始。
+        assert_eq!(service.dialFailureCount("p1"), 0);
+    }
+
+    /// 只有在"能从回拨通道调用"时，连续失败才会暂停主动拨。
+    #[test]
+    fn three_failed_dials_beside_a_return_connection_pause_dialing() {
+        let service = service();
+        for _ in 0..3 { service.recordDialFailed("p1"); }
+        // 没有回拨通道时，拨号是唯一路径，永不暂停。
+        assert!(!service.dialSuppressed("p1"));
+        // 登记回拨通道后，再一次失败就触发暂停。
+        let mux = callableChannel();
+        service.registerInboundCallableChannel("p1", &mux);
+        service.recordDialFailed("p1");
+        assert!(service.dialSuppressed("p1"));
+        // 一次成功的拨号清空计数并解除暂停。
+        service.recordDialSucceeded("p1");
+        assert!(!service.dialSuppressed("p1"));
     }
 }

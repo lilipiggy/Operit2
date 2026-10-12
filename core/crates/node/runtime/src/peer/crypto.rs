@@ -104,14 +104,26 @@ pub(super) struct Channel {
     pub transaction: Mutex<()>,
     duplex: std::sync::Mutex<Option<Arc<super::duplex::Duplex>>>,
     pub returnScope: std::sync::Mutex<Option<String>>,
+    /// Whether the peer advertised that it accepts calls over this connection in
+    /// the reverse direction. Only a peer that advertised may be called on it.
+    peerDuplex: std::sync::atomic::AtomicBool,
+    /// Whether this channel was established under a Space grant, the only scope
+    /// that authorizes calls in both directions.
+    spaceScoped: std::sync::atomic::AtomicBool,
 }
 impl Channel {
     pub fn new(raw: Arc<dyn PeerConnection>, key: &[u8], context: &[u8], client: bool) -> Result<Arc<Self>, CoreLinkError> {
         let c2s = derive(key, context, b"operit-link-client-to-server-v1")?;
         let s2c = derive(key, context, b"operit-link-server-to-client-v1")?;
         Ok(Arc::new(Self { generation: CHANNEL_GENERATION.fetch_add(1, Ordering::Relaxed), raw, send: Mutex::new(Cipher::new(if client { c2s } else { s2c }, context)?),
-            receive: Mutex::new(Cipher::new(if client { s2c } else { c2s }, context)?), transaction: Mutex::new(()), duplex: std::sync::Mutex::new(None), returnScope: std::sync::Mutex::new(None) }))
+            receive: Mutex::new(Cipher::new(if client { s2c } else { c2s }, context)?), transaction: Mutex::new(()), duplex: std::sync::Mutex::new(None), returnScope: std::sync::Mutex::new(None),
+            peerDuplex: std::sync::atomic::AtomicBool::new(false),
+            spaceScoped: std::sync::atomic::AtomicBool::new(false) }))
     }
+    pub fn setPeerDuplex(&self, capable: bool) { self.peerDuplex.store(capable, Ordering::Relaxed); }
+    pub fn peerDuplex(&self) -> bool { self.peerDuplex.load(Ordering::Relaxed) }
+    pub fn setSpaceScoped(&self, scoped: bool) { self.spaceScoped.store(scoped, Ordering::Relaxed); }
+    pub fn spaceScoped(&self) -> bool { self.spaceScoped.load(Ordering::Relaxed) }
     pub async fn send(&self, message: PeerMessage) -> Result<(), CoreLinkError> {
         let mut cipher = self.send.lock().await;
         let mut bytes = encodeLink(message).map_err(|e| error(e.to_string()))?;
@@ -166,6 +178,15 @@ pub(super) struct MultiplexedChannel {
     spaceOffers: Mutex<BTreeSet<String>>,
     failure: StdMutex<Option<CoreLinkError>>,
     activeLeases: AtomicUsize,
+    /// Present when this channel also carries the peer's calls back to us: a
+    /// Space grant that a peer issued lets it call us over the connection it
+    /// accepted, the same way it lets us call the peer. Requests are answered by
+    /// one dedicated dispatcher task, so this reader never blocks on a dispatch
+    /// and a call made while serving the peer can still be correlated here.
+    inboundRequests: StdMutex<Option<mpsc::UnboundedSender<CoreLinkRequest>>>,
+    /// Signals that this channel's reader has stopped, for the accept path that
+    /// closes the connection as soon as its serve call returns.
+    stopped: tokio::sync::Notify,
 }
 
 /// Keeps one leased multiplexed channel alive until its operation is released.
@@ -198,8 +219,16 @@ impl Drop for ChannelLease {
 }
 
 impl MultiplexedChannel {
-    /// Starts a response demultiplexer for one authenticated raw channel.
-    pub(super) fn start(channel: Arc<super::LiveChannel>, scheduler: Arc<dyn operit_host_api::HostRuntimeTaskSchedulerHost>) -> Result<Arc<Self>, CoreLinkError> {
+    /// Starts the reader that correlates this side's calls, plus the dispatcher
+    /// that answers the peer's when the channel carries both directions.
+    pub(super) fn start(channel: Arc<super::LiveChannel>, scheduler: Arc<dyn operit_host_api::HostRuntimeTaskSchedulerHost>, inbound: Option<super::dispatch::InboundSide>) -> Result<Arc<Self>, CoreLinkError> {
+        let (inboundRequests, dispatcher) = match inbound {
+            Some(side) => {
+                let (sender, requests) = mpsc::unbounded_channel();
+                (StdMutex::new(Some(sender)), Some((side, requests)))
+            }
+            None => (StdMutex::new(None), None),
+        };
         let multiplexed = Arc::new(Self {
             scheduler: scheduler.clone(),
             channel,
@@ -208,11 +237,19 @@ impl MultiplexedChannel {
             spaceOffers: Mutex::new(BTreeSet::new()),
             failure: StdMutex::new(None),
             activeLeases: AtomicUsize::new(0),
+            inboundRequests,
+            stopped: tokio::sync::Notify::new(),
         });
         let reader = multiplexed.clone();
         scheduler.scheduleHostRuntimeAsyncTask("peer-multiplexed-reader", Box::new(move || Box::pin(async move {
             reader.readLoop().await;
         }))).map_err(|hostError| error(hostError.to_string()))?;
+        if let Some((side, requests)) = dispatcher {
+            let dispatch = multiplexed.clone();
+            scheduler.scheduleHostRuntimeAsyncTask("peer-multiplexed-dispatch", Box::new(move || Box::pin(async move {
+                dispatch.dispatchLoop(side, requests).await;
+            }))).map_err(|hostError| error(hostError.to_string()))?;
+        }
         Ok(multiplexed)
     }
 
@@ -242,7 +279,10 @@ impl MultiplexedChannel {
     pub(super) async fn exchange(&self, request: CoreLinkRequest) -> Result<CoreLinkResponse, CoreLinkError> {
         let key = requestKey(&request)?;
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(key.clone(), sender);
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(key.clone(), sender);
+        }
         if let Err(error) = self.channel.send(PeerMessage::Request(request)).await {
             self.pending.lock().await.remove(&key);
             return Err(error);
@@ -317,15 +357,56 @@ impl MultiplexedChannel {
         self.failure.lock().unwrap().clone().unwrap_or_else(|| error(message))
     }
 
-    /// Reads encrypted messages once and dispatches each decoded response by correlation.
+    /// Correlates every response this channel carries and forwards the peer's
+    /// calls to the dispatcher, so neither direction can starve the other.
     async fn readLoop(self: Arc<Self>) {
         loop {
             match self.channel.receive().await {
                 Ok(Some(PeerMessage::Response(response))) => self.dispatchResponse(response).await,
-                Ok(Some(_)) => { self.fail(error("Multiplexed channel received an unexpected request")).await; break; }
+                Ok(Some(PeerMessage::Request(request))) => if let Err(error) = self.forwardInbound(request) {
+                    self.fail(error).await;
+                    break;
+                },
                 Ok(None) => { self.fail(error("Multiplexed channel closed")).await; break; }
                 Err(error) => { self.fail(error).await; break; }
             }
+        }
+        self.stopped.notify_one();
+    }
+
+    /// Resolves once this channel's reader has stopped, so the side that accepted
+    /// the connection keeps it open for as long as the channel serves it.
+    pub(super) async fn waitStopped(&self) { self.stopped.notified().await; }
+
+    /// Hands one request from the peer to this channel's dispatcher, keeping this
+    /// reader free to correlate the calls made here.
+    fn forwardInbound(&self, request: CoreLinkRequest) -> Result<(), CoreLinkError> {
+        let sender = self.inboundRequests.lock().unwrap().clone()
+            .ok_or_else(|| error("Multiplexed channel received an unexpected request"))?;
+        sender.send(request).map_err(|_| error("Multiplexed channel dispatcher stopped"))
+    }
+
+    /// Answers the peer's calls while this reader keeps the other direction
+    /// flowing, and flushes the watch events this side owes it.
+    async fn dispatchLoop(self: Arc<Self>, mut side: super::dispatch::InboundSide, mut requests: mpsc::UnboundedReceiver<CoreLinkRequest>) {
+        enum Item { Request(CoreLinkRequest), Event(CoreLinkResponse) }
+        loop {
+            let item = if side.hasWatches() {
+                tokio::select! {
+                    request = requests.recv() => request.map(Item::Request),
+                    event = side.nextWatchEvent() => event.map(Item::Event),
+                }
+            } else { requests.recv().await.map(Item::Request) };
+            let Some(item) = item else { return; };
+            let channel = self.channel.channel();
+            // Every business entry re-confirms the channel's authorization: a
+            // revocation must not be bypassed by a connection that is already open.
+            if let Err(error) = side.validate(&channel) { self.fail(error).await; return; }
+            let response = match item {
+                Item::Event(event) => event,
+                Item::Request(request) => side.answer(&channel, request).await,
+            };
+            if let Err(error) = self.channel.send(PeerMessage::Response(response)).await { self.fail(error).await; return; }
         }
     }
 
@@ -341,9 +422,8 @@ impl MultiplexedChannel {
             self.watches.lock().await.remove(&requestId.0);
         }
         let key = responseKey(&response);
-        if let Some(sender) = self.pending.lock().await.remove(&key) {
-            let _ = sender.send(Ok(response));
-        }
+        let sender = self.pending.lock().await.remove(&key);
+        if let Some(sender) = sender { let _ = sender.send(Ok(response)); }
     }
 }
 

@@ -146,9 +146,12 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         let gatedToolStarted = self.gatedToolStarted.clone();
         let edgePortCalls = self.edgePortCalls.clone();
         Box::pin(async move {
+            if request.device.as_ref().is_some_and(|device| device.action != operit_plugin_sdk::javascript::JsDeviceToolAction::Port) {
+                return JsToolCallResult {success:true, data:JsToolCallResultData::Value(serde_json::to_value(request).unwrap()), error:None};
+            }
             if matches!(request.tool_name.as_str(),"edge_execute"|"io_execute") {
-                edgePortCalls.lock().unwrap().push(serde_json::json!({"tool":request.tool_name,"params":request.parameters}));
-                let node = request.parameters["node_id"].as_str().unwrap_or("");
+                edgePortCalls.lock().unwrap().push(serde_json::json!({"tool":request.tool_name,"params":request.parameters,"device":request.device}));
+                let node = request.device.as_ref().map(|device| device.node_id.as_str()).unwrap_or("");
                 return if node == "unauthorized" {
                     JsToolCallResult {success:false,data:JsToolCallResultData::Value(Value::Null),error:Some("Edge node access denied".into())}
                 } else {
@@ -3197,20 +3200,18 @@ async fn promise_jobs_restore_execution_host_for_native_calls() {
 
 /// Exercises real QuickJS bootstrap and generated positional-to-tool bindings.
 #[tokio::test(flavor = "current_thread")]
-async fn edge_io_sdk_aliases_forward_node_interface_args_and_reject_failures() {
+async fn device_tools_hardware_uses_selected_node_and_rejects_failures() {
     let host=Arc::new(TestPluginConfigExecutionHost::default());
     let engine=newTestJsEngine(host.clone());
     let output=engine.execute_script_function(r#"
         exports.ports = async function() {
             if (tools !== Tools) throw Error('different Tools object');
-            if (typeof Tools.Edge !== 'function' || typeof Tools.Io !== 'function') throw Error('static classes missing');
+            if (Tools.Edge !== undefined || Tools.Io !== undefined) throw Error('old global hardware APIs remain');
             if (Tools.edge !== undefined || Tools.io !== undefined) throw Error('noncanonical namespace');
-            try { new Tools.Edge(); throw Error('Edge must not be instantiated'); }
-            catch(error) { if (!String(error).includes('static class')) throw error; }
-            const edge=await Tools.Edge.execute('edge-one',{pluginId:'device.status',action:'read'},{text:'ping'});
-            const io=await Tools.Io.execute('edge-two',{port:'gpio',operation:'read'},{pin:2});
+            const edge=await Tools.device('edge-one').Edge.execute({pluginId:'device.status',action:'read'},{text:'ping'});
+            const io=await Tools.device('edge-two').Io.execute({port:'gpio',operation:'read'},{pin:2});
             let failure='';
-            try { await Tools.Edge.execute('unauthorized',{pluginId:'device.status',action:'read'}); }
+            try { await Tools.device('unauthorized').Edge.execute({pluginId:'device.status',action:'read'}); }
             catch(error) { failure=String(error.message || error); }
             return {edge:edge.nodeId,io:io.nodeId,failure};
         };
@@ -3219,9 +3220,11 @@ async fn edge_io_sdk_aliases_forward_node_interface_args_and_reject_failures() {
     assert_eq!(result,serde_json::json!({"edge":"edge-one","io":"edge-two","failure":"Edge node access denied"}));
     let calls=host.edgePortCalls.lock().unwrap();
     assert_eq!(calls.len(),3);
-    assert_eq!(calls[0],serde_json::json!({"tool":"edge_execute","params":{"node_id":"edge-one","interface_info":{"pluginId":"device.status","action":"read"},"args":{"text":"ping"}}}));
-    assert_eq!(calls[1],serde_json::json!({"tool":"io_execute","params":{"node_id":"edge-two","interface_info":{"port":"gpio","operation":"read"},"args":{"pin":2}}}));
-    assert!(calls[2]["params"].get("args").is_none()||calls[2]["params"]["args"].is_null());
+    assert_eq!(calls[0]["params"], serde_json::json!({"interface_info":{"pluginId":"device.status","action":"read"},"args":{"text":"ping"}}));
+    assert_eq!(calls[0]["device"]["nodeId"], "edge-one");
+    assert_eq!(calls[1]["params"], serde_json::json!({"interface_info":{"port":"gpio","operation":"read"},"args":{"pin":2}}));
+    assert_eq!(calls[1]["device"]["nodeId"], "edge-two");
+    assert_eq!(calls[2]["params"]["args"], serde_json::json!({}));
     drop(calls);engine.destroy();
 }
 
@@ -3380,4 +3383,32 @@ async fn bridge_roundtrip_benchmark() {
         );
         engine.destroy();
     }
+}
+
+/// Uses the real generated namespaces and native bridge, including overload dispatch.
+#[tokio::test(flavor = "current_thread")]
+async fn device_tools_cross_native_bridge_without_leaking_target_into_parameters() {
+    ensure_test_runtime_root();
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let mut params = testParams();
+    params.insert("__operit_toolpkg_api_version".into(), Value::String("2.0.0".into()));
+    let output = engine.execute_script_function(
+        r#"exports.run = async function() {
+            return await Promise.all([
+                Tools.device('desktop').Files.read('/desktop.txt'),
+                Tools.device('phone').Files.read({path:'/phone.txt'}),
+                Tools.device('desktop').call('example:echo', {value:'{\"literal\":true}'}),
+                Tools.device('phone').catalog()
+            ]);
+        };"#, "run", &params, &BTreeMap::new(), None, true, 5, None,
+    ).await.unwrap().unwrap();
+    let values: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(values[0]["device"]["nodeId"], "desktop");
+    assert_eq!(values[1]["device"]["nodeId"], "phone");
+    assert_eq!(values[0]["parameters"], serde_json::json!({"path":"/desktop.txt"}));
+    assert_eq!(values[1]["parameters"], serde_json::json!({"path":"/phone.txt"}));
+    assert_eq!(values[2]["tool_name"], "example:echo");
+    assert_eq!(values[2]["parameters"]["value"], "{\"literal\":true}");
+    assert_eq!(values[3]["device"]["action"], "catalog");
+    engine.destroy();
 }

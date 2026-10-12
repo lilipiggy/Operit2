@@ -130,6 +130,64 @@
         }
     }
 
+    var deviceInvocationSequence = 0;
+
+    /** Executes an explicit-device request without placing routing metadata in tool parameters. */
+    function deviceToolCall(nodeId, toolType, toolName, params, options, action) {
+        try {
+            validateOptions(options);
+            options = options || {};
+            var signal = options.signal;
+            if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' ||
+                typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) {
+                throw new TypeError('Device signal must be an AbortSignal');
+            }
+            if (signal && signal.aborted) throw new Error('Device tool call cancelled');
+            var invocationId = String(root.__operitCurrentCallId) + ':' + Date.now().toString(36) +
+                ':' + (++deviceInvocationSequence) + ':' + Math.random().toString(36).slice(2);
+            var metadata = {nodeId: nodeId, invocationId: invocationId,
+                action: action || 'execute', timeoutMs: options.timeoutMs === undefined ? 120000 : options.timeoutMs};
+            if (typeof root.__operitNativeCallToolStructured !== 'function') {
+                throw new Error('Required host binding __operitNativeCallToolStructured is unavailable');
+            }
+            return new Promise(function(resolve, reject) {
+                var settled = false;
+                var cancellations = options.__deviceCancellations;
+                function cleanup() {
+                    if (signal) signal.removeEventListener('abort', abort);
+                    if (cancellations) {
+                        var index = cancellations.indexOf(abort);
+                        if (index !== -1) cancellations.splice(index, 1);
+                    }
+                }
+                function abort() {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    var cancel = {nodeId: nodeId, invocationId: invocationId, action: 'cancel', timeoutMs: metadata.timeoutMs};
+                    invokeHostAsync(root.__operitNativeCallToolStructured,
+                        ['default', '__device_cancel', {}, cancel], parseToolResult).catch(function() {});
+                    reject(new Error('Device tool call cancelled'));
+                }
+                var pending = invokeHostAsync(root.__operitNativeCallToolStructured,
+                    [toolType, toolName, clonePlainObject(params), metadata], parseToolResult);
+                if (cancellations) cancellations.push(abort);
+                if (signal) {
+                    signal.addEventListener('abort', abort, {once: true});
+                    if (signal.aborted) abort();
+                }
+                pending.then(function(value) {
+                    if (settled) return;
+                    settled = true; cleanup(); resolve(value);
+                }, function(error) {
+                    if (settled) return;
+                    settled = true; cleanup(); reject(error);
+                });
+            });
+        } catch (error) { return Promise.reject(error); }
+    }
+
+    root.__operitExpose('__operitDeviceToolCall', deviceToolCall);
     root.__operitExpose('__operitInvokeHostAsync', invokeHostAsync);
     root.__operitExpose('toolCall', toolCall);
 })();

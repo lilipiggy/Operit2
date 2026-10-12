@@ -1,4 +1,4 @@
-//! Explicit-node hardware ports. Plugins execute on Core; hardware actions execute on Edge.
+//! Device-selected hardware ports. Plugins execute on Core; hardware actions execute on Edge.
 use super::results::EdgePortResultData;
 use super::{JsAny, JsFuture, JsObject};
 use serde::{Deserialize, Serialize};
@@ -24,22 +24,20 @@ pub struct IoInterfaceInfo {
 }
 
 /// Calls only firmware-declared native plugin actions on an explicit node.
-pub trait EdgeHost: Send + Sync {
+pub trait DeviceEdge: Send + Sync {
     /// Executes a declared action through authenticated node routing without adding application-level retries.
     fn execute(
         &self,
-        nodeId: String,
         interfaceInfo: EdgeInterfaceInfo,
         args: Option<JsAny>,
     ) -> JsFuture<EdgePortResultData>;
 }
 
 /// Executes hardware I/O through authenticated node routing, not the host's local serial port.
-pub trait IoHost: Send + Sync {
+pub trait DeviceIo: Send + Sync {
     /// Executes one supported port operation. Missing ports reject instead of pretending success.
     fn execute(
         &self,
-        nodeId: String,
         interfaceInfo: IoInterfaceInfo,
         args: Option<JsAny>,
     ) -> JsFuture<EdgePortResultData>;

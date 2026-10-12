@@ -534,7 +534,7 @@ mod tests {
         let service=HostRuntimePeerService { state:Arc::new(State { limits:PeerRuntimeLimits::default(),
             host:Arc::new(HostManager {runtimeStorageHost:Some(storage.clone()),..HostManager::default()}),link:HostPeerLink::default(),
             store:PeerStateStore::new(storage),nodeId:node.into(),info:LinkDeviceInfo {platform:"test".into(),model:"test".into(), pairingIncarnation: None },router:Arc::downgrade(&(router.clone() as Arc<dyn PeerRouter>)),
-            listeners:AsyncMutex::default(),connections:Mutex::default(),pooledChannels:Mutex::default(),liveChannels:Mutex::default(),advertisements:Mutex::default(),slots:Arc::new(tokio::sync::Semaphore::new(2)),
+            listeners:AsyncMutex::default(),connections:Mutex::default(),pooledChannels:Mutex::default(),liveChannels:Mutex::default(),callableInbound:Mutex::default(),dialStates:Mutex::default(),advertisements:Mutex::default(),slots:Arc::new(tokio::sync::Semaphore::new(2)),
             active:Mutex::default(),changes:broadcast::channel(32).0,availability:Mutex::new(None),lifecycle:AsyncMutex::new(()),mutation:Mutex::new(()),
             connectLocks:Mutex::default(),sharedSessions:Mutex::default(),
         })};(service,router)

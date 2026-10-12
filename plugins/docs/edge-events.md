@@ -1,6 +1,6 @@
 # 通用 Edge → Core action 事件（v1）
 
-Core 的 ToolPkg 插件通过静态类 `Tools.Edge.execute` 调用固件原生动作。
+Core 的 ToolPkg 插件通过设备视图 `Tools.device(nodeId).Edge.execute` 调用固件原生动作。
 反向事件统一注入 Core 的 `edge_event`，在原 ToolPkg main 运行时执行固定导出
 `on_edge_event(event)`。屏幕触摸只是一个生产者；Core 不解析触摸／租约专属 schema。
 传感器、GPIO、串口、按键、任务完成等都使用相同 envelope 和 action 分发。
@@ -8,7 +8,7 @@ Core 的 ToolPkg 插件通过静态类 `Tools.Edge.execute` 调用固件原生�
 ## 两个方向
 
 ```text
-Core ToolPkg → Tools.Edge.execute(nodeId, {pluginId, action}, args) → Edge 原生动作
+Core ToolPkg → Tools.device(nodeId).Edge.execute({pluginId, action}, args) → Edge 原生动作
 Edge 事件源 → 现有 Space/Binding 路由 → chatEdgeEvent → on_edge_event → 插件 action handler
 ```
 
@@ -117,7 +117,7 @@ Core 不把 action 当成函数名动态执行，只调用固定 `on_edge_event`
 
 ## 迁移
 
-统一使用 `Tools.Edge` / `Tools.Io` 静态类；旧小写 `edge/io` 不再生成。
+统一使用 `Tools.device(nodeId).Edge` / `Tools.device(nodeId).Io` 设备视图；旧小写 `edge/io` 不再生成。
 早期开发版本的 `chatEdgeSceneEvent` 和 `on_edge_scene_event` 已替换为
 `chatEdgeEvent` 和 `on_edge_event`；触摸字段归入 action data。Core、示例及端侧服务需匹配更新，旧入口不保留。
 

@@ -74,7 +74,7 @@ Link Access 只提供控制面和 PeerLink carrier：
 | --- | --- | --- |
 | `operit-proxy-local` | 生成本地 Proxy、字符串 target 和本地 dispatch | Space 路由、设备信任、远程 session |
 | `operit-node-runtime` | `CoreNodeRouter`、Space 路由、Binding 同步和本地 Core 目标解析 | Flutter/CLI 入口协议 |
-| `operit-node-runtime::remote` | 节点配对、session、签名验证、连接管理及服务端接入 | 本地 Proxy 调用投影 |
+| `RuntimePeerService` / `HostRuntimePeerService` | 节点配对、session、签名验证、连接管理及服务端接入 | 本地 Proxy 调用投影 |
 | `operit-peer-link`（`node/peer-link`） | 共用 PeerLink 引擎和 HTTP/WebSocket/TCP/serial transport | 配对策略、存储、业务运行时 |
 | `operit-edge-contract` | Edge Service object/property address contract | Host implementation、Link dispatch、Access session |
 | `operit-node-edge` | 设备侧 Edge Node、Edge Service、Host capability dispatch | 桌面 runtime、Provider、ToolPkg、Chat、Access 控制面 |
@@ -134,6 +134,25 @@ HTTP 只承载已经建立的 PeerLink channel：
 WebSocket 使用同一套 `PeerFrame` 语义。carrier 的选择不改变 CoreNodeRouter 的
 调用模型，也不会生成第二条应用调用链。
 
+### 通道双向能力（仅 Space 通道）
+
+每条连接默认只有一个"发起"方向：拨号方发起 Call/Watch/Push，被连方只执行与应答
+（拨号侧只关联应答，被连侧只分发请求）。被连方若需要主动调用对端——而对端位于
+NAT 或端口重映射代理之后、其地址在本侧不可拨时——双方之间这条连接就是唯一可行
+的路径。
+
+两端在握手里各自声明 `duplex` 能力（`Hello` / `HelloReply` 的同名字段，缺省
+false），因此与旧版本混跑时自动保持单向行为，双方都声明后才启用：
+
+* 通道两端各有一个读循环（只做应答关联）与一个分发任务（执行对端请求、下发
+  WatchEvent），互不阻塞：正在执行对端请求的一侧仍能收到自己发起的调用的应答。
+* 被连方把该通道登记为可调用路由，优先于拨号，因此调用一个只会拨进来的对端不再
+  需要它的任何地址。
+* 授权不因方向而放宽：被连方在每个业务入口按 `spaceInbound` 重校，拨号方按
+  `spaceOutbound` 重校（即"本侧仍被允许拨该对端"）。撤销后两者立即失效，通道
+  随之下线。
+* 配对 session 与 SessionReturn 通道保持单向语义，不受此能力影响。
+
 ## 6. 流和同步
 
 Watch 和反向 Push 都拥有稳定的 `subscriptionId` 或 `pushId`，生命周期由 PeerLink
@@ -156,3 +175,47 @@ Flutter/CLI 到远端 CoreNode 的 Proxy 转发
 
 配对、发现、静态 Web 服务器和控制面 session 仍由 Link Access 保留；它们与本地
 Core 链路和 Space 数据链路相互独立。
+
+## 5. 配对、路由策略与设备工具的共同入口
+
+`NodeServices` 在一个节点内共享同一个 `RuntimePeerService`。配对、认证、连接和
+session 生命周期由 Peer runtime 持有；Core 与 Edge 都使用这个引擎，不另建工具专用
+连接。调用方通过 `hasPairing(nodeId, PairingDirection)` 查询入站、出站或任一方向授权，
+单向配对不会产生反向授权。入网前的 Space 请求只走直接配对入口；配对本身不授予
+Space 成员资格。Core 与 Edge 的 Space 快照、入网及取消请求共用
+`NodeSpaceContext` 上的 `dispatchPeerSpaceCall`，入网后的业务同步或轻量控制投影仍由
+各自的实现负责。
+
+`space_policy::spaceChannelScope` 集中判断 Space 回连准入，Core Router 与 Edge 的
+`NodeSpaceService` 共用它。双方都必须属于同一个已初始化的 Space 控制投影，且没有
+被断开。传输认证与 Space 成员准入分别由各自的持有者负责。
+
+`space_policy::RoutingPolicy` 从控制日志一次读取断开节点与中继权限。设备状态查询、
+公开路由计划和实际下一跳选择都调用同一个 `routePlan`；列出多个设备时复用同一份
+策略。第一跳必须是活动相邻节点，后续中继必须具有 `network.relay`，被断开的节点
+不能成为目的地、第一跳或中继。撤销中继权限不会阻止该设备作为直接调用的目的地。
+
+`route_forwarding` 统一来源和中继的 call、snapshot、watch、push 提交循环。路由器集中
+检查 Space 标识、上一跳/来源/目的地的成员资格和撤销状态，以及本机管理 target 的
+限制；Peer runtime 只按路由器选定的下一跳提交。逐跳保留原始 `originNodeId`、最终
+`targetNodeId` 与 `routeKind`，扣减 TTL，排除上一跳和已失败的相邻节点。
+
+插件 v2 的工具入口使用相同链路：
+
+```text
+Tools.device(nodeId).Files.read(path)
+  -> DeviceToolRuntime
+  -> CoreNodeRouter / Peer runtime / 中继 Router
+  -> 目标 DeviceToolService
+  -> 目标 Core 工具注册表
+
+Tools.device(nodeId).Edge.execute(...) / Io.execute(...)
+  -> 同一个 DeviceToolRuntime 与路由入口
+  -> 目标 Edge Service / Host capability
+```
+
+JS bridge 与内置硬件工具共用 `DeviceToolRuntime`，没有独立的 `EdgeToolRuntime`。
+设备工具 `core.tools` 和硬件 target `edge.plugins`、`edge.deviceIo` 在响应丢失后不切换
+下一跳重发；该规则覆盖全部提交形式和中继，避免重复副作用。普通路由请求仍可在
+链路错误后尝试其他下一跳。流建立后的取消和清理由 Peer runtime 与目标执行器负责，
+转发层不重放已经打开的流，也不退回本机执行。

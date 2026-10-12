@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use operit_host_api::HostEnvironmentDescriptor;
 use operit_host_api::HostManager::HostManager;
 use operit_plugin_sdk::javascript::{
-    JsExecutionHost, JsToolCallRequest, JsToolCallResult, JsToolCallResultData,
+    JsExecutionHost, JsToolCallRequest, JsToolCallResult,
     JsToolNameResolutionRequest, JsToolPkgIpcCompletion, JsToolPkgIpcRequest,
     JsToolPkgResourceRequest, JsToolPkgWasmRequest, JsToolPkgWasmResult, ToolPkgConfigScope,
 };
@@ -1177,6 +1177,15 @@ impl AIToolHandler {
     /// Resolves and directly executes a non-AI tool request through the registered tool chain.
     #[allow(non_snake_case)]
     pub async fn executeTool(&mut self, tool: AITool) -> ToolResult {
+        self.executeToolWithAccess(tool, ToolExecutionAccess::Direct).await
+    }
+
+    /// Runs receiver-owned permission checks while retaining ordinary tool hooks and lifecycle.
+    pub async fn executeToolWithPermissions(&mut self, tool: AITool) -> ToolResult {
+        self.executeToolWithAccess(tool, ToolExecutionAccess::AiPermission).await
+    }
+
+    async fn executeToolWithAccess(&mut self, tool: AITool, access: ToolExecutionAccess) -> ToolResult {
         ChainLogger::info(
             TOOL_CHAIN,
             "tool.execute.request",
@@ -1231,6 +1240,18 @@ impl AIToolHandler {
             return validationFailedResult;
         }
 
+        if matches!(access, ToolExecutionAccess::AiPermission) {
+            let preflight = match executor.accessSpec(&tool) {
+                Ok(spec) => self.executeAccessPreflightAsync(&tool, spec).await.map(|_| ()),
+                Err(error) => Err(ToolResult {toolName: tool.name.clone(), success: false,
+                    result: stringResultData(""), error: Some(format!("Tool access declaration failed: {error}"))}),
+            };
+            if let Err(result) = preflight {
+                self.notifyToolExecutionResult(&tool, &result);
+                self.notifyToolExecutionFinished(&tool);
+                return result;
+            }
+        }
         self.notifyToolExecutionStarted(&tool);
         ChainLogger::info(
             TOOL_CHAIN,
@@ -1420,46 +1441,29 @@ impl JsExecutionHost for AIToolHandler {
         &self,
         request: JsToolCallRequest,
     ) -> operit_plugin_sdk::javascript::JsExecutionCompletion<JsToolCallResult> {
+        if let Some(device) = &request.device {
+            if !matches!(
+                device.action,
+                operit_plugin_sdk::javascript::JsDeviceToolAction::Execute
+                    | operit_plugin_sdk::javascript::JsDeviceToolAction::Port
+            ) {
+                return self.runtimeSupport().executeDeviceTool(request, None);
+            }
+            let host = self.clone();
+            let tool = crate::tools::DeviceTools::tool_from_request(&request);
+            let preflight = Box::pin(async move {
+                match host.checkToolInterception(&tool).await {
+                    AIToolHookDecision::Block(reason) => Err(reason),
+                    _ => Ok(()),
+                }
+            });
+            return self.runtimeSupport().executeDeviceTool(request, Some(preflight));
+        }
         let host = self.clone();
         Box::pin(async move {
-            let tool = AITool {
-                name: request.qualified_tool_name(),
-                parameters: request
-                    .parameters
-                    .into_iter()
-                    .map(|(name, value)| ToolParameter {
-                        name,
-                        value: match value {
-                            serde_json::Value::Null => String::new(),
-                            serde_json::Value::String(value) => value,
-                            value => value.to_string(),
-                        },
-                    })
-                    .collect(),
-            };
+            let tool = crate::tools::DeviceTools::tool_from_request(&request);
             let mut handler = host;
-            let result = handler.executeTool(tool).await;
-            let data = match result.result {
-                ToolResultData::BinaryResultData(data) => JsToolCallResultData::Binary(data.value),
-                ToolResultData::StringResultData(data) => {
-                    JsToolCallResultData::Value(serde_json::Value::String(data.value))
-                }
-                ToolResultData::BooleanResultData(data) => {
-                    JsToolCallResultData::Value(serde_json::Value::Bool(data.value))
-                }
-                ToolResultData::IntResultData(data) => JsToolCallResultData::Value(
-                    serde_json::Value::Number(serde_json::Number::from(data.value)),
-                ),
-                data => JsToolCallResultData::Value(
-                    serde_json::from_str(&data.toJson())
-                        .expect("ToolResultData JSON conversion must succeed"),
-                ),
-            };
-            JsToolCallResult {
-                success: result.success,
-                data,
-                error: result.error,
-            }
+            crate::tools::DeviceTools::result_to_js(handler.executeTool(tool).await)
         })
     }
 

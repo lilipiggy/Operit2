@@ -1,28 +1,25 @@
 # Core 插件调用 Edge 硬件端口（首版）
 
 插件 JavaScript 仍在 Core 的原 ToolPkg 运行时执行；只有硬件动作在选中的 Edge
-节点执行。公共入口是静态类 `Tools.Edge` 和 `Tools.Io`，不需要也不允许创建实例。
+节点执行。公共入口是设备视图 `Tools.device(nodeId).Edge` 和 `Tools.device(nodeId).Io`，通过 `Tools.device(nodeId)` 选择节点。
 `tools` 仍是既有 `Tools` 的兼容别名，但新代码统一使用 `Tools`；不存在小写 `edge/io` 类。
 边缘节点可以是不同单片机或操作系统，接口不要求 ESP32、屏幕或触摸。
 
 ## 两个入口
 
 ```ts
-const response = await Tools.Edge.execute(
-  edgeNodeId,
+const response = await Tools.device(edgeNodeId).Edge.execute(
   { pluginId: "device.status", action: "read" },
   {}
 );
 console.log(response.nodeId, response.data);
 
-const current = await Tools.Io.execute(
-  edgeNodeId,
+const current = await Tools.device(edgeNodeId).Io.execute(
   { port: "gpio", operation: "read" },
   { pin: 2 }
 );
 // 只有已知允许控制的输出引脚才应写入；具体板子的限制由 Edge Host 校验。
-await Tools.Io.execute(
-  edgeNodeId,
+await Tools.device(edgeNodeId).Io.execute(
   { port: "gpio", operation: "write" },
   { pin: 2, level: true }
 );
@@ -43,18 +40,19 @@ await Tools.Io.execute(
 
 ## 路由与权限
 
-两个方法都经现有 `toolCall` / `AIToolHandler` 注册工具权限链执行，然后交给这个
-Core 树注入的节点 Router。`io/read` 声明 READ，`io/write` 声明 WRITE；原生插件动作
-当前没有可信读写效果元数据，`edge/execute` **保守声明 WRITE**，不按 action 名字猜权限。
-它们是 INTERNAL SDK 工具，不自动变成模型可随意选择的公开硬件工具；专属 ToolPkg
-可以封装为自己的、具有适当参数和权限说明的业务工具。
+两个方法经现有 JS 桥接和 `AIToolHandler` 调用拦截进入统一设备运行时，
+由该 Core 树注入的 Router 执行认证路由。插件内部调用保留现有 SDK 的权限语义。
+AI / CLI 的 `edge_execute` / `io_execute` 注册工具也进入同一运行时，并保留调用方的权限检查：
+`io/read` 声明 READ，`io/write` 声明 WRITE；原生插件动作缺少可信读写效果元数据，
+`edge/execute` **保守声明 WRITE**，不按 action 名字猜权限。
+这些注册入口是 INTERNAL 工具；专属 ToolPkg 可以封装为具有参数和权限说明的公开业务工具。
 
 - 标准 Target 节点路由，不改 Chat Binding，不创建额外 Link/HTTP/串口客户端。
 - 复用配对方向、空间身份、NetworkControl 和 Edge 原生 action 白名单校验。
   不在本接口执行配对、授予权限、添加成员或扩大可达范围。
 - 接口信息不接受任意 `target`、`methodName`、路由种类、身份、地址或 token。
 - 离线、节点未授权、插件缺失、action 未声明、端口不支持都应明确失败。
-- 执行器只提交一次，不额外增加业务级自动重试／重放；Router 既有的路由不可用处理保持不变。
+- 沿现有路由完成多跳转发；调用端和中继端均不会因应答丢失自动重提硬件动作。
   本入口不承诺硬件动作 exactly-once；调用方停止等待不意味着设备操作回滚。
   已发出的 Link 请求仍由宿主任务完成 ACK 清理，避免取消业务调用破坏共享会话。
 - Router 和执行器来自同一个 Core 树；不使用进程全局网络客户端。宿主缺少异步任务调度
@@ -63,14 +61,15 @@ Core 树注入的节点 Router。`io/read` 声明 READ，`io/write` 声明 WRITE
 ## 暂不实现的后续能力
 
 串口 `read/write`、端口枚举、串口会话、波特率设置、二进制分块、订阅输入流、背压、
-超时／设备应答关联、跨 Core 委托及完整专属硬件插件实例生命周期暂未开放。
+完整专属硬件插件实例生命周期暂未开放。设备视图支持 `timeoutMs`、`signal` 和
+`cancel()`；已提交的固件动作继续完成 Link 应答清理，不能通过取消撤销。
 `{port:"serial",operation:"read"}` 当前**明确拒绝**，不返回空数据假装接通。
-后续可保留 `nodeId + interfaceInfo + args` 入口并增补新的、经过板级注册与权限校验的
+后续可在设备视图的 `execute(interfaceInfo, args)` 上增补经过板级注册与权限校验的
 端口能力；开发普通插件不需要另学一套远端 JS 插件 API。
 
 ## 原生场景显示
 
-`display.scene` v1 通过同一 `Tools.Edge.execute` 入口提供租约、素材分块校验缓存、
+`display.scene` v1 通过同一 `Tools.device(nodeId).Edge.execute` 入口提供租约、素材分块校验缓存、
 图层叠加、本地动画和触摸事件。完整协议见同目录 `edge-scene.md`。
 该插件的业务协议错误使用 `data.ok:false` 信封；调用方必须检查，不能只看外层传输成功。
 授权、离线、未声明 action 等入口错误仍拒绝 Promise。
@@ -81,7 +80,7 @@ Edge → Core 统一使用 `chatEdgeEvent` 和 ToolPkg main 导出 `on_edge_even
 事件名为 `edge_event`。按 `source` 与每条 `action` 分发 JSON 对象数据，
 可用于触摸、GPIO、传感器、串口消息等，不在 Core 入口写死屏幕数据结构。
 完整协议、监听示例及固件事件源见 [edge-events.md](edge-events.md)。
-此通用事件能力不代表 `Tools.Io` 已开放串口读写；事件生产动作由固件显式注册。
+此通用事件能力不代表 `Tools.device(nodeId).Io` 已开放串口读写；事件生产动作由固件显式注册。
 
 ## 平台边界
 

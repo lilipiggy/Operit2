@@ -15,5 +15,9 @@ operit-plugin-sdk-ipc-bridge = { path = "../../plugin/sdk-ipc-bridge" }
 operit-runtime = { path = "../../runtime/application", default-features = false, features = ["javascript"] }
 operit-tools = { path = "../../tool/services" }
 operit-plugin-sdk = { path = "../../plugin/sdk" }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+operit-host-native-common = { path = "../../../../hosts/common/operit-host-native-common", default-features = false, features = ["fs", "http", "scheduler", "storage"] }
+operit-util = { path = "../../foundation/util" }

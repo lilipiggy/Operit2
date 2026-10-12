@@ -292,7 +292,7 @@ impl ScenePlugin {
         s.expire(self.now());
         json!({"active":s.active(),"revision":s.revision})
     }
-    /// Local simulator adapter only. Never exposed through Tools.Edge or containing lease handles.
+    /// Local simulator adapter only. Never exposed through Tools.device(nodeId).Edge or containing lease handles.
     pub fn visual_snapshot(&self) -> Value {
         let mut s = self.state.lock().unwrap();
         s.expire(self.now());
