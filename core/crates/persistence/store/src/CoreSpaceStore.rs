@@ -2379,8 +2379,8 @@ mod tests {
             .expect("administrator must admit a member");
 
         assert!(control
-            .nodeHasCapability("peer-member", "network.user", None)
-            .expect("default user capability must materialize"));
+            .nodeHasCapability("peer-member", "network.devices.view", None)
+            .expect("default user device view capability must materialize"));
         assert!(control
             .nodeHasCapability("peer-member", "chat.read", None)
             .expect("default user chat read capability must materialize"));
@@ -2432,8 +2432,8 @@ mod tests {
             .nodeHasCapability("peer-runner", "network.audit.read", None)
             .expect("readmitted member must not regain auditor capability"));
         assert!(control
-            .nodeHasCapability("peer-runner", "network.user", None)
-            .expect("readmitted member must receive ordinary capability"));
+            .nodeHasCapability("peer-runner", "network.devices.view", None)
+            .expect("readmitted member must receive device view capability"));
         assert!(control
             .nodeHasCapability("peer-runner", "runtime.execute", None)
             .expect("readmitted member must receive default execution capability"));

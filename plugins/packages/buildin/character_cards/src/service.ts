@@ -252,12 +252,13 @@ function assertActive(value: unknown): asserts value is ActivePrompt {
   const keys = Object.keys(value);
   if (
     keys.length !== 1 ||
-    (keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup")
+    (keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup" && keys[0] !== "Model")
   )
     throw new Error("当前提示词类型无效");
   const selection = value[keys[0]];
   assertObject(selection, "当前提示词选择");
   requireId(selection.id, "当前提示词标识");
+  if (keys[0] === "Model" && selection.id !== "chat") throw new Error("Invalid model selection");
 }
 
 /** Builds the editor aggregate exclusively from independent real canonical reads. */
@@ -689,8 +690,10 @@ async function menuMemoryOwner(
   const binding = await findChatBinding(chatId);
   const selection =
     binding === null ? null : parseChatSelection(binding.selection);
+  if (selection?.kind === "model") throw new Error("Model-only conversations have no role memory owner");
   if (selection?.kind === "card") return resolveMemoryOwner(selection.id, host);
   const active = await host.readActive();
+  if ("Model" in active) throw new Error("Model-only selection has no role memory owner");
   return resolveMemoryOwner(
     "CharacterCard" in active ? active.CharacterCard.id : "default",
     host,

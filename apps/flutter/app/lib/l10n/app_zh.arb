@@ -47,16 +47,6 @@
   "connectingAiService": "正在连接 AI 服务...",
   "receivingAiResponse": "正在接收 AI 响应...",
   "receivingToolResultAiResponse": "正在接收工具执行后的 AI 响应...",
-  "roleResponsePlannerPlanning": "正在规划群组发言顺序...",
-  "roleResponsePlannerMemberReplying": "正在生成「{memberName}」的回复...",
-  "@roleResponsePlannerMemberReplying": {
-    "placeholders": {
-      "memberName": {
-        "type": "String"
-      }
-    }
-  },
-  "roleResponsePlannerFailed": "群组规划失败",
   "summarizingMemories": "正在总结记忆...",
   "summaryGenerating": "正在生成总结...",
   "chatCompressingHistory": "正在压缩历史记录...",
@@ -113,8 +103,6 @@
   "toolApprovalDeny": "拒绝",
   "toolApprovalAllowOnce": "允许本次",
   "toolApprovalAlwaysAllow": "本次会话中始终允许",
-  "createGroupTitle": "新建分组",
-  "groupNameLabel": "群组名称",
   "renameConversationTitle": "编辑标题",
   "newTitleLabel": "新标题",
   "deleteConversationTitle": "确认删除对话",
@@ -465,13 +453,13 @@
   "settingsCategoryWorkspaceDescription": "管理默认工作区、终端会话、浏览器模式、脚本和网页自动化。",
   "settingsCategoryGlobalBehaviorTitle": "全局行为设置",
   "settingsCategoryGlobalBehaviorSubtitle": "输入处理与交互",
-  "settingsCategoryGlobalBehaviorDescription": "设置不随角色卡变化的输入与交互行为。",
+  "settingsCategoryGlobalBehaviorDescription": "设置应用全局的输入与交互行为。",
   "settingsCategoryAppearanceTitle": "外观与交互",
   "settingsCategoryAppearanceSubtitle": "主题、气泡与交互",
   "settingsCategoryAppearanceDescription": "调整全局主题、背景壁纸、聊天气泡样式与信息流交互。",
   "settingsCategoryDataTitle": "数据与备份",
   "settingsCategoryDataSubtitle": "备份、恢复、统计",
-  "settingsCategoryDataDescription": "备份聊天、角色和模型配置，恢复备份内容，并查看数据统计。",
+  "settingsCategoryDataDescription": "备份聊天、插件数据和模型配置，恢复备份内容，并查看数据统计。",
   "settingsCategoryAccessLinksTitle": "设备空间",
   "settingsCategoryAccessLinksSubtitle": "连接、同步、协同",
   "settingsCategoryAccessLinksDescription": "管理当前设备空间，连接设备并同步数据和路由。",
@@ -490,7 +478,7 @@
       }
     }
   },
-  "settingsComingSoon": "这个区域会继续接入现有 runtime 能力。当前优先完成模型、角色和工具设置。",
+  "settingsComingSoon": "这个区域会继续接入现有 runtime 能力。当前优先完成模型和工具设置。",
   "settingsAdvanced": "高级设置",
   "settingsActive": "当前",
   "settingsActivate": "设为当前",
@@ -1274,14 +1262,6 @@
   },
   "settingsAppearanceThemeSection": "主题",
   "settingsAppearanceThemeMode": "当前模式",
-  "settingsAppearanceThemeTarget": "主题保存目标",
-  "settingsAppearanceThemeTargetGlobal": "全局",
-  "settingsAppearanceThemeTargetGroup": "当前群组：{name}",
-  "@settingsAppearanceThemeTargetGroup": {
-    "placeholders": {
-      "name": {}
-    }
-  },
   "settingsAppearanceThemeSystem": "跟随系统",
   "settingsAppearanceThemeLight": "浅色",
   "settingsAppearanceThemeDark": "深色",
@@ -1394,7 +1374,7 @@
   "settingsAppearanceShowAvatars": "显示消息头像",
   "settingsAppearanceMessageDisplaySection": "消息显示",
   "settingsAppearanceShowThinkingProcess": "显示思考过程",
-  "settingsAppearanceShowRoleName": "显示角色名",
+  "settingsAppearanceShowRoleName": "显示自定义回复者名称",
   "settingsAppearanceShowUserName": "显示用户名",
   "settingsAppearanceShowModelName": "显示模型名",
   "settingsAppearanceShowModelProvider": "显示模型供应商",
@@ -1642,7 +1622,7 @@
   "settingsDataSnapshotBackupTitle": "完整快照",
   "settingsDataExportRawSnapshot": "导出快照",
   "settingsDataImportRawSnapshot": "恢复快照",
-  "settingsDataExportRawSnapshotDescription": "把聊天、角色、模型设置和本地文件打包成一个备份文件。恢复时会用备份里的数据覆盖当前数据。",
+  "settingsDataExportRawSnapshotDescription": "把聊天、插件数据、模型设置和本地文件打包成一个备份文件。恢复时会用备份里的数据覆盖当前数据。",
   "settingsDataSnapshotBytes": "快照大小：{bytes} 字节",
   "@settingsDataSnapshotBytes": {
     "placeholders": {
@@ -1783,7 +1763,6 @@
   "settingsRuntimeControlCapabilityNetworkRelay": "中继网络流量",
   "settingsRuntimeControlCapabilityStorageProvide": "提供存储空间",
   "settingsRuntimeControlCapabilityRuntimeExecute": "执行任务",
-  "settingsRuntimeControlCapabilityNetworkUser": "使用网络",
   "settingsRuntimeControlCapabilityChatRead": "读取聊天记录",
   "settingsRuntimeControlCapabilityViewDevices": "查看设备与当前身份",
   "settingsRuntimeControlCapabilityApproval": "审批授权",
@@ -1931,7 +1910,7 @@
       }
     }
   },
-  "chatMessageRole": "角色: {roleName}",
+  "chatMessageRole": "回复者: {roleName}",
   "@chatMessageRole": {
     "placeholders": {
       "roleName": {
@@ -2135,7 +2114,7 @@
   "settingsAppearanceThemeConfigDelete": "删除当前未启用的主题配置",
   "settingsAppearanceThemeConfigName": "主题名称",
   "settingsAppearanceThemeConfigNameRequired": "请输入主题名称",
-  "settingsAppearanceThemeConfigCustomHint": "点击 + 新建主题配置，即可在角色卡或群组中绑定。",
+  "settingsAppearanceThemeConfigCustomHint": "点击 + 创建和管理独立的主题配置。",
   "settingsAppearanceThemeConfigEditingHint": "修改外观会自动保存到当前主题配置。",
   "settingsAppearanceThemeConfigFailed": "主题操作失败：{detail}",
   "@settingsAppearanceThemeConfigFailed": {

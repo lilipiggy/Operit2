@@ -13,6 +13,7 @@ import '../../../l10n/generated/app_localizations.dart';
 import '../../common/contributions/ChatSidebarTabHost.dart';
 import '../../features/chat/viewmodel/ChatSelectionTransition.dart';
 import '../../features/chat/components/NewChatIntro.dart';
+import '../../features/chat/components/workspace/WorkspaceUnbindDialog.dart';
 import '../navigation/AppNavigationModels.dart';
 import '../layout/SidebarDockController.dart';
 import '../layout/NavigationLayoutMetrics.dart';
@@ -264,9 +265,34 @@ class _DrawerContentState extends State<DrawerContent> {
         await _updateConversationPinned(history);
       case ConversationAction.toggleLocked:
         await _updateConversationLocked(history);
+      case ConversationAction.unbindWorkspace:
+        await _showUnbindConversationWorkspaceDialog(history);
       case ConversationAction.delete:
         await _showDeleteConversationDialog(history);
     }
+  }
+
+  /// Lets a conversation detach an exact workspace binding even when its record is missing.
+  Future<void> _showUnbindConversationWorkspaceDialog(
+    core_proxy.ChatHistoryListItem history,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (dialogContext) => WorkspaceUnbindDialog(
+        onUnbindWorkspace: () async {
+          final currentHistory = widget.histories
+              .where((chat) => chat.id == history.id)
+              .single;
+          if (currentHistory.workspaceId != history.workspaceId) {
+            throw StateError(
+              AppLocalizations.of(dialogContext)!.workspaceUnbindChanged,
+            );
+          }
+          await _chatCoreProxy.unbindChatFromWorkspace(chatId: history.id);
+        },
+      ),
+    );
   }
 
   /// Deletes a conversation and reports a policy refusal in the drawer.
@@ -370,15 +396,23 @@ class _DrawerContentState extends State<DrawerContent> {
     }
   }
 
-  /// Keeps the legacy native workspace identity and unbound fallback.
+  /// Groups unbound conversations together and preserves bound workspace identities.
   String _workspaceKey(core_proxy.ChatHistoryListItem history) {
     final id = history.workspaceId?.trim();
     return id == null || id.isEmpty ? 'workspace:unbound' : 'workspace:$id';
   }
 
+  /// Distinguishes missing workspace records from conversations without a binding.
   String _workspaceLabel(core_proxy.ChatHistoryListItem history) {
+    final id = history.workspaceId?.trim();
+    if (id == null || id.isEmpty) {
+      return '未绑定工作区';
+    }
     final name = history.workspaceName?.trim();
-    return name == null || name.isEmpty ? '未绑定工作区' : name;
+    if (name == null || name.isEmpty) {
+      return '工作区缺失';
+    }
+    return name;
   }
 
   /// Projects the full canonical order into native workspace sections and search matches.

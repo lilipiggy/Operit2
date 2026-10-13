@@ -338,24 +338,6 @@ abstract class AppLocalizations {
   /// **'Receiving AI response after tool execution...'**
   String get receivingToolResultAiResponse;
 
-  /// No description provided for @roleResponsePlannerPlanning.
-  ///
-  /// In en, this message translates to:
-  /// **'Planning group speaking order...'**
-  String get roleResponsePlannerPlanning;
-
-  /// No description provided for @roleResponsePlannerMemberReplying.
-  ///
-  /// In en, this message translates to:
-  /// **'Generating a reply from \"{memberName}\"...'**
-  String roleResponsePlannerMemberReplying(String memberName);
-
-  /// No description provided for @roleResponsePlannerFailed.
-  ///
-  /// In en, this message translates to:
-  /// **'Group planning failed'**
-  String get roleResponsePlannerFailed;
-
   /// No description provided for @summarizingMemories.
   ///
   /// In en, this message translates to:
@@ -505,18 +487,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Always allow in this session'**
   String get toolApprovalAlwaysAllow;
-
-  /// No description provided for @createGroupTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'New group'**
-  String get createGroupTitle;
-
-  /// No description provided for @groupNameLabel.
-  ///
-  /// In en, this message translates to:
-  /// **'Group name'**
-  String get groupNameLabel;
 
   /// No description provided for @renameConversationTitle.
   ///
@@ -1847,7 +1817,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsCategoryGlobalBehaviorDescription.
   ///
   /// In en, this message translates to:
-  /// **'Configure input and interaction behavior that does not vary by character card.'**
+  /// **'Configure application-wide input and interaction behavior.'**
   String get settingsCategoryGlobalBehaviorDescription;
 
   /// No description provided for @settingsCategoryAppearanceTitle.
@@ -1883,7 +1853,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsCategoryDataDescription.
   ///
   /// In en, this message translates to:
-  /// **'Back up chats, characters, and model settings, restore backup content, and view data statistics.'**
+  /// **'Back up chats, plugin data, and model settings, restore backup content, and view data statistics.'**
   String get settingsCategoryDataDescription;
 
   /// No description provided for @settingsCategoryAccessLinksTitle.
@@ -1955,7 +1925,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsComingSoon.
   ///
   /// In en, this message translates to:
-  /// **'This area will continue connecting existing runtime capabilities. Models, characters, and tools are being completed first.'**
+  /// **'This area will continue connecting existing runtime capabilities. Model and tool settings are being completed first.'**
   String get settingsComingSoon;
 
   /// No description provided for @settingsAdvanced.
@@ -4682,24 +4652,6 @@ abstract class AppLocalizations {
   /// **'Current mode'**
   String get settingsAppearanceThemeMode;
 
-  /// No description provided for @settingsAppearanceThemeTarget.
-  ///
-  /// In en, this message translates to:
-  /// **'Theme save target'**
-  String get settingsAppearanceThemeTarget;
-
-  /// No description provided for @settingsAppearanceThemeTargetGlobal.
-  ///
-  /// In en, this message translates to:
-  /// **'Global'**
-  String get settingsAppearanceThemeTargetGlobal;
-
-  /// No description provided for @settingsAppearanceThemeTargetGroup.
-  ///
-  /// In en, this message translates to:
-  /// **'Current group: {name}'**
-  String settingsAppearanceThemeTargetGroup(Object name);
-
   /// No description provided for @settingsAppearanceThemeSystem.
   ///
   /// In en, this message translates to:
@@ -5375,7 +5327,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceShowRoleName.
   ///
   /// In en, this message translates to:
-  /// **'Show role name'**
+  /// **'Show custom responder names'**
   String get settingsAppearanceShowRoleName;
 
   /// No description provided for @settingsAppearanceShowUserName.
@@ -6126,7 +6078,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsDataExportRawSnapshotDescription.
   ///
   /// In en, this message translates to:
-  /// **'Pack chats, characters, model settings, and local files into one backup file. Restoring replaces current data with the backup.'**
+  /// **'Pack chats, plugin data, model settings, and local files into one backup file. Restoring replaces current data with the backup.'**
   String get settingsDataExportRawSnapshotDescription;
 
   /// No description provided for @settingsDataSnapshotBytes.
@@ -6556,12 +6508,6 @@ abstract class AppLocalizations {
   /// **'Run tasks'**
   String get settingsRuntimeControlCapabilityRuntimeExecute;
 
-  /// No description provided for @settingsRuntimeControlCapabilityNetworkUser.
-  ///
-  /// In en, this message translates to:
-  /// **'Use the network'**
-  String get settingsRuntimeControlCapabilityNetworkUser;
-
   /// No description provided for @settingsRuntimeControlCapabilityChatRead.
   ///
   /// In en, this message translates to:
@@ -6821,7 +6767,7 @@ abstract class AppLocalizations {
   /// No description provided for @chatMessageRole.
   ///
   /// In en, this message translates to:
-  /// **'Role: {roleName}'**
+  /// **'Responder: {roleName}'**
   String chatMessageRole(String roleName);
 
   /// No description provided for @chatMessageModel.
@@ -7403,7 +7349,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceThemeConfigCustomHint.
   ///
   /// In en, this message translates to:
-  /// **'Click + to create a theme configuration and bind it to a character or group.'**
+  /// **'Click + to create and manage independent theme configurations.'**
   String get settingsAppearanceThemeConfigCustomHint;
 
   /// No description provided for @settingsAppearanceThemeConfigEditingHint.

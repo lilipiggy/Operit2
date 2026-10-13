@@ -405,6 +405,14 @@ impl CoreLinkSharedClient for EdgeNode {
     async fn watch(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
         self.dispatchWatch(request)
     }
+
+    /// Rejects input-stream methods because current Edge services declare none.
+    async fn openPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        Err(CoreLinkError::methodNotFound(&format!("{}.{}", request.target, request.methodName)))
+    }
 }
 
 /// The lightweight node accepts the same Link interface as a full node.
@@ -420,11 +428,10 @@ impl operit_link::CoreLinkClient for EdgeNode {
     async fn watch(&mut self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
         self.dispatchWatch(request)
     }
+    /// Opens an input stream through the shared Edge service capability boundary.
     async fn openPush(&mut self, request: operit_link::CorePushRequest)
         -> Result<Box<dyn operit_link::CoreLinkPushSession>, CoreLinkError> {
-        // No current board service declares an input-stream method. Do not
-        // invent a transport-specific push operation or silently turn it into call.
-        Err(CoreLinkError::methodNotFound(&format!("{}.{}", request.target, request.methodName)))
+        CoreLinkSharedClient::openPush(self, request).await
     }
 }
 
@@ -523,8 +530,7 @@ mod tests {
         assert!(push.is_err());
     }
 
-    /// The transport-neutral ingress must execute the existing service/Host path,
-    /// not a PeerFrame adapter or a second Edge method registry.
+    /// Executes the existing Edge service and Host path through standard Link ingress.
     #[tokio::test]
     async fn standard_wire_session_executes_edge_service_and_host() {
         use operit_host_api::{DeviceDigitalOutputRequest, DeviceDigitalOutputState, DeviceIoHost, HostResult};

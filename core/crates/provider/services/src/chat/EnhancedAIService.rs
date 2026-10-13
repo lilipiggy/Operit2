@@ -134,7 +134,6 @@ impl EnhancedAISharedState {
             options.chatHistory.clone(),
             options.workspacePath.clone(),
             options.workspaceFolders.clone(),
-            options.groupParticipantNamesText.clone(),
             options.proxySenderName.clone(),
             MutableSharedStreamMirror::new(usize::MAX),
         );
@@ -214,14 +213,12 @@ pub struct SendMessageOptions {
     pub onTokenLimitExceeded: Option<fn()>,
     pub customSystemPromptTemplate: Option<String>,
     pub isSubTask: bool,
-    pub characterName: Option<String>,
+    pub participantName: Option<String>,
     pub avatarUri: Option<String>,
     /// Explicit participant selected from a plugin-resolved execution plan.
     pub executionParticipantId: Option<String>,
     /// Resolved neutral context propagated unchanged through prompt and tool execution.
     pub chatConfiguration: Option<ChatConfigurationResult>,
-    pub enableGroupOrchestrationHint: bool,
-    pub groupParticipantNamesText: Option<String>,
     pub proxySenderName: Option<String>,
     pub callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
     pub onToolInvocation: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -238,6 +235,7 @@ pub struct ResumeRequest {
 }
 
 impl SendMessageOptions {
+    /// Creates explicit send controls before the configuration owner supplies an execution profile.
     pub fn new() -> Self {
         Self {
             cancellationToken: None,
@@ -255,12 +253,10 @@ impl SendMessageOptions {
             onTokenLimitExceeded: None,
             customSystemPromptTemplate: None,
             isSubTask: false,
-            characterName: None,
+            participantName: None,
             avatarUri: None,
             executionParticipantId: None,
             chatConfiguration: None,
-            enableGroupOrchestrationHint: false,
-            groupParticipantNamesText: None,
             proxySenderName: None,
             callbacks: None,
             onToolInvocation: None,
@@ -283,18 +279,17 @@ pub struct MessageExecutionContext {
     pub conversationHistory: Vec<PromptTurn>,
     pub workspacePath: Option<String>,
     pub workspaceFolders: Vec<String>,
-    pub groupParticipantNamesText: Option<String>,
     pub proxySenderName: Option<String>,
     pub eventChannel: MutableSharedStreamMirror<TextStreamEventMirror>,
 }
 
 impl MessageExecutionContext {
+    /// Creates the generic request context for one provider execution.
     pub fn new(
         executionId: i32,
         conversationHistory: Vec<PromptTurn>,
         workspacePath: Option<String>,
         workspaceFolders: Vec<String>,
-        groupParticipantNamesText: Option<String>,
         proxySenderName: Option<String>,
         eventChannel: MutableSharedStreamMirror<TextStreamEventMirror>,
     ) -> Self {
@@ -307,7 +302,6 @@ impl MessageExecutionContext {
             conversationHistory,
             workspacePath,
             workspaceFolders,
-            groupParticipantNamesText,
             proxySenderName,
             eventChannel,
         }
@@ -356,12 +350,10 @@ pub struct SendMessageExecution {
 
 pub struct SendMessageRuntime {
     pub chatConfiguration: ChatConfigurationResult,
-    pub activePromptMetadata: BTreeMap<String, String>,
+    pub promptMetadata: BTreeMap<String, String>,
     pub useEnglish: bool,
     pub userPreferencesText: String,
     pub introPrompt: String,
-    pub waifuRulesText: String,
-    pub avatarMoodRulesText: String,
     pub disableUserPreferenceDescription: bool,
     pub aiName: String,
     pub hasImageRecognition: bool,
@@ -522,10 +514,6 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                 Some(value) => value.clone(),
                 None => String::new(),
             };
-            let group_participant_names_text = match &request.group_participant_names_text {
-                Some(value) => value.clone(),
-                None => String::new(),
-            };
             let host_environment = self.tool_handler.getHostEnvironmentDescriptor();
             // Use the same host-owned roots as file tools, not a guessed storage location.
             // Resolve afresh for every request so workspace switches cannot retain stale paths.
@@ -587,7 +575,7 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     description: package.description,
                 })
                 .collect::<Vec<_>>();
-            let mut hookMetadata = btree_to_value_map(&request.active_prompt_metadata);
+            let mut hookMetadata = btree_to_value_map(&request.prompt_metadata);
             hookMetadata.insert(
                 "executionContext".to_string(),
                 self.executionContext.clone(),
@@ -620,9 +608,6 @@ impl SystemPromptComposer for RuntimeSystemPromptComposer {
                     ..SystemPromptOptions::default()
                 },
                 custom_intro_prompt: request.intro_prompt.clone(),
-                enable_group_orchestration_hint: request.enable_group_orchestration_hint,
-                group_orchestration_role_name: request.ai_name.clone(),
-                group_participant_names_text,
             })
             .await
         })
@@ -805,8 +790,6 @@ impl EnhancedAIService {
         promptFunctionType: PromptFunctionType,
         customSystemPromptTemplate: Option<String>,
         participantId: Option<String>,
-        enableGroupOrchestrationHint: bool,
-        groupParticipantNamesText: Option<String>,
         proxySenderName: Option<String>,
         isSubTask: bool,
         functionType: FunctionType,
@@ -850,8 +833,6 @@ impl EnhancedAIService {
                         .to_string(),
                     custom_system_prompt_template: customSystemPromptTemplate,
                     participant_id: participantId,
-                    enable_group_orchestration_hint: enableGroupOrchestrationHint,
-                    group_participant_names_text: groupParticipantNamesText,
                     proxy_sender_name: proxySenderName,
                     has_image_recognition: !isSubTask && runtime.hasImageRecognition,
                     has_audio_recognition: !isSubTask && runtime.hasAudioRecognition,
@@ -861,11 +842,9 @@ impl EnhancedAIService {
                     use_tool_call_api: useToolCallApi,
                     chat_model_has_direct_image: chatModelHasDirectImage,
                     tool_exposure_mode: runtime.toolExposureMode.clone(),
-                    active_prompt_metadata: runtime.activePromptMetadata.clone(),
+                    prompt_metadata: runtime.promptMetadata.clone(),
                     user_preferences_text: runtime.userPreferencesText.clone(),
                     intro_prompt: runtime.introPrompt.clone(),
-                    waifu_rules_text: runtime.waifuRulesText.clone(),
-                    avatar_mood_rules_text: runtime.avatarMoodRulesText.clone(),
                     disable_user_preference_description: runtime.disableUserPreferenceDescription,
                     ai_name: runtime.aiName.clone(),
                 },
@@ -976,8 +955,6 @@ impl EnhancedAIService {
         workspaceFolders: Vec<String>,
         promptFunctionType: PromptFunctionType,
         participantId: Option<String>,
-        enableGroupOrchestrationHint: bool,
-        groupParticipantNamesText: Option<String>,
         proxySenderName: Option<String>,
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
@@ -994,8 +971,6 @@ impl EnhancedAIService {
                 promptFunctionType.clone(),
                 None,
                 participantId.clone(),
-                enableGroupOrchestrationHint,
-                groupParticipantNamesText,
                 proxySenderName,
                 false,
                 FunctionType::CHAT,
@@ -1119,14 +1094,17 @@ impl EnhancedAIService {
         self.request_window_estimate_flow.clone()
     }
 
-    pub fn startAiService(&mut self, _characterName: Option<String>, _avatarUri: Option<String>) {}
+    /// Retains the existing optional provider lifecycle callback surface.
+    pub fn startAiService(&mut self, _participantName: Option<String>, _avatarUri: Option<String>) {}
 
-    pub fn stopAiService(&mut self, _characterName: Option<String>, _avatarUri: Option<String>) {}
+    /// Retains the existing optional provider shutdown callback surface.
+    pub fn stopAiService(&mut self, _participantName: Option<String>, _avatarUri: Option<String>) {}
 
+    /// Retains the existing optional reply notification callback surface.
     pub fn notifyReplyCompleted(
         &mut self,
         _chatId: Option<String>,
-        _characterName: Option<String>,
+        _participantName: Option<String>,
         _avatarUri: Option<String>,
         _notifyReplyOverride: Option<bool>,
     ) {
@@ -1165,7 +1143,7 @@ impl EnhancedAIService {
         configuration
             .validate()
             .map_err(AiServiceError::RequestFailed)?;
-        options.characterName = Some(configuration.profile.name.clone());
+        options.participantName = Some(configuration.profile.name.clone());
         options.avatarUri = configuration.profile.avatarUri.clone();
         options.executionParticipantId = Some(configuration.profile.id.clone());
         options.chatConfiguration = Some(configuration.clone());
@@ -1272,12 +1250,10 @@ impl EnhancedAIService {
 
         Ok(SendMessageRuntime {
             chatConfiguration: configuration,
-            activePromptMetadata: BTreeMap::new(),
+            promptMetadata: BTreeMap::new(),
             useEnglish: false,
             userPreferencesText,
             introPrompt,
-            waifuRulesText: String::new(),
-            avatarMoodRulesText: String::new(),
             // The plugin execution profile already applies its persisted USER.md policy.
             // Do not let the retired Core preference silently veto the plugin's switch.
             disableUserPreferenceDescription: false,
@@ -1420,11 +1396,9 @@ impl EnhancedAIService {
         let tokenUsageThreshold = options.tokenUsageThreshold;
         let customSystemPromptTemplate = options.customSystemPromptTemplate.clone();
         let isSubTask = options.isSubTask;
-        let characterName = options.characterName.clone();
+        let participantName = options.participantName.clone();
         let avatarUri = options.avatarUri.clone();
         let participantId = Some(runtime.chatConfiguration.profile.id.clone());
-        let enableGroupOrchestrationHint = options.enableGroupOrchestrationHint;
-        let groupParticipantNamesText = options.groupParticipantNamesText.clone();
         let proxySenderName = options.proxySenderName.clone();
         let callbacks = options.callbacks;
         let notifyReplyOverride = options.notifyReplyOverride;
@@ -1458,7 +1432,7 @@ impl EnhancedAIService {
         let mut lifecycle = Vec::new();
         if !isSubTask {
             lifecycle.push(SendMessageLifecycleStage::StartAiService);
-            self.startAiService(characterName.clone(), avatarUri.clone());
+            self.startAiService(participantName.clone(), avatarUri.clone());
         }
 
         if !isSubTask {
@@ -1481,8 +1455,6 @@ impl EnhancedAIService {
                 promptFunctionType.clone(),
                 customSystemPromptTemplate.clone(),
                 participantId.clone(),
-                enableGroupOrchestrationHint,
-                groupParticipantNamesText.clone(),
                 proxySenderName.clone(),
                 isSubTask,
                 functionType.clone(),
@@ -1744,7 +1716,7 @@ impl EnhancedAIService {
                     );
                     AppLogger::e(TAG, &format!("发送消息时发生错误: {}", error));
                     if !isSubTask {
-                        self.stopAiService(characterName.clone(), avatarUri.clone());
+                        self.stopAiService(participantName.clone(), avatarUri.clone());
                     }
                     self.unregisterExecutionContext(&execContext);
                     return Err(error);
@@ -1937,7 +1909,7 @@ impl EnhancedAIService {
                 maxTokens,
                 tokenUsageThreshold,
                 isSubTask,
-                characterName.clone(),
+                participantName.clone(),
                 avatarUri.clone(),
                 participantId,
                 chatId.clone(),
@@ -1946,7 +1918,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride,
                 stream,
-                enableGroupOrchestrationHint,
                 disableWarning,
                 callbacks,
                 &mut runtime,
@@ -1959,7 +1930,7 @@ impl EnhancedAIService {
             );
             AppLogger::e(TAG, &format!("处理流完成时发生错误: {}", error));
             if !isSubTask {
-                self.stopAiService(characterName.clone(), avatarUri.clone());
+                self.stopAiService(participantName.clone(), avatarUri.clone());
             }
             self.unregisterExecutionContext(&execContext);
             return Err(error);
@@ -1997,7 +1968,7 @@ impl EnhancedAIService {
 
         if !isSubTask {
             lifecycle.push(SendMessageLifecycleStage::StopAiService);
-            self.stopAiService(characterName, avatarUri);
+            self.stopAiService(participantName, avatarUri);
         }
 
         {
@@ -2039,7 +2010,7 @@ impl EnhancedAIService {
         maxTokens: i32,
         tokenUsageThreshold: f64,
         isSubTask: bool,
-        characterName: Option<String>,
+        participantName: Option<String>,
         avatarUri: Option<String>,
         participantId: Option<String>,
         chatId: Option<String>,
@@ -2048,7 +2019,6 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
-        enableGroupOrchestrationHint: bool,
         toolResultMessageOverride: Option<String>,
         disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
@@ -2216,7 +2186,7 @@ impl EnhancedAIService {
                     "processToolResults.tokenLimit".to_string(),
                 );
                 if !isSubTask {
-                    self.stopAiService(characterName, avatarUri);
+                    self.stopAiService(participantName, avatarUri);
                 }
                 return Ok(());
             }
@@ -2406,7 +2376,7 @@ impl EnhancedAIService {
             maxTokens,
             tokenUsageThreshold,
             isSubTask,
-            characterName,
+            participantName,
             avatarUri,
             participantId,
             chatId,
@@ -2415,7 +2385,6 @@ impl EnhancedAIService {
             chatProviderIdOverride,
             chatModelIdOverride,
             stream,
-            enableGroupOrchestrationHint,
             disableWarning,
             callbacks.clone(),
             runtime,
@@ -2425,6 +2394,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Completes one model round using the already resolved execution profile.
     pub async fn processStreamCompletion(
         &mut self,
         collector: &SharedAiResponseStream,
@@ -2437,7 +2407,7 @@ impl EnhancedAIService {
         maxTokens: i32,
         tokenUsageThreshold: f64,
         isSubTask: bool,
-        characterName: Option<String>,
+        participantName: Option<String>,
         avatarUri: Option<String>,
         participantId: Option<String>,
         chatId: Option<String>,
@@ -2446,7 +2416,6 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
-        enableGroupOrchestrationHint: bool,
         disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
         runtime: &mut SendMessageRuntime,
@@ -2489,7 +2458,7 @@ impl EnhancedAIService {
                 onNonFatalError,
                 isSubTask,
                 chatId.clone(),
-                characterName,
+                participantName,
                 avatarUri,
                 notifyReplyOverride,
                 callbacks,
@@ -2514,7 +2483,7 @@ impl EnhancedAIService {
                     onNonFatalError,
                     isSubTask,
                     chatId.clone(),
-                    characterName,
+                    participantName,
                     avatarUri,
                     notifyReplyOverride,
                     callbacks,
@@ -2545,7 +2514,7 @@ impl EnhancedAIService {
                 maxTokens,
                 tokenUsageThreshold,
                 isSubTask,
-                characterName,
+                participantName,
                 avatarUri,
                 participantId,
                 chatId,
@@ -2554,7 +2523,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride,
                 stream,
-                enableGroupOrchestrationHint,
                 Some(pureThinkingWarning),
                 disableWarning,
                 callbacks.clone(),
@@ -2636,7 +2604,7 @@ impl EnhancedAIService {
                 maxTokens,
                 tokenUsageThreshold,
                 isSubTask,
-                characterName,
+                participantName,
                 avatarUri,
                 participantId,
                 chatId,
@@ -2645,7 +2613,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride,
                 chatModelIdOverride,
                 stream,
-                enableGroupOrchestrationHint,
                 None,
                 disableWarning,
                 callbacks.clone(),
@@ -2670,7 +2637,7 @@ impl EnhancedAIService {
             onNonFatalError,
             isSubTask,
             chatId.clone(),
-            characterName,
+            participantName,
             avatarUri,
             notifyReplyOverride,
             callbacks,
@@ -2693,7 +2660,7 @@ impl EnhancedAIService {
         maxTokens: i32,
         tokenUsageThreshold: f64,
         isSubTask: bool,
-        characterName: Option<String>,
+        participantName: Option<String>,
         avatarUri: Option<String>,
         participantId: Option<String>,
         chatId: Option<String>,
@@ -2702,7 +2669,6 @@ impl EnhancedAIService {
         chatProviderIdOverride: Option<String>,
         chatModelIdOverride: Option<String>,
         stream: bool,
-        enableGroupOrchestrationHint: bool,
         toolResultOverrideMessage: Option<String>,
         disableWarning: bool,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
@@ -2761,7 +2727,7 @@ impl EnhancedAIService {
                 &toolInvocations,
                 &mut self.tool_handler,
                 &packageManagerSnapshot,
-                characterName.clone(),
+                participantName.clone(),
                 chatId.clone(),
                 participantId.clone(),
                 context.workspacePath.clone(),
@@ -2832,7 +2798,7 @@ impl EnhancedAIService {
                 maxTokens,
                 tokenUsageThreshold,
                 isSubTask,
-                characterName,
+                participantName,
                 avatarUri,
                 participantId,
                 chatId,
@@ -2841,7 +2807,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride.clone(),
                 chatModelIdOverride,
                 stream,
-                enableGroupOrchestrationHint,
                 None,
                 disableWarning,
                 callbacks.clone(),
@@ -2864,7 +2829,7 @@ impl EnhancedAIService {
                 maxTokens,
                 tokenUsageThreshold,
                 isSubTask,
-                characterName,
+                participantName,
                 avatarUri,
                 participantId,
                 chatId,
@@ -2873,7 +2838,6 @@ impl EnhancedAIService {
                 chatProviderIdOverride,
                 chatModelIdOverride,
                 stream,
-                enableGroupOrchestrationHint,
                 toolResultOverrideMessage,
                 disableWarning,
                 callbacks,
@@ -2937,6 +2901,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Retains the completed reply and dispatches its existing completion callbacks.
     fn finalizeAssistantResponse(
         &mut self,
         context: &mut MessageExecutionContext,
@@ -2944,7 +2909,7 @@ impl EnhancedAIService {
         _onNonFatalError: Option<fn(String)>,
         _isSubTask: bool,
         chatId: Option<String>,
-        characterName: Option<String>,
+        participantName: Option<String>,
         avatarUri: Option<String>,
         notifyReplyOverride: Option<bool>,
         callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
@@ -2953,7 +2918,7 @@ impl EnhancedAIService {
         if let Some(callbacks) = callbacks {
             callbacks.onTokenLimitExceeded();
         }
-        self.notifyReplyCompleted(chatId, characterName, avatarUri, notifyReplyOverride);
+        self.notifyReplyCompleted(chatId, participantName, avatarUri, notifyReplyOverride);
     }
 
     /// Cancels the active conversation and tool execution jobs.

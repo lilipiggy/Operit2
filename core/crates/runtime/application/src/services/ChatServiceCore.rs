@@ -759,6 +759,7 @@ impl ChatServiceCore {
             .beginChatExecution(&chatId)
             .map_err(|error| error.to_string())?;
         let api = ChatConfigurationApi::ready(&service.tool_handler).await?;
+        let api = if resumeContext.extensionOwner == crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER { api.forModelSnapshot() } else { api };
         if api.extensionOwner() != resumeContext.extensionOwner {
             return Err(
                 "Routed message snapshot owner differs from the registered configuration owner"
@@ -1080,6 +1081,8 @@ impl ChatServiceCore {
             messageTimestamp,
             variantIndex,
         };
+        let savedExtensions = self.chatHistoryDelegate.chatHistoryManager.readPluginExtensions(&target).map_err(|error| error.to_string())?;
+        let api = if savedExtensions.contains_key(crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER) { api.forModelSnapshot() } else { api };
         let extension = self.chatHistoryDelegate.chatHistoryManager.readPluginExtension(api.extensionOwner(), &target).map_err(|error| error.to_string())?.ok_or_else(|| format!("Message revision has no configuration owner snapshot: {chatId}:{messageTimestamp}:{variantIndex}"))?;
         let reference = extension
             .as_object()
@@ -1150,7 +1153,7 @@ impl ChatServiceCore {
             .map_err(|error| error.to_string())
     }
 
-    /// Deletes the Core conversation and its configuration owner's plugin binding.
+    /// Deletes the Core conversation and releases state through its configuration owner.
     pub async fn deleteChatHistory(&mut self, chatId: String) -> Result<bool, String> {
         self.chatHistoryDelegate.requireChatExists(&chatId)?;
         let service = self
@@ -1162,7 +1165,7 @@ impl ChatServiceCore {
         if !deleted {
             return Err(format!("Core conversation deletion failed: {chatId}"));
         }
-        api.deleteBinding(&chatId).await?;
+        api.deleteConfiguration(&chatId).await?;
         self.syncTokenStatisticsForCurrentChat();
         Ok(deleted)
     }

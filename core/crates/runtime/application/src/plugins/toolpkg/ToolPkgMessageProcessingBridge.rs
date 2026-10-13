@@ -29,8 +29,9 @@ impl ToolPkgMessageProcessingBridge {
         MessageProcessingPluginRegistry::register(Arc::new(MessageProcessingBridge { runtime }));
     }
 
+    /// Synchronizes this bridge from the committed active package catalog.
     #[allow(non_snake_case)]
-    pub fn syncToolPkgRegistrations(activeContainers: Vec<ToolPkgContainerRuntime>) {
+    pub fn syncToolPkgRegistrations(activeContainers: &[ToolPkgContainerRuntime]) {
         let mut hooks = activeContainers
             .iter()
             .flat_map(|container| {

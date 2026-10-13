@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
@@ -40,6 +41,7 @@ void main() {
         await tester.pumpWidget(_manager(bridge));
         await tester.pumpAndSettle();
         expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        expect(bridge.catalogReads, 1);
         await tester.tap(find.byType(Switch));
         await tester.pumpAndSettle();
         final expected =
@@ -47,6 +49,8 @@ void main() {
             ? UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB
             : selection;
         expect(bridge.enabled, isFalse);
+        expect(bridge.catalogReads, 2);
+        expect(bridge.scans, 0);
         expect(bridge.preferences['chat_sidebar_tab_v1'], expected);
         expect(selectionsAtNotification, [expected]);
         expect(
@@ -104,7 +108,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Demo ToolPkg'), findsOneWidget);
     expect(tester.state(find.byType(PackageManagerScreen)), same(state));
-    expect(bridge.scans, 1);
+    expect(bridge.scans, 0);
     bridge.installed = false;
     ToolPkgCatalogChangeBus.notifyCatalogChanged();
     await tester.pumpAndSettle();
@@ -113,6 +117,106 @@ void main() {
     ToolPkgCatalogChangeBus.notifyCatalogChanged();
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('revision and local notifications share one catalog read', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge();
+    addTearDown(bridge.revisions.close);
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    expect(bridge.catalogReads, 1);
+    bridge.installed = true;
+    for (var revision = 1; revision <= 4; revision += 1) {
+      bridge.revisions.add(revision);
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('Demo ToolPkg'), findsOneWidget);
+    expect(bridge.catalogReads, 2);
+    expect(bridge.scans, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('catalog changes during a read discard it and read latest once', (
+    tester,
+  ) async {
+    final gate = Completer<void>();
+    final started = Completer<void>();
+    final bridge = _CatalogBridge()..installed = true;
+    addTearDown(bridge.revisions.close);
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    bridge
+      ..catalogReadGate = gate
+      ..catalogReadStarted = started;
+    final refresh = tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator).first)
+        .onRefresh();
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(started.isCompleted, isTrue);
+    expect(bridge.catalogReads, 2);
+    bridge.installed = false;
+    for (var revision = 1; revision <= 4; revision += 1) {
+      bridge.revisions.add(revision);
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+    }
+    await tester.pump();
+    expect(bridge.catalogReads, 2);
+    bridge.catalogReadGate = null;
+    gate.complete();
+    await tester.pumpAndSettle();
+    await refresh;
+    expect(find.text('Demo ToolPkg'), findsNothing);
+    expect(bridge.catalogReads, 3);
+    expect(bridge.maxActiveCatalogReads, 1);
+    expect(bridge.scans, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'disposing the page detaches notifications during a pending read',
+    (tester) async {
+      final bridge = _CatalogBridge()..installed = true;
+      addTearDown(bridge.revisions.close);
+      await tester.pumpWidget(_manager(bridge));
+      await tester.pumpAndSettle();
+      final gate = Completer<void>();
+      bridge.catalogReadGate = gate;
+      final refresh = tester
+          .widget<RefreshIndicator>(find.byType(RefreshIndicator).first)
+          .onRefresh();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(bridge.catalogReads, 2);
+      await tester.pumpWidget(const SizedBox());
+      expect(bridge.watchers, 0);
+      ToolPkgCatalogChangeBus.notifyCatalogChanged();
+      bridge.revisions.add(1);
+      gate.complete();
+      await tester.pumpAndSettle();
+      await refresh;
+      expect(bridge.catalogReads, 2);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('manual refresh reads the catalog without rebuilding packages', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()..installed = true;
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    bridge.installed = false;
+    final refresh = tester
+        .widget<RefreshIndicator>(find.byType(RefreshIndicator).first)
+        .onRefresh();
+    await tester.pumpAndSettle();
+    await refresh;
+    expect(find.text('Demo ToolPkg'), findsNothing);
+    expect(bridge.catalogReads, 2);
+    expect(bridge.scans, 0);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('cached manager stops catalog work and refreshes on activation', (
@@ -141,6 +245,8 @@ void main() {
     await tester.pumpAndSettle();
     final state = tester.state(find.byType(PackageManagerScreen));
     expect(bridge.watchers, 1);
+    expect(bridge.catalogReads, 1);
+    expect(bridge.scans, 0);
     active.value = false;
     await tester.pumpAndSettle();
     expect(bridge.watchers, 0);
@@ -158,7 +264,8 @@ void main() {
     active.value = true;
     await tester.pumpAndSettle();
     expect(bridge.watchers, 1);
-    expect(bridge.catalogReads, greaterThan(reads));
+    expect(bridge.catalogReads, reads + 1);
+    expect(bridge.scans, 0);
     expect(find.text('Demo ToolPkg'), findsOneWidget);
     expect(tester.state(find.byType(PackageManagerScreen)), same(state));
     await tester.pumpWidget(const SizedBox.shrink());
@@ -232,10 +339,36 @@ class _CatalogBridge extends OperitRuntimeBridge {
     }
     return Stream<CoreEvent>.multi((controller) {
       watchers += 1;
-      controller.onCancel = () => watchers -= 1;
+      controller.add(_revisionEvent(request, 'Snapshot', 0));
+      final subscription = revisions.stream.listen((revision) {
+        controller.add(_revisionEvent(request, 'Changed', revision));
+      });
+      controller.onCancel = () {
+        watchers -= 1;
+        unawaited(subscription.cancel());
+      };
     });
   }
 
+  /// Creates a complete revision event using the same typed payload as Core.
+  CoreEvent _revisionEvent(
+    CoreWatchRequest request,
+    String kind,
+    int revision,
+  ) => CoreEvent.raw(
+    requestId: request.requestId,
+    target: request.target,
+    propertyName: request.propertyName,
+    kind: kind,
+    valueBytes: encodeCoreLink(revision),
+    decodeValue: decodeCoreLink<Object?>,
+  );
+
+  final revisions = StreamController<int>.broadcast();
+  Completer<void>? catalogReadGate;
+  Completer<void>? catalogReadStarted;
+  int activeCatalogReads = 0;
+  int maxActiveCatalogReads = 0;
   bool installed = false;
   bool enabled = false;
   Object? disableError;
@@ -269,7 +402,18 @@ class _CatalogBridge extends OperitRuntimeBridge {
         return <String, Object?>{};
       case 'getToolPkgContainerRuntimes':
         catalogReads += 1;
-        return installed ? [_pluginRuntime().toJson()] : [];
+        activeCatalogReads += 1;
+        maxActiveCatalogReads = math.max(
+          maxActiveCatalogReads,
+          activeCatalogReads,
+        );
+        final result = installed ? [_pluginRuntime().toJson()] : [];
+        final started = catalogReadStarted;
+        catalogReadStarted = null;
+        started?.complete();
+        await catalogReadGate?.future;
+        activeCatalogReads -= 1;
+        return result;
       case 'getEnabledPackageNames':
         return installed && enabled ? ['demo_toolpkg'] : [];
       case 'disableToolPkgContainer':

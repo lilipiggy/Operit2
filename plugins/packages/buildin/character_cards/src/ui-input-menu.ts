@@ -30,6 +30,7 @@ function menuAvatar(ctx: ComposeDslContext, option: SelectorOption | null, unbou
     case "resource": return option.avatar.path === null
       ? ctx.UI.Box({ width: 32, height: 32, contentAlignment: "center" }, ctx.UI.Icon({ name: "Person", size: 24, tint: ctx.MaterialTheme.colorScheme.onSurfaceVariant }))
       : ctx.UI.Image({ ...props, path: option.avatar.path, contentDescription: option.title });
+    case "model": return ctx.UI.Box({ width: 32, height: 32, contentAlignment: "center" }, ctx.UI.Icon({ name: "SmartToy", size: 24, tint: ctx.MaterialTheme.colorScheme.onSurfaceVariant }));
     case "group": return ctx.UI.Box({ width: 32, height: 32, contentAlignment: "center" }, ctx.UI.Icon({ name: "Groups", size: 24, tint: ctx.MaterialTheme.colorScheme.onSurfaceVariant }));
   }
 }
@@ -78,7 +79,7 @@ export function renderChatInputMenu(ctx: ComposeDslContext): ComposeNode {
     onClick: (): JsonValue => {
       assertOwner();
       return { type: "toolpkg.ui.present", routeId: chatUiRoutes.selection,
-        input: { mode: "select", chatId, kind: "card", selected: option !== null && option.kind === "card" ? option.selection : null } };
+        input: { mode: "select", chatId, kind: "card", selected: option !== null && option.kind !== "group" ? option.selection : null } };
     },
   }, [
     menuAvatar(ctx, option, state.unboundAvatar), ctx.UI.Spacer({ width: 10 }),

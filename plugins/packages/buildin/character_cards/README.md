@@ -110,6 +110,22 @@ input-submit hook. Installed production archives also remain different from
 current source until packaging is explicitly performed. Neither gap is described
 as completed integration.
 
+## Plugin-owned group prompts and configuration deletion
+
+Group execution adds identity constraints and the saved ordered member names to each
+participant's `introPrompt` inside the registered configuration resolver. The same
+profile is frozen in the message snapshot, so later provider rounds and historical
+execution retain its exact prompt. Single-card execution remains scoped to the
+card's own authored prompt. Core no longer carries group-orchestration options or
+role-specific prompt builders. The existing functional model slot used by the
+planner remains an independent host configuration capability.
+
+The authenticated `chat.configuration.delete` API releases plugin-owned bindings
+after Core deletes a conversation and returns an exact completion acknowledgement.
+Historical snapshots remain available. Core does not call binding business APIs.
+CLI help and dispatch read enabled commands from the existing Core plugin catalog;
+role command names and descriptions are supplied only by this package.
+
 ## Storage and released-data migration
 
 `Tools.Storage.objects` owns the plugin's `characters.sqlite` database in the stable
@@ -244,3 +260,11 @@ requires running the updated application.
 ### 原生实体弹窗
 
 从头像或角色侧栏打开的角色卡/群组预览和编辑由 `src/ui-entity-native.ts` 使用普通 Compose DSL 控件生成，不加载 WebView/HTML，也不复用宿主的角色业务控件。预览、编辑、删除确认和标签草稿在同一个原生 Dialog 中切换；保存使用原有主运行时请求，完成/取消仍使用真实的 PresentationV1 接收方。全屏/还原使用通用 `Dialog.properties.fullscreen`，全屏时移除平台弹窗边距并铺满可用窗口，而非扩大 WebView 内部元素。管理页列表仍保留 WebView，但创建、编辑、预览统一通过 `openEntity` 调用这一套原生实现；旧 WebView 角色卡/群组弹窗及其绑定、标签编辑实现已删除。记忆功能仍保留原有独立入口。
+
+### 可选角色插件与普通模型聊天
+
+角色卡插件关闭时，Core 使用独立的普通模型配置，保留聊天创建、回复、工具执行、语音配置和历史快照能力。没有配置插件注册是有效的应用状态；已注册插件的配置错误和重复注册仍直接报错。原生模型快照在重新启用插件后仍由原生运行层读取，工具策略会验证原生快照，并向其他插件传递隔离后的上下文。
+
+插件启用时，原生选择器提供“仅使用模型”，CLI 提供 `active-prompt set-model`。没有角色关联的现有聊天属于普通模型模式。该模式不注入角色提示词，不授予角色记忆资源，自动记忆队列不为其建立任务。全局无角色状态使用现有可空 active 存储表达，消息中的无记忆目的地使用空 primaryOwnerKey 表达；SQL 表声明不变。
+
+回复者名称使用实际模型名，头像通过明确的 `provider-logo:<providerTypeId>` 标识加载供应商 logo，不按供应商名称猜测。Core 为新消息和开场消息保存通用的显示身份；Flutter 各消息样式读取所选消息版本的身份，不使用当前聊天头像替换历史回复。v1 SDK 保持原设计。

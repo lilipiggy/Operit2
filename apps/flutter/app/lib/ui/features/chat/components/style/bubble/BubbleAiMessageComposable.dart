@@ -126,10 +126,7 @@ class _BubbleAiMessageComposableState extends State<BubbleAiMessageComposable> {
     final textColor = widget.textColor;
     final showThinkingProcess =
         widget.forceShowThinkingProcess || snapshot.showThinkingProcess;
-    final roleNameText =
-        snapshot.showRoleName && widget.message.roleName.isNotEmpty
-        ? widget.message.roleName
-        : '';
+    final roleNameText = bubbleAiPrimaryTitle(widget.message, snapshot);
     final metadataText = _metadataText(widget.message, snapshot, l10n: l10n);
     final tooltipText = formatMessageMetadataTooltip(
       widget.message,
@@ -726,14 +723,16 @@ String _metadataText(
   return parts.join(' · ');
 }
 
+/// Combines the explicit participant or model name with the enabled secondary metadata.
 String _normalDisplayText(
   ChatUiMessage message,
   ThemePreferenceSnapshot snapshot, {
   AppLocalizations? l10n,
 }) {
   final parts = <String>[];
-  if (snapshot.showRoleName && message.roleName.isNotEmpty) {
-    parts.add(message.roleName);
+  final title = bubbleAiPrimaryTitle(message, snapshot);
+  if (title.isNotEmpty) {
+    parts.add(title);
   }
   final modelProvider = formatModelProviderLabel(message, snapshot);
   if (modelProvider.isNotEmpty) {

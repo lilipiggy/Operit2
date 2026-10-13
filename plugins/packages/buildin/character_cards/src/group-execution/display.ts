@@ -1,4 +1,5 @@
 import type { ChatConfigurationDisplayResult, ChatConfigurationExecutionResult, ChatConfigurationRequest, ChatDisplayParticipant, CharacterRecord, GroupRecord } from "../api";
+import { modelIdentity } from "../model-participant";
 import { parseChatSelection } from "../chat-bindings";
 import { decodeChatMarker } from "../chat-markers";
 import type { ChatConfigurationService } from "../domain";
@@ -36,6 +37,10 @@ export async function resolveChatDisplay(
 ): Promise<ChatConfigurationDisplayResult> {
   if (request.purpose !== "display" || request.participantId !== null || request.messageExtension !== null) throw new Error("Display configuration cannot request an execution participant or message snapshot");
   const marker = decodeChatMarker(request.chatExtension), selection = parseChatSelection(marker.selection);
+  if (selection.kind === "model") {
+    const participant = modelIdentity(request, await service.snapshot());
+    return { contextKey: marker.selection, identity: { title: participant.name, avatarUri: participant.avatarUri }, participants: [participant], initialMessages: [] };
+  }
   if (selection.kind === "group") {
     const group = await service.dispatchDomain("group.get", { id: selection.id });
     if (group.id !== selection.id || group.name.trim().length === 0) throw new Error("Display group identity is invalid");

@@ -861,7 +861,6 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
                     vec![
                         param("group", "string", "optional group name for the new chat", false, None),
                         param("set_as_current_chat", "boolean", "optional, whether to switch to the new chat (default true)", false, None),
-                        param("character_card_id", "string", "optional, character card id to bind for the new chat", false, None)
                     ],
                     "",
                     "",
@@ -941,7 +940,7 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
                         param("message", "string", "message content", true, None),
                         param("chat_id", "string", "optional, target chat id", false, None),
                         param("runtime", "string", "optional, runtime slot for this send: main | floating (default floating)", false, None),
-                        param("role_card_id", "string", "optional, role card id to use for this send", false, None),
+                        param("participant_id", "string", "optional, explicit execution participant from the chat configuration", false, None),
                         param("sender_name", "string", "optional, display name of the sender when AI sends as user", false, None),
                         param("persist_turn", "boolean", "optional, whether this user/AI turn should be persisted to chat history; default true", false, None),
                         param("notify_reply", "boolean", "optional, override whether this turn sends reply-completed notification", false, None),
@@ -2141,7 +2140,6 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
                     vec![
                         param("group", "string", "新对话分组名（可选）", false, None),
                         param("set_as_current_chat", "boolean", "可选，是否切换到新对话（默认 true）", false, None),
-                        param("character_card_id", "string", "可选，创建对话时绑定的角色卡 ID", false, None)
                     ],
                     "",
                     "",
@@ -2221,7 +2219,7 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
                         param("message", "string", "消息内容", true, None),
                         param("chat_id", "string", "可选，目标对话 ID", false, None),
                         param("runtime", "string", "可选，本次发送使用的 runtime：main | floating（默认 floating）", false, None),
-                        param("role_card_id", "string", "可选，本次发送使用的角色卡 ID", false, None),
+                        param("participant_id", "string", "可选，聊天配置中的明确执行参与者 ID", false, None),
                         param("sender_name", "string", "可选，当以用户身份发送时的显示名称", false, None),
                         param("persist_turn", "boolean", "可选，本轮用户消息与 AI 回复是否持久化到聊天历史，默认 true", false, None),
                         param("notify_reply", "boolean", "可选，覆盖本轮是否发送回复完成通知", false, None),

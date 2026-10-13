@@ -131,17 +131,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get receivingToolResultAiResponse => '正在接收工具执行后的 AI 响应...';
 
   @override
-  String get roleResponsePlannerPlanning => '正在规划群组发言顺序...';
-
-  @override
-  String roleResponsePlannerMemberReplying(String memberName) {
-    return '正在生成「$memberName」的回复...';
-  }
-
-  @override
-  String get roleResponsePlannerFailed => '群组规划失败';
-
-  @override
   String get summarizingMemories => '正在总结记忆...';
 
   @override
@@ -223,12 +212,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get toolApprovalAlwaysAllow => '本次会话中始终允许';
-
-  @override
-  String get createGroupTitle => '新建分组';
-
-  @override
-  String get groupNameLabel => '群组名称';
 
   @override
   String get renameConversationTitle => '编辑标题';
@@ -940,7 +923,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsCategoryGlobalBehaviorSubtitle => '输入处理与交互';
 
   @override
-  String get settingsCategoryGlobalBehaviorDescription => '设置不随角色卡变化的输入与交互行为。';
+  String get settingsCategoryGlobalBehaviorDescription => '设置应用全局的输入与交互行为。';
 
   @override
   String get settingsCategoryAppearanceTitle => '外观与交互';
@@ -959,7 +942,8 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsCategoryDataSubtitle => '备份、恢复、统计';
 
   @override
-  String get settingsCategoryDataDescription => '备份聊天、角色和模型配置，恢复备份内容，并查看数据统计。';
+  String get settingsCategoryDataDescription =>
+      '备份聊天、插件数据和模型配置，恢复备份内容，并查看数据统计。';
 
   @override
   String get settingsCategoryAccessLinksTitle => '设备空间';
@@ -997,7 +981,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get settingsComingSoon => '这个区域会继续接入现有 runtime 能力。当前优先完成模型、角色和工具设置。';
+  String get settingsComingSoon => '这个区域会继续接入现有 runtime 能力。当前优先完成模型和工具设置。';
 
   @override
   String get settingsAdvanced => '高级设置';
@@ -2488,17 +2472,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceThemeMode => '当前模式';
 
   @override
-  String get settingsAppearanceThemeTarget => '主题保存目标';
-
-  @override
-  String get settingsAppearanceThemeTargetGlobal => '全局';
-
-  @override
-  String settingsAppearanceThemeTargetGroup(Object name) {
-    return '当前群组：$name';
-  }
-
-  @override
   String get settingsAppearanceThemeSystem => '跟随系统';
 
   @override
@@ -2837,7 +2810,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceShowThinkingProcess => '显示思考过程';
 
   @override
-  String get settingsAppearanceShowRoleName => '显示角色名';
+  String get settingsAppearanceShowRoleName => '显示自定义回复者名称';
 
   @override
   String get settingsAppearanceShowUserName => '显示用户名';
@@ -3263,7 +3236,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsDataExportRawSnapshotDescription =>
-      '把聊天、角色、模型设置和本地文件打包成一个备份文件。恢复时会用备份里的数据覆盖当前数据。';
+      '把聊天、插件数据、模型设置和本地文件打包成一个备份文件。恢复时会用备份里的数据覆盖当前数据。';
 
   @override
   String settingsDataSnapshotBytes(int bytes) {
@@ -3502,9 +3475,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsRuntimeControlCapabilityRuntimeExecute => '执行任务';
 
   @override
-  String get settingsRuntimeControlCapabilityNetworkUser => '使用网络';
-
-  @override
   String get settingsRuntimeControlCapabilityChatRead => '读取聊天记录';
 
   @override
@@ -3662,7 +3632,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String chatMessageRole(String roleName) {
-    return '角色: $roleName';
+    return '回复者: $roleName';
   }
 
   @override
@@ -3994,8 +3964,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceThemeConfigNameRequired => '请输入主题名称';
 
   @override
-  String get settingsAppearanceThemeConfigCustomHint =>
-      '点击 + 新建主题配置，即可在角色卡或群组中绑定。';
+  String get settingsAppearanceThemeConfigCustomHint => '点击 + 创建和管理独立的主题配置。';
 
   @override
   String get settingsAppearanceThemeConfigEditingHint => '修改外观会自动保存到当前主题配置。';

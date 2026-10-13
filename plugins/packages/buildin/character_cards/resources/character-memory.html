@@ -2066,6 +2066,10 @@ ${sections.join("\n\n")}`;
   }
   function validateSelection(selection2, kind, snapshot) {
     if (selection2 === null) return;
+    if ("Model" in selection2) {
+      if (kind === "group" || selection2.Model.id !== "chat") throw new Error("Invalid model-only selection");
+      return;
+    }
     if ("CharacterCard" in selection2) {
       if (kind === "group") throw new Error("\u7FA4\u7EC4\u9009\u62E9\u5668\u4E0D\u80FD\u9009\u62E9\u89D2\u8272\u5361");
       getCard(snapshot, selection2.CharacterCard.id);
@@ -2170,6 +2174,11 @@ ${sections.join("\n\n")}`;
     if (keys.length !== 1) throw new Error("screen.selection must have one active prompt discriminator");
     const object = value;
     switch (keys[0]) {
+      case "Model": {
+        const model = fields(object.Model, ["id"], "screen.selection.Model");
+        if (model.id !== "chat") throw new Error("Invalid model selection identity");
+        return { Model: { id: "chat" } };
+      }
       case "CharacterCard":
         return { CharacterCard: { id: identity(fields(object.CharacterCard, ["id"], "screen.selection.CharacterCard").id, "screen.selection.id") } };
       case "CharacterGroup":
@@ -2195,7 +2204,7 @@ ${sections.join("\n\n")}`;
         fields(object, ["mode", "kind", "selected"], "screen.input");
         if (object.kind !== "card" && object.kind !== "group" && object.kind !== "all") throw new Error("screen.kind must be card, group, or all");
         const selected = object.selected === null ? null : selection(object.selected);
-        if (selected !== null && (object.kind === "card" && !("CharacterCard" in selected) || object.kind === "group" && !("CharacterGroup" in selected))) throw new Error("screen.selected does not match screen.kind");
+        if (selected !== null && (object.kind === "card" && !("CharacterCard" in selected) && !("Model" in selected) || object.kind === "group" && !("CharacterGroup" in selected))) throw new Error("screen.selected does not match screen.kind");
         return { mode: "select", kind: object.kind, selected };
       }
       case "preview":
@@ -2221,7 +2230,7 @@ ${sections.join("\n\n")}`;
       case "select": {
         fields(object, ["mode", "selection"], "screen.result");
         const result = selection(object.selection);
-        if (input.kind === "card" && !("CharacterCard" in result) || input.kind === "group" && !("CharacterGroup" in result)) throw new Error("screen.result.selection does not match screen.kind");
+        if (input.kind === "card" && !("CharacterCard" in result) && !("Model" in result) || input.kind === "group" && !("CharacterGroup" in result)) throw new Error("screen.result.selection does not match screen.kind");
         return { mode: "select", selection: result };
       }
       case "preview":

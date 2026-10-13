@@ -106,14 +106,15 @@ test("real SDK rejects a second lifecycle registration for the actual openPlugin
   assert.equal(disk.calls.length, 0);
 });
 
-/** Invokes the truly registered callback and verifies explicit missing source association rejects without active-state reads. */
-test("actual registered initializer rejects a missing source namespace before touching the service", async t => {
+/** Preserves the explicit model mode of a source conversation that has no role association. */
+test("actual registered initializer preserves model mode for an unassociated source conversation", async t => {
   const disk = await createDiskHarness(t), plugin = openPlugin(disk), definition = plugin.chatLifecycleHooks[0];
   const event = {
     eventName: "before_create", creationKind: "new",
     chat: { id: "new-real-draft", title: "Real lifecycle input", workspaceId: null, parentChatId: null },
     sourceChatId: "explicit-source-chat", sourceMessageTimestamp: null, input: null, sourceExtension: null,
   };
-  await assert.rejects(definition.function({ eventName: "before_create", eventPayload: plain(event) }), /Chat has no stored character binding/);
-  assert.equal(disk.calls.filter(call => call.method === "storage.transaction").length, 0);
+  const result = await definition.function({ eventName: "before_create", eventPayload: plain(event) });
+  assert.deepEqual(plain(result), { extension: { recordId: "new-real-draft", schemaVersion: 1 } });
+  disk.storage.inspect(sql => assert.equal(sql.prepare("SELECT selection FROM chat_drafts WHERE _key=?").get("new-real-draft").selection, "model:chat"));
 });

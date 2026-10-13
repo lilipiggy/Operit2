@@ -225,14 +225,11 @@ impl CoreNodeLocalRuntime {
     }
 
     /// Opens one Space push in the server-owned Space route namespace.
-    fn openSpacePush(
+    async fn openSpacePush(
         &self,
         request: CorePushRequest,
     ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
-        Err(CoreLinkError::new(
-            "SPACE_PUSH_NOT_REGISTERED",
-            format!("Space push route is not registered: {}", request.methodName),
-        ))
+        self.spaceRuntime.openPush(request).await
     }
 }
 
@@ -1257,7 +1254,7 @@ impl CoreNodeRouter {
             .await?;
         self.requireRoutePermission(&route, &originNodeId, &targetNodeId)?;
         if targetNodeId == self.localNodeId {
-            return self.localCore.openSpacePush(request);
+            return self.localCore.openSpacePush(request).await;
         }
         self.openPushNodeSpaceWithOrigin(targetNodeId, request, originNodeId)
             .await
@@ -1898,12 +1895,13 @@ impl CoreLinkClient for CoreNodeRouter {
         CoreLinkSharedClient::watch(self, request).await
     }
 
+    /// Opens an input stream through the shared Router implementation.
     #[allow(non_snake_case)]
     async fn openPush(
         &mut self,
         request: CorePushRequest,
     ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
-        self.openPushSession(request).await
+        CoreLinkSharedClient::openPush(self, request).await
     }
 }
 
@@ -2112,7 +2110,7 @@ impl CoreNodeRouter {
             }
             return if request.routeKind == RoutedCoreRequestKind::SpaceRoute {
                 self.requirePushPermission(&request.payload, &request.originNodeId, &self.localNodeId)?;
-                self.localCore.openSpacePush(request.payload)
+                self.localCore.openSpacePush(request.payload).await
             } else {
                 self.localCore.openPush(request.payload)
             };
@@ -2288,6 +2286,14 @@ impl CoreLinkSharedClient for CoreNodeRouter {
             return operit_link::withCoreForceLocal(self.localCore.watch(request)).await;
         }
         self.watchNode(targetNodeId, request).await
+    }
+
+    /// Opens one input stream on the CoreNode selected by generated routing metadata.
+    async fn openPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        self.openPushSession(request).await
     }
 }
 
@@ -3127,6 +3133,14 @@ mod tests {
         async fn watch(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
             self.spaceRuntime.watch(request).await
         }
+
+        /// Opens an input stream through the injected Space test runtime.
+        async fn openPush(
+            &self,
+            request: operit_link::CorePushRequest,
+        ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+            self.spaceRuntime.openPush(request).await
+        }
     }
 
     /// Stores one binding table entry for route integration tests.
@@ -3310,7 +3324,18 @@ mod tests {
     /// Node-local dispatch accepts a Link service without constructing chat/application state.
     #[tokio::test]
     async fn local_space_dispatch_uses_injected_link_service() {
-        struct DeviceService;
+        struct DeviceService(Arc<StdMutex<Vec<CoreValue>>>);
+        struct DeviceInput(Arc<StdMutex<Vec<CoreValue>>>);
+        #[async_trait]
+        impl CoreLinkPushSession for DeviceInput {
+            /// Records inputs sent to the injected Space service.
+            async fn send(&mut self, value: CoreValue) -> Result<(), CoreLinkError> {
+                self.0.lock().unwrap().push(value);
+                Ok(())
+            }
+            /// Completes the fixture input without using the application Push callback.
+            async fn close(self: Box<Self>) -> Result<(), CoreLinkError> { Ok(()) }
+        }
         #[async_trait(?Send)]
         impl CoreLinkSharedClient for DeviceService {
             async fn call(&self, request: CoreCallRequest) -> CoreCallResponse {
@@ -3336,8 +3361,19 @@ mod tests {
                 sender.send(self.watchSnapshot(request).await?).unwrap();
                 Ok(receiver)
             }
+
+            /// Opens an input on the injected service instead of the application dispatcher.
+            async fn openPush(
+                &self,
+                request: operit_link::CorePushRequest,
+            ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+                assert_eq!(request.target, "device");
+                assert_eq!(request.methodName, "input");
+                Ok(Box::new(DeviceInput(self.0.clone())))
+            }
         }
-        let client = Arc::new(DeviceService);
+        let inputs = Arc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(DeviceService(inputs.clone()));
         let runtime = CoreNodeLocalRuntime::new(
             client.clone(),
             client.clone(),
@@ -3365,6 +3401,10 @@ mod tests {
         let mut stream = runtime.watchSpace(request).await.unwrap();
         assert_eq!(stream.recv().await.unwrap().value, value);
         assert!(stream.recv().await.is_none());
+        let mut input = runtime.openSpacePush(CorePushRequest::new("device-input", "device", "input")).await.unwrap();
+        input.send(value.clone()).await.unwrap();
+        input.close().await.unwrap();
+        assert_eq!(*inputs.lock().unwrap(), vec![value]);
     }
 
     /// Selects local sources without rewriting the persisted remote owner while offline.

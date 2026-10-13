@@ -249,6 +249,7 @@ var validators = {
   "group.exportBackup": empty,
   "group.importBackup": contentOnly,
   "activePrompt.get": empty,
+  "activePrompt.setModel": empty,
   "activePrompt.setCard": id,
   "activePrompt.setGroup": id,
   "activePrompt.activateForChat": shape({ characterCardName: required(nullable(nonblank)), characterGroupId: required(nullable(nonblank)) }),
@@ -320,7 +321,7 @@ function Screen(ctx) {
   function close() {
     return { type: "toolpkg.presentation.cancel", requestId };
   }
-  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/memory-status/index.ui.js:16666",[{
+  return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/memory-status/index.ui.js:16700",[{
     key: "memory-status",
     title: "\u8BB0\u5FC6\u72B6\u6001",
     text: input.description,

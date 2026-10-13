@@ -69,8 +69,9 @@ impl ToolPkgPromptHookBridge {
         ));
     }
 
+    /// Synchronizes this bridge from the committed active package catalog.
     #[allow(non_snake_case)]
-    pub fn syncToolPkgRegistrations(activeContainers: Vec<ToolPkgContainerRuntime>) {
+    pub fn syncToolPkgRegistrations(activeContainers: &[ToolPkgContainerRuntime]) {
         replace_hooks(
             PROMPT_INPUT_HOOKS.get_or_init(|| Mutex::new(Vec::new())),
             activeContainers

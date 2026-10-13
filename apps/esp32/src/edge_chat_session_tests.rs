@@ -89,6 +89,14 @@ impl CoreLinkSharedClient for Client {
         self.watches.lock().unwrap().push((request, tx));
         Ok(stream)
     }
+
+    /// Fails when the chat fixture receives an unexpected input-stream request.
+    async fn openPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        panic!("unexpected input stream: {}", request.methodName)
+    }
 }
 #[derive(Default)]
 struct Peers {

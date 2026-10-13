@@ -60,7 +60,7 @@ test("every declared domain method is published as a provider registerApi callba
   api.registerDomainApis();
   const declared = [...interfaceMembers("../src/api.ts", "DomainOperations"), "memory.query",
     "chat.configuration.snapshot.store", "chat.configuration.snapshot.read",
-    "chat.configuration.draft.resolve", "chat.configuration.draft.commit", "chat.configuration.draft.abort"].sort();
+    "chat.configuration.draft.resolve", "chat.configuration.draft.commit", "chat.configuration.draft.abort", "chat.configuration.delete"].sort();
   const names = definitions.map(
     /** Preserves each stable published method name. */
     definition => definition.name,

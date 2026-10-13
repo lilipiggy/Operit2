@@ -24,7 +24,7 @@ const paths = {
 /** Reads only the assigned production boundaries; this static suite does not execute Rust or prove host integration. */
 function sources() {
   const result = {};
-  for (const [name, path] of Object.entries(paths)) result[name] = readFileSync(new URL(path, root), "utf8");
+  for (const [name, path] of Object.entries(paths)) result[name] = readFileSync(new URL(path, root), "utf8").replace(/\r\n/g, "\n");
   return result;
 }
 
@@ -58,8 +58,8 @@ function violations(input) {
       || !/remainingTimeoutMillis\(\)\.ok_or_else\(/.test(text) || !/hasExpired\(\)[\s\S]*?return Err\(/.test(text)) failures.push(name + " awaited isolated handler failure/timeout");
   }
   if (!/Future<Output\s*=\s*Result<AIToolHookDecision,\s*String>>/.test(input.hook)
-    || !/checkToolInterception\(&invocation\.tool\)\.await\?/.test(input.manager)
-    || !/hook\.onToolCallInterceptAsync\(tool\)\.await\?/.test(input.handler)) failures.push("batch aborts original policy error");
+    || !/executeToolInvocation\([\s\S]*?ToolExecutionPolicy::Ai[\s\S]*?\)\s*\.await\?/.test(input.manager)
+    || !/scope\(async\s*\{\s*hook\.onToolCallInterceptAsync\(tool\)\.await\s*\}\)\.await\?/.test(input.handler)) failures.push("batch aborts original policy error");
   const dispatch = region(input.registry, "pub async fn dispatchToolPromptComposeHooks(", "/// Dispatches prompt-finalize hooks");
   if (!/Result<PromptHookContext,\s*String>/.test(dispatch) || !/hook\.on_event_async\(&current\)\.await\?/.test(dispatch)) failures.push("tool prompt registry error Result");
   const prepare = region(input.enhanced, "pub async fn prepareConversationHistory(", "pub async fn generateSummary(");
@@ -85,7 +85,9 @@ test("static: three real tool policy entries retain isolated awaited snapshots a
 /** Proves the checker rejects an allow-shaped recovery from the actual intercepted failure. */
 test("static negative: removing batch failure propagation is a red item", () => {
   const input = sources();
-  input.manager = input.manager.replace("checkToolInterception(&invocation.tool).await?", "checkToolInterception(&invocation.tool).await.unwrap_or(AIToolHookDecision::Allow)");
+  const before = input.manager;
+  input.manager = input.manager.replace(".await?;\n            AppLogger::d(", ".await.unwrap_or_default();\n            AppLogger::d(");
+  assert.notEqual(input.manager, before, "The negative case must change the real awaited tool invocation");
   assert.ok(violations(input).indexOf("batch aborts original policy error") !== -1);
 });
 
@@ -116,7 +118,7 @@ test("static: participant metadata has one generic reserved transport key and no
   for (const name of ["manager", "enhanced", "jsRuntime", "jsTools", "registration", "prelude"]) {
     assert.doesNotMatch(input[name], /\b(?:callerCardId|roleCardId|getCallerCardId)\b|__operit_package_caller_card_id/);
   }
-  for (const name of ["manager", "jsRuntime", "jsTools", "registration"]) assert.match(input[name], /__operit_package_caller_participant_id/);
+  for (const name of ["manager", "jsRuntime", "jsTools"]) assert.match(input[name], /__operit_package_caller_participant_id/);
   assert.match(input.prelude, /getCallerParticipantId/);
 });
 

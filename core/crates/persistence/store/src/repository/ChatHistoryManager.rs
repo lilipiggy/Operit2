@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::CoreNodeBindingStore::CoreNodeBindingStore;
 use crate::PreferencesDataStore::{
-    stringPreferencesKey, CoroutineScope, PreferencesDataStore, PreferencesDataStoreError,
+    combine2, stringPreferencesKey, CoroutineScope, PreferencesDataStore, PreferencesDataStoreError,
     PreferencesKey, SharingStarted, StateFlow,
 };
 use crate::RuntimeStorePaths::RuntimeStorePaths;
@@ -275,11 +275,17 @@ impl ChatHistoryManager {
         let syncStore = SqlChatSyncStore::new(paths.clone(), &database)?;
         let bindingStore =
             CoreNodeBindingStore::default().map_err(ChatHistoryManagerError::IllegalState)?;
-        let workspaceStoreForFlow = workspaceStore.clone();
-        let chatHistoriesFlow = chatDao.getAllChats()?.map(move |chatEntities| {
-            attachWorkspaceNames(&workspaceStoreForFlow, chatEntities)
-                .expect("workspace names must load for chat history flow")
-        });
+        let workspacesFlow = workspaceStore.allWorkspacesFlow();
+        let workspaceStateFlow = workspacesFlow.stateIn(
+            CoroutineScope,
+            SharingStarted::Lazily,
+            workspacesFlow.first()?,
+        );
+        let chatHistoriesFlow = combine2(
+            &chatDao.getAllChats()?,
+            &workspaceStateFlow,
+            |chatEntities, workspaces| attachWorkspaceNames(workspaces, chatEntities),
+        );
         let currentChatIdFlow = currentChatIdDataStore
             .dataFlow()
             .catch(|exception| match exception {
@@ -507,7 +513,10 @@ impl ChatHistoryManager {
 
     /// Loads the current chat history list directly from persistent storage.
     pub fn loadChatHistories(&self) -> ChatHistoryManagerResult<Vec<ChatHistory>> {
-        attachWorkspaceNames(&self.workspaceStore, self.chatDao.getAllChatsDirectly()?)
+        Ok(attachWorkspaceNames(
+            self.workspaceStore.getAll()?,
+            self.chatDao.getAllChatsDirectly()?,
+        ))
     }
 
     #[allow(non_snake_case)]
@@ -1996,17 +2005,16 @@ fn currentTimeMillis() -> i64 {
     operit_host_api::TimeUtils::currentTimeMillis()
 }
 
-/// Attaches workspace display names onto chat histories loaded from persistence.
+/// Projects workspace names and primary paths from the current workspace records.
 fn attachWorkspaceNames(
-    workspaceStore: &WorkspacePreferenceStore,
+    workspaces: Vec<Workspace>,
     chatEntities: Vec<ChatEntity>,
-) -> ChatHistoryManagerResult<Vec<ChatHistory>> {
-    let workspaces = workspaceStore
-        .getAll()?
+) -> Vec<ChatHistory> {
+    let workspaces = workspaces
         .into_iter()
         .map(|workspace| (workspace.id.clone(), workspace))
         .collect::<HashMap<_, _>>();
-    Ok(chatEntities
+    chatEntities
         .into_iter()
         .map(|chatEntity| {
             let workspace = chatEntity
@@ -2018,7 +2026,7 @@ fn attachWorkspaceNames(
             history.workspacePrimaryPath = workspace.map(|item| item.primaryFolder().path.clone());
             history
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]

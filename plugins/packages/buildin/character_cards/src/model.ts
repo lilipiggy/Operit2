@@ -90,7 +90,7 @@ export interface TagChanges {
 }
 
 /** Matches the externally tagged serde enum in operit_model::ActivePrompt. */
-export type ActivePrompt = { CharacterCard: { id: string } } | { CharacterGroup: { id: string } };
+export type ActivePrompt = { CharacterCard: { id: string } } | { CharacterGroup: { id: string } } | { Model: { id: "chat" } };
 
 /** Matches ProviderModelSummary without inventing the absent modelName field. */
 export interface ModelSummary {

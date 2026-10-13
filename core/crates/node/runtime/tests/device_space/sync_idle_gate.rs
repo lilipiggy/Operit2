@@ -169,6 +169,14 @@ impl operit_link::CoreLinkSharedClient for GateTestApplicationClient {
             "gate test application has no watch",
         ))
     }
+
+    /// Rejects inputs because the synchronization gate fixture serves only calls.
+    async fn openPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        Err(operit_link::CoreLinkError::methodNotFound(&request.methodName))
+    }
 }
 
 /// Builds a two-node authorized Space whose routers carry the minimal gate

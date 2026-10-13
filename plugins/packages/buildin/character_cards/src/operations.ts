@@ -158,6 +158,8 @@ const handlers: DomainHandlers = {
   "group.importBackup": (input, host) => host.restoreGroups(decodeGroupBackup(input.content).characterGroups),
   /** Reads the canonical externally tagged active prompt. */
   "activePrompt.get": (_input, host) => host.readActive(),
+  /** Selects model execution explicitly without applying any role-owned configuration. */
+  "activePrompt.setModel": async (_input, host) => { await host.writeActive({ Model: { id: "chat" } }); return { type: "model", id: "chat", active: true }; },
   /** Activates the selected canonical character. */
   "activePrompt.setCard": async (input, host) => { await activate("card", input.id, host); return { type: "character_card", id: input.id, active: true }; },
   /** Activates the selected canonical group. */

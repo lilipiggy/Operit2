@@ -85,10 +85,10 @@ export function assertCharacterState(value: unknown): asserts value is Character
   const activeKeys = Object.keys(value.active);
   if (activeKeys.length !== 1) throw new Error("Active prompt must select exactly one entity");
   const activeKey = activeKeys[0];
-  if (activeKey !== "CharacterCard" && activeKey !== "CharacterGroup") throw new Error("Invalid active prompt kind");
+  if (activeKey !== "CharacterCard" && activeKey !== "CharacterGroup" && activeKey !== "Model") throw new Error("Invalid active prompt kind");
   const selected = value.active[activeKey]; assertObject(selected, "active selection");
   const activeId = requireId(selected.id, "active id");
-  if (!(activeKey === "CharacterCard" ? cardIds : groupIds).has(activeId)) throw new Error("Active prompt references a missing entity: " + activeId);
+  if (activeKey === "Model" ? activeId !== "chat" : !(activeKey === "CharacterCard" ? cardIds : groupIds).has(activeId)) throw new Error("Active prompt references a missing entity: " + activeId);
   const expectedOwners = new Set<string>();
   for (const id of cardIds) expectedOwners.add("character:" + id);
   for (const id of storeIds) expectedOwners.add("shared:" + id);

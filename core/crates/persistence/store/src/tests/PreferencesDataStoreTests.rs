@@ -1252,7 +1252,7 @@ fn preference_sync_batch_publishes_models_before_binding_observers_run() {
 
 /// Executes preference observation immediately so a test can verify that no
 /// callback sees a partially published multi-file synchronization batch.
-struct ImmediatePreferenceObserverScheduler;
+pub(super) struct ImmediatePreferenceObserverScheduler;
 
 impl operit_host_api::HostRuntimeTaskSchedulerHost for ImmediatePreferenceObserverScheduler {
     fn monotonicTimeMillis(&self) -> operit_host_api::HostResult<u64> {

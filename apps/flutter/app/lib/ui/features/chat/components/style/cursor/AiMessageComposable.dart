@@ -287,7 +287,7 @@ Color? _optionalColor(int? value) {
 }
 
 class _MessageAvatar extends StatelessWidget {
-  /// Creates a cursor-style AI avatar from an imported theme asset.
+  /// Creates a cursor-style responder avatar from its saved display identity.
   const _MessageAvatar({
     required this.imagePath,
     required this.backgroundColor,

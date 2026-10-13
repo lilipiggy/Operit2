@@ -62,6 +62,7 @@ export function copyReferences(references: SelectionReferences): SelectionRefere
 export async function readSelectionReferences(repository: Pick<CharacterRepository, "getCharacter" | "getGroup">, selection: string): Promise<SelectionReferences> {
   const parsed = parseChatSelection(selection);
   switch (parsed.kind) {
+    case "model": return copyReferences({ selection, themeConfigId: null, ttsConfigId: null });
     case "card": {
       const card = await repository.getCharacter(parsed.id); assertCard(card);
       if (card.id !== parsed.id) throw new Error("角色卡读取结果与选择标识不一致：" + selection);

@@ -55,6 +55,7 @@ __export(main_exports, {
   activePromptResolvedCardApi: () => activePromptResolvedCardApi,
   activePromptSetCardApi: () => activePromptSetCardApi,
   activePromptSetGroupApi: () => activePromptSetGroupApi,
+  activePromptSetModelApi: () => activePromptSetModelApi,
   beforeChatCreate: () => beforeChatCreate,
   characterCombineApi: () => characterCombineApi,
   characterCreateApi: () => characterCreateApi,
@@ -71,6 +72,7 @@ __export(main_exports, {
   chatConfigurationBindingDeleteApi: () => chatConfigurationBindingDeleteApi,
   chatConfigurationBindingReadApi: () => chatConfigurationBindingReadApi,
   chatConfigurationBindingWriteApi: () => chatConfigurationBindingWriteApi,
+  chatConfigurationDeleteApi: () => chatConfigurationDeleteApi,
   chatConfigurationDraftAbortApi: () => chatConfigurationDraftAbortApi,
   chatConfigurationDraftCommitApi: () => chatConfigurationDraftCommitApi,
   chatConfigurationDraftResolveApi: () => chatConfigurationDraftResolveApi,
@@ -445,14 +447,16 @@ function normalizeNames(values) {
 // src/chat-bindings.ts
 function parseChatSelection(selection) {
   requireId(selection, "chat selection");
-  const parsed = /^(card|group):([^\s]+)$/u.exec(selection);
+  const parsed = /^(card|group|model):([^\s]+)$/u.exec(selection);
   if (parsed === null) throw new Error("Invalid plugin chat selection: " + selection);
   const kind = parsed[1];
-  if (kind !== "card" && kind !== "group") throw new Error("Invalid chat selection kind: " + kind);
+  if (kind === "model" && parsed[2] !== "chat") throw new Error("Invalid model selection: " + selection);
+  if (kind !== "card" && kind !== "group" && kind !== "model") throw new Error("Invalid chat selection kind: " + kind);
   return { kind, id: parsed[2] };
 }
 function requireChatSelection(selection, cards, groups) {
   const parsed = parseChatSelection(selection);
+  if (parsed.kind === "model") return parsed;
   const records3 = parsed.kind === "card" ? cards : groups;
   let matches = 0;
   for (const record2 of records3) if (record2.id === parsed.id) matches += 1;
@@ -463,6 +467,7 @@ function requireChatSelection(selection, cards, groups) {
   return parsed;
 }
 function selectionForActive(active) {
+  if ("Model" in active) return "model:chat";
   if ("CharacterCard" in active) return "card:" + active.CharacterCard.id;
   return "group:" + active.CharacterGroup.id;
 }
@@ -577,6 +582,10 @@ function decodeMessageMarker(value) {
   );
   if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(profile)) throw new Error("Message execution profile does not match its saved participant snapshot");
   if (parsed.kind === "card" && (participants.length !== 1 || profile.id !== parsed.id)) throw new Error("Message card selection does not match its saved participant");
+  if (parsed.kind === "model") {
+    if (participants.length !== 1 || profile.id !== "model:chat" || profile.name !== profile.modelBinding.modelId || extension.primaryOwnerKey !== "" || profile.resources.length !== 0 || profile.introPrompt !== "" || profile.userPreferencesText !== "" || profile.openingStatement !== "") throw new Error("Invalid model-only message snapshot");
+    return { version: 1, selection, promptFunctionType: extension.promptFunctionType, primaryOwnerKey: "", profile, participants };
+  }
   const primaryOwnerKey = requireId(extension.primaryOwnerKey, "message primary memory owner");
   if (!/^(character|shared):[^:\s]+$/u.test(primaryOwnerKey)) throw new Error("Invalid message primary memory owner");
   if (!profile.resources.some(
@@ -588,6 +597,30 @@ function decodeMessageMarker(value) {
 function encodeMessageMarker(marker) {
   const validated = decodeMessageMarker(marker);
   return markerObject(validated, "message extension");
+}
+
+// src/model-participant.ts
+function modelIdentity(request, directory) {
+  const models = directory.models.filter(
+    /** Requires one real model on the configured provider rather than guessing from a display name. */
+    (model) => model.providerId === request.defaultModelBinding.providerId && model.modelId === request.defaultModelBinding.modelId
+  );
+  if (models.length !== 1 || models[0].providerTypeId.trim() === "") throw new Error("Model-only binding is unavailable or duplicated");
+  return { id: "model:chat", name: models[0].modelId, avatarUri: "provider-logo:" + encodeURIComponent(models[0].providerTypeId) };
+}
+function modelParticipant(request, directory) {
+  if (request.participantId !== null && request.participantId !== "model:chat") throw new Error("Invalid model-only execution participant");
+  if (directory.ttsConfigs.filter((config) => config.id === request.defaultTtsConfigId).length !== 1) throw new Error("Model-only speech configuration is unavailable or duplicated");
+  return {
+    ...modelIdentity(request, directory),
+    introPrompt: "",
+    userPreferencesText: "",
+    openingStatement: "",
+    modelBinding: { ...request.defaultModelBinding },
+    ttsConfigId: request.defaultTtsConfigId,
+    toolAccess: { enabled: false, allowedBuiltinTools: [], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] },
+    resources: []
+  };
 }
 
 // src/group-execution/display.ts
@@ -617,6 +650,10 @@ function resolveChatDisplay(request, service, executeInitialMessage) {
   return __async(this, null, function* () {
     if (request.purpose !== "display" || request.participantId !== null || request.messageExtension !== null) throw new Error("Display configuration cannot request an execution participant or message snapshot");
     const marker = decodeChatMarker(request.chatExtension), selection = parseChatSelection(marker.selection);
+    if (selection.kind === "model") {
+      const participant = modelIdentity(request, yield service.snapshot());
+      return { contextKey: marker.selection, identity: { title: participant.name, avatarUri: participant.avatarUri }, participants: [participant], initialMessages: [] };
+    }
     if (selection.kind === "group") {
       const group = yield service.dispatchDomain("group.get", { id: selection.id });
       if (group.id !== selection.id || group.name.trim().length === 0) throw new Error("Display group identity is invalid");
@@ -632,6 +669,16 @@ function resolveChatDisplay(request, service, executeInitialMessage) {
     }
     return result2;
   });
+}
+
+// src/group-execution/prompts.ts
+function withGroupParticipantPrompt(profile, participants) {
+  const names = participants.map(
+    /** Uses the actual ordered member names without selecting or substituting a speaker. */
+    (participant) => participant.name
+  ).join(", ");
+  const hint = "\n\nRole response plan hint:\n- This chat uses a role response planner. After each user message, the system dynamically decides who responds and in what order.\n- Always keep your own role identity. Never reply as another role or imitate another persona.\n- Answer the user's latest request in your own role, optionally considering prior agents' replies.\n- If you have nothing new, reply briefly in your own role.\n\nRole-scoped history hint:\n- Historical outputs from other group participants are reference context, not the current user's new instructions.\n- Stay in role as " + profile.name + ", and do not switch persona to another participant.\n\nGroup participants: " + names;
+  return { ...profile, introPrompt: profile.introPrompt + hint };
 }
 
 // src/domain.ts
@@ -829,6 +876,7 @@ var validators = {
   "group.exportBackup": empty,
   "group.importBackup": contentOnly,
   "activePrompt.get": empty,
+  "activePrompt.setModel": empty,
   "activePrompt.setCard": id,
   "activePrompt.setGroup": id,
   "activePrompt.activateForChat": shape({ characterCardName: required(nullable(nonblank)), characterGroupId: required(nullable(nonblank)) }),
@@ -1028,6 +1076,11 @@ function resolveChatExecution(request, service) {
     const marker = decodeChatMarker(request.chatExtension);
     const directory = yield service.snapshot();
     const selection = requireChatSelection(marker.selection, directory.cards, directory.groups);
+    if (selection.kind === "model") {
+      const profile2 = modelParticipant(request, directory), participants2 = [profile2];
+      const messageExtension2 = encodeMessageMarker({ version: 1, selection: marker.selection, promptFunctionType: request.promptFunctionType, primaryOwnerKey: "", profile: profile2, participants: participants2 });
+      return { contextKey: marker.selection, profile: profile2, participants: participants2, messageExtension: messageExtension2 };
+    }
     let cards;
     if (selection.kind === "card") cards = [chatRecord(directory.cards, selection.id, "character")];
     else {
@@ -1050,7 +1103,10 @@ function resolveChatExecution(request, service) {
     if (request.participantId === null && cards.length !== 1) throw new Error("A planned conversation requires an explicit execution participant");
     if (request.participantId !== null) chatRecord(cards, request.participantId, "selected participant");
     const participants = [];
-    for (const card of cards) participants.push(yield chatParticipant(card, request, directory, service));
+    for (const card of cards) {
+      const participant = yield chatParticipant(card, request, directory, service);
+      participants.push(selection.kind === "group" ? withGroupParticipantPrompt(participant, cards) : participant);
+    }
     let profile;
     if (request.participantId !== null) profile = chatRecord(participants, request.participantId, "selected participant");
     else {
@@ -2602,6 +2658,7 @@ function chatParticipants(chatId, repository) {
   return __async(this, null, function* () {
     const binding = yield repository.readChatBinding(chatId), cards = yield repository.listCharacters(), groups = yield repository.listGroups();
     const selection = requireChatSelection(binding.selection, cards, groups);
+    if (selection.kind === "model") return [];
     if (selection.kind === "card") return [yield repository.getCharacter(selection.id)];
     const group = yield repository.getGroup(selection.id);
     if (group.members.length === 0) throw new Error("Selected chat group has no participants: " + group.id);
@@ -3189,6 +3246,7 @@ function enqueueCandidate(input, repository) {
     if (input.sourceType === "reply_finalized_auto") {
       const marker = yield readMessageSnapshot(input.chatId, message.timestamp, message.variantIndex);
       const ownerKey = input.ownerKey === null ? marker.primaryOwnerKey : input.ownerKey;
+      if (ownerKey === "") return { owners: [], candidateIds: [] };
       if (!marker.profile.resources.some(
         /** Authorizes only the exact submitted resource through the already-read historical snapshot. */
         (resource) => resource.key === ownerKey && resource.writable
@@ -3605,11 +3663,11 @@ function assertCharacterState(value) {
   const activeKeys = Object.keys(value.active);
   if (activeKeys.length !== 1) throw new Error("Active prompt must select exactly one entity");
   const activeKey = activeKeys[0];
-  if (activeKey !== "CharacterCard" && activeKey !== "CharacterGroup") throw new Error("Invalid active prompt kind");
+  if (activeKey !== "CharacterCard" && activeKey !== "CharacterGroup" && activeKey !== "Model") throw new Error("Invalid active prompt kind");
   const selected = value.active[activeKey];
   assertObject(selected, "active selection");
   const activeId = requireId(selected.id, "active id");
-  if (!(activeKey === "CharacterCard" ? cardIds : groupIds).has(activeId)) throw new Error("Active prompt references a missing entity: " + activeId);
+  if (activeKey === "Model" ? activeId !== "chat" : !(activeKey === "CharacterCard" ? cardIds : groupIds).has(activeId)) throw new Error("Active prompt references a missing entity: " + activeId);
   const expectedOwners = /* @__PURE__ */ new Set();
   for (const id2 of cardIds) expectedOwners.add("character:" + id2);
   for (const id2 of storeIds) expectedOwners.add("shared:" + id2);
@@ -4248,6 +4306,11 @@ var handlers = {
   "group.importBackup": (input, host) => host.restoreGroups(decodeGroupBackup(input.content).characterGroups),
   /** Reads the canonical externally tagged active prompt. */
   "activePrompt.get": (_input, host) => host.readActive(),
+  /** Selects model execution explicitly without applying any role-owned configuration. */
+  "activePrompt.setModel": (_input, host) => __async(null, null, function* () {
+    yield host.writeActive({ Model: { id: "chat" } });
+    return { type: "model", id: "chat", active: true };
+  }),
   /** Activates the selected canonical character. */
   "activePrompt.setCard": (input, host) => __async(null, null, function* () {
     yield activate("card", input.id, host);
@@ -4484,6 +4547,8 @@ function readSelectionReferences(repository, selection) {
   return __async(this, null, function* () {
     const parsed = parseChatSelection(selection);
     switch (parsed.kind) {
+      case "model":
+        return copyReferences({ selection, themeConfigId: null, ttsConfigId: null });
       case "card": {
         const card = yield repository.getCharacter(parsed.id);
         assertCard(card);
@@ -4894,11 +4959,12 @@ function assertStore(value) {
 function assertActive(value) {
   assertObject(value, "\u5F53\u524D\u63D0\u793A\u8BCD");
   const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup")
+  if (keys.length !== 1 || keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup" && keys[0] !== "Model")
     throw new Error("\u5F53\u524D\u63D0\u793A\u8BCD\u7C7B\u578B\u65E0\u6548");
   const selection = value[keys[0]];
   assertObject(selection, "\u5F53\u524D\u63D0\u793A\u8BCD\u9009\u62E9");
   requireId(selection.id, "\u5F53\u524D\u63D0\u793A\u8BCD\u6807\u8BC6");
+  if (keys[0] === "Model" && selection.id !== "chat") throw new Error("Invalid model selection");
 }
 function snapshot(host) {
   return __async(this, null, function* () {
@@ -5269,8 +5335,10 @@ function menuMemoryOwner(chatId, host) {
     requireId(chatId, "memory menu chat id");
     const binding = yield findChatBinding(chatId);
     const selection = binding === null ? null : parseChatSelection(binding.selection);
+    if (selection?.kind === "model") throw new Error("Model-only conversations have no role memory owner");
     if (selection?.kind === "card") return resolveMemoryOwner(selection.id, host);
     const active = yield host.readActive();
+    if ("Model" in active) throw new Error("Model-only selection has no role memory owner");
     return resolveMemoryOwner(
       "CharacterCard" in active ? active.CharacterCard.id : "default",
       host
@@ -5870,7 +5938,7 @@ function stateFromRecords(metadata, rows) {
   const state = {
     version: metadata.version,
     nextId: metadata.nextId,
-    active: metadata.active,
+    active: metadata.active === null ? { Model: { id: "chat" } } : metadata.active,
     memoryPreferences: metadata.memoryPreferences,
     cards: [],
     groups: [],
@@ -6474,7 +6542,8 @@ var RepositorySession = class {
   writeActive(active) {
     return __async(this, null, function* () {
       if ("CharacterCard" in active) get(this.state.cards, active.CharacterCard.id, "character");
-      else get(this.state.groups, active.CharacterGroup.id, "group");
+      else if ("CharacterGroup" in active) get(this.state.groups, active.CharacterGroup.id, "group");
+      else if (active.Model.id !== "chat") throw new Error("Invalid model selection");
       this.state.active = copy(active);
     });
   }
@@ -7254,7 +7323,7 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
           ...metadata,
           version: state.version,
           nextId: state.nextId,
-          active: storedValue(state.active),
+          active: "Model" in state.active ? null : storedValue(state.active),
           memoryPreferences: storedValue(state.memoryPreferences)
         },
         expectedVersion: metadataVersion
@@ -7403,6 +7472,8 @@ function requireUiCaller(caller) {
 function decodeSelection(selection, directory) {
   const parsed = parseChatSelection(selection), id2 = parsed.id;
   switch (parsed.kind) {
+    case "model":
+      return { entity: "model", id: id2, prompt: { Model: { id: "chat" } }, title: "\u4EC5\u4F7F\u7528\u6A21\u578B", avatarUri: null };
     case "card": {
       const cards = directory.cards.filter(
         /** Requires one exact persisted identity, not a replacement active actor. */
@@ -7430,7 +7501,7 @@ function encodeSelection(selection) {
 function contextActions(routes, target, directory) {
   const selected = target.selection === null ? null : decodeSelection(target.selection, directory);
   return {
-    identity: selected === null ? null : { title: selected.title, avatarUri: selected.avatarUri, avatarAction: previewAction(routes.editor, selected.entity, selected.id) },
+    identity: selected === null || selected.entity === "model" ? null : { title: selected.title, avatarUri: selected.avatarUri, avatarAction: previewAction(routes.editor, selected.entity, selected.id) },
     backgroundUri: null
   };
 }
@@ -7458,6 +7529,8 @@ function listSections(routeId, directory, bindings, chatIds) {
     for (const chatId of chatIds) if (byChat.get(chatId) === selection) result2.push(chatId);
     return result2;
   }
+  const modelChats = boundChats("model:chat");
+  if (modelChats.length > 0) sections.push({ id: "model:chat", title: "\u4EC5\u4F7F\u7528\u6A21\u578B", avatarUri: null, selection: "model:chat", preview: { routeId: chatUiRoutes.selection, input: { mode: "select", chatId: null, kind: "all", selected: { Model: { id: "chat" } } } }, chatIds: modelChats });
   return { sections };
 }
 function chatContextActionsApi(event) {
@@ -7593,7 +7666,8 @@ var ACTIVE_PROMPT_USAGE = [
   "operit2 active-prompt set-card <id>",
   "operit2 active-prompt set-group <id>",
   "operit2 active-prompt activate-for-chat [character-card-name] [character-group-id]",
-  "operit2 active-prompt resolved-card"
+  "operit2 active-prompt resolved-card",
+  "operit2 active-prompt set-model"
 ];
 var MEMORY_USAGE = [
   "operit2 memory <character|shared|mount|unmount>",
@@ -8016,7 +8090,11 @@ function parseActivePromptCommand(args) {
   switch (args[0]) {
     case "show": {
       arity(args, 1, 1, ACTIVE_PROMPT_USAGE[0]);
-      return invocation("activePrompt.get", {}, (value) => result(lines([`Active prompt: ${"CharacterCard" in value ? `character card ${value.CharacterCard.id}` : `character group ${value.CharacterGroup.id}`}`]), value));
+      return invocation("activePrompt.get", {}, (value) => result(lines([`Active prompt: ${"Model" in value ? "model only" : "CharacterCard" in value ? `character card ${value.CharacterCard.id}` : `character group ${value.CharacterGroup.id}`}`]), value));
+    }
+    case "set-model": {
+      arity(args, 1, 1, "active-prompt set-model");
+      return invocation("activePrompt.setModel", {}, (value) => result(lines(["Active prompt: model only"]), value));
     }
     case "set-card": {
       arity(args, 2, 2, ACTIVE_PROMPT_USAGE[1]);
@@ -8924,8 +9002,8 @@ function chatConfigurationResolveApi(event) {
     if (event.callerPackage !== "host") throw new Error("chat.configuration.resolve requires an authenticated host caller");
     const request = parseDomainPayload("chat.configuration.resolve", event.payload);
     if (request.chatId !== null && request.messageExtension === null) {
-      const binding = yield dispatchDomain2("chat.configuration.binding.read", { chatId: request.chatId });
-      request.chatExtension = { version: 1, selection: binding.selection };
+      const binding = yield findChatBinding(request.chatId);
+      request.chatExtension = { version: 1, selection: binding === null ? "model:chat" : binding.selection };
     }
     return dispatchDomain2("chat.configuration.resolve", request);
   });
@@ -8952,6 +9030,16 @@ function chatConfigurationDraftAbortApi(event) {
     if (event.callerPackage !== "host") throw new Error("Draft abort requires the host caller");
     yield abortDraftBinding(event.payload.chatId);
     return { aborted: true };
+  });
+}
+function chatConfigurationDeleteApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Configuration deletion requires the host caller");
+    const input = parseDomainPayload("chat.configuration.binding.delete", event.payload);
+    if ((yield findChatBinding(input.chatId)) === null) return { deleted: true };
+    const result2 = yield dispatchDomain2("chat.configuration.binding.delete", input);
+    if (result2.chatId !== input.chatId || !result2.deleted) throw new Error("Character binding deletion was not acknowledged");
+    return { deleted: true };
   });
 }
 function chatConfigurationSnapshotStoreApi(event) {
@@ -8983,6 +9071,7 @@ function chatConfigurationBindingDeleteApi(event) {
 }
 function registerChatConfigurationApis() {
   ToolPkg.registerApi({ name: "chat.configuration.resolve", function: chatConfigurationResolveApi });
+  ToolPkg.registerApi({ name: "chat.configuration.delete", function: chatConfigurationDeleteApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.read", function: chatConfigurationBindingReadApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.write", function: chatConfigurationBindingWriteApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.delete", function: chatConfigurationBindingDeleteApi });
@@ -9165,6 +9254,11 @@ function groupImportBackupApi(event) {
 function activePromptGetApi(event) {
   return __async(this, null, function* () {
     return dispatchDomain2("activePrompt.get", parseDomainPayload("activePrompt.get", event.payload));
+  });
+}
+function activePromptSetModelApi(event) {
+  return __async(this, null, function* () {
+    return dispatchDomain2("activePrompt.setModel", parseDomainPayload("activePrompt.setModel", event.payload));
   });
 }
 function activePromptSetCardApi(event) {
@@ -9388,6 +9482,7 @@ function registerDomainApis() {
   ToolPkg.registerApi({ name: "group.import", function: groupImportApi });
   ToolPkg.registerApi({ name: "group.exportBackup", function: groupExportBackupApi });
   ToolPkg.registerApi({ name: "group.importBackup", function: groupImportBackupApi });
+  ToolPkg.registerApi({ name: "activePrompt.setModel", function: activePromptSetModelApi });
   ToolPkg.registerApi({ name: "activePrompt.get", function: activePromptGetApi });
   ToolPkg.registerApi({ name: "activePrompt.setCard", function: activePromptSetCardApi });
   ToolPkg.registerApi({ name: "activePrompt.setGroup", function: activePromptSetGroupApi });
@@ -9510,7 +9605,10 @@ function beforeChatCreate(event) {
   return __async(this, null, function* () {
     if (event.eventName !== "before_create") throw new Error("Character chat lifecycle requires before_create");
     const payload = { ...event.eventPayload };
-    if (payload.sourceChatId !== null) payload.sourceExtension = { version: 1, selection: (yield readChatBinding(payload.sourceChatId)).selection };
+    if (payload.sourceChatId !== null) {
+      const binding = yield findChatBinding(payload.sourceChatId);
+      payload.sourceExtension = { version: 1, selection: binding === null ? "model:chat" : binding.selection };
+    }
     const result2 = yield initializeChatExtension(payload, { readActiveSelection, requireSelection });
     const marker = decodeChatMarker(result2.extension);
     yield prepareChatBinding({ chatId: payload.chat.id, selection: marker.selection });

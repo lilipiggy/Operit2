@@ -50,7 +50,10 @@ const execute = functionSource(delegated, "execute");
 const list = functionSource(plugin, "list_plugin_commands");
 const explicit = functionSource(plugin, "execute_plugin_command");
 const readySnapshot = functionSource(sdk, "readySnapshot");
+const readyCapture = functionSource(sdk, "withReady");
+const observedReadyCapture = functionSource(sdk, "withReadyObserved");
 const sdkExecute = functionSource(sdk, "executeResolvedToolPkgCoreCommand");
+const sdkPrepareCommand = functionSource(sdk, "prepareResolvedToolPkgCoreCommand");
 
 const builtinBlock = /const BUILTIN_ROOTS:[\s\S]*?= &\[([\s\S]*?)\];/.exec(catalog);
 assert.ok(builtinBlock, "Core must declare one directory containing only its inherent handlers");
@@ -101,15 +104,20 @@ assert.match(load, /RuntimePackageManager::readySnapshot\(\s*tool_handler\.getOr
 assert.match(load, /let catalog = manager\.getToolPkgCoreCommandCatalog\(false\)\?;/);
 assert.match(load, /Ok\(Self \{ manager, catalog \}\)/);
 assert.doesNotMatch(load, /\.clone\(|\.lock\(/, "Only the SDK may clone a registry after its readiness barrier");
-assert.match(readySnapshot, /readiness\.wait_until_ready\(\)\.await\?;/);
-assert.match(readySnapshot, /manager\.packageRegistryReadiness\.require_ready\(\)\?;/);
-assert.ok(readySnapshot.indexOf("wait_until_ready") < readySnapshot.indexOf("Ok(manager.clone())"));
+assert.match(readySnapshot, /Self::withReady\(manager, \|manager\| Ok\(manager\.clone\(\)\)\)\.await/);
+assert.match(readyCapture, /Self::withReadyObserved\(manager, capture, \|_\| Ok\(\(\)\)\)\.await/);
+assert.match(observedReadyCapture, /readiness\.wait_until_ready\(\)\.await\?;/);
+assert.match(observedReadyCapture, /manager\.packageRegistryReadiness\.require_ready\(\)\?;/);
+assert.ok(observedReadyCapture.indexOf("wait_until_ready") < observedReadyCapture.indexOf("let captured = capture(&manager)?"));
 assert.match(delegated, /resolve_root\(command_name, \|name, builtin_names\|[\s\S]*?self\.catalog\.resolve\(name, builtin_names\)/);
 assert.match(execute, /self\.manager\s*\.executeResolvedToolPkgCoreCommand\(handler, args, json_mode\)/);
 assert.equal([...delegated.matchAll(/\.executeResolvedToolPkgCoreCommand\(/g)].length, 1);
 assert.doesNotMatch(execute, /\.resolve\(|\.getOrCreatePackageManager\(|readySnapshot\(|\.clone\(/);
-assert.match(sdkExecute, /let command = resolved\.declaration\(\);/);
-assert.doesNotMatch(sdkExecute, /\.resolve\(|getToolPkgCoreCommandCatalog\(|readySnapshot\(/);
+assert.match(sdkExecute, /self\.prepareResolvedToolPkgCoreCommand\(resolved, args, jsonMode\)\.await/);
+assert.match(sdkPrepareCommand, /let command = resolved\.declaration\(\);/);
+for (const execution of [sdkExecute, sdkPrepareCommand]) {
+  assert.doesNotMatch(execution, /\.resolve\(|getToolPkgCoreCommandCatalog\(|readySnapshot\(/);
+}
 for (const text of [router, catalog, delegated, plugin]) {
   assert.doesNotMatch(text, /root_command_owner|\.executeToolPkgCoreCommand\(|\.getToolPkgCoreCommands\(/);
   assert.doesNotMatch(text, /#\[cfg\([^\]]*(?:target_arch|target_os)/);

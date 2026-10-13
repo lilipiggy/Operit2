@@ -115,15 +115,16 @@ test("native null-chat selector persists real global active without writing a ch
 });
 
 /** Keeps a real unowned namespace selectable without borrowing global active or interpreting a legacy role field. */
-test("unbound existing chat menu stays reachable with null identity and an initially unchecked native selector", async t => {
+test("unbound existing chat menu selects the explicit model-only state without changing global roles", async t => {
   const runtime = await selectorEnvironment(t), card = await runtime.api("character.create", { values: { name: "Explicit user binds unowned chat" } });
   const active = plain(await runtime.api("activePrompt.get", {})); const menu = await runtime.api("chat.context.actions", { chatId: "selector-chat" });
   assert.equal(menu.identity, null); assert.equal(Object.hasOwn(menu, "selectors"), false);
   const ui = await ready(runtime, presentation("native-unbound", "selector-chat"));
   assert.equal(composeNodes(ui.render().tree,
-    /** Only an actual namespace marker may supply the check; global active cannot check an unbound chat row. */
+    /** An unassociated chat checks model mode and never borrows the global active role. */
     node => node.type === "Icon" && node.props.name === "Check",
-  ).length, 0);
+  ).length, 1);
+  assert.equal(keyedNode(ui.render().tree, "model:chat").props.key, "model:chat");
   await ui.dispatch(keyedNode(ui.render().tree, "card:" + card.id).props.onClick);
   assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id); assert.deepEqual(plain(await runtime.api("activePrompt.get", {})), active);
 });

@@ -189,9 +189,6 @@ impl Default for SystemPromptOptions {
 pub struct SystemPromptWithCustomOptions {
     pub base: SystemPromptOptions,
     pub custom_intro_prompt: String,
-    pub enable_group_orchestration_hint: bool,
-    pub group_orchestration_role_name: String,
-    pub group_participant_names_text: String,
 }
 
 pub struct SystemPromptConfig;
@@ -473,18 +470,6 @@ impl SystemPromptConfig {
                 "toolVisibility".to_string(),
                 json!(options.base.tool_visibility),
             ),
-            (
-                "enableGroupOrchestrationHint".to_string(),
-                json!(options.enable_group_orchestration_hint),
-            ),
-            (
-                "groupOrchestrationRoleName".to_string(),
-                json!(options.group_orchestration_role_name),
-            ),
-            (
-                "groupParticipantNamesText".to_string(),
-                json!(options.group_participant_names_text),
-            ),
         ]);
         metadata.extend(options.base.hook_metadata.clone());
 
@@ -512,26 +497,8 @@ impl SystemPromptConfig {
             Some(prompt) => prompt,
             None => Self::getSystemPrompt(options.base.clone()).await?,
         };
-        let mut composed_prompt =
+        let composed_prompt =
             Self::applyCustomPrompts(&base_prompt, &options.custom_intro_prompt);
-        if options.enable_group_orchestration_hint {
-            let role_name = if options.group_orchestration_role_name.is_empty() {
-                if options.base.use_english {
-                    "assistant"
-                } else {
-                    "助手"
-                }
-                .to_string()
-            } else {
-                options.group_orchestration_role_name.clone()
-            };
-            composed_prompt.push_str(&buildGroupOrchestrationHint(
-                options.base.use_english,
-                &role_name,
-                &options.group_participant_names_text,
-            ));
-        }
-
         let compose_context =
             PromptHookRegistry::dispatchSystemPromptComposeHooks(PromptHookContext {
                 stage: "compose_system_prompt_sections".to_string(),
@@ -548,23 +515,6 @@ impl SystemPromptConfig {
             })
             .await;
         Ok(after_context.system_prompt.unwrap_or_default())
-    }
-}
-
-#[allow(non_snake_case)]
-fn buildGroupOrchestrationHint(
-    use_english: bool,
-    role_name: &str,
-    participant_names_text: &str,
-) -> String {
-    if use_english {
-        format!(
-            "\n\nRole response plan hint:\n- This chat uses a role response planner. After each user message, the system dynamically decides who responds and in what order.\n- Always keep your own role identity. Never reply as another role or imitate another persona.\n- Answer the user's latest request in your own role, optionally considering prior agents' replies.\n- If you have nothing new, reply briefly in your own role.\n\nRole-scoped history hint:\n- Messages prefixed with [From role: xxx] are historical outputs from other role cards.\n- Treat them as reference context only, not as the current user's new request.\n- Stay in role as {role_name}, and do not switch persona to the referenced role.\n\nGroup participants: {participant_names_text}"
-        )
-    } else {
-        format!(
-            "\n\n角色回答规划提示：\n- 当前会话启用了角色回答规划，用户每次发言后系统会动态决定谁回答以及回答顺序。\n- 你必须始终牢记并保持你自己的角色身份，严禁使用他人身份回答或模仿其他角色口吻。\n- 用你自己的角色身份回答用户最新请求，可以参考前面角色的回复。\n- 如果没有新的内容，也请用自己的角色简短回应。\n\n角色分视角历史说明：\n- 带有 [From role: xxx] 前缀的内容是其他角色卡的历史输出。\n- 这类内容仅用于上下文参考，不是当前用户的新指令。\n- 你必须保持当前角色身份（{role_name}），不要切换为前缀中的角色。\n\n当前群聊参与者：{participant_names_text}"
-        )
     }
 }
 

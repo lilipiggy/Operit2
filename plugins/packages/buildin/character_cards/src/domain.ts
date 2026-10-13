@@ -1,6 +1,8 @@
 import { requireChatSelection } from "./chat-bindings";
 import { decodeChatMarker, decodeMessageMarker, encodeMessageMarker, markerObject } from "./chat-markers";
 import { resolveChatDisplay } from "./group-execution/display";
+import { modelParticipant } from "./model-participant";
+import { withGroupParticipantPrompt } from "./group-execution/prompts";
 import type { MemoryQueryRequest, JsonValue, ChatConfigurationExecutionResult, ChatConfigurationRequest, ChatConfigurationResult, ChatParticipantProfile, CharacterRecord, DomainInput, DomainOperation, DomainOutput, SnapshotRecord } from "./api";
 export type { DomainInput, DomainOperation, DomainOutput, DomainOperations } from "./api";
 
@@ -186,6 +188,7 @@ const validators: Record<DomainOperation, Validator> = {
   "group.exportBackup": empty,
   "group.importBackup": contentOnly,
   "activePrompt.get": empty,
+  "activePrompt.setModel": empty,
   "activePrompt.setCard": id,
   "activePrompt.setGroup": id,
   "activePrompt.activateForChat": shape({ characterCardName: required(nullable(nonblank)), characterGroupId: required(nullable(nonblank)) }),
@@ -387,6 +390,11 @@ export async function resolveChatExecution(request: ChatConfigurationRequest, se
   const marker = decodeChatMarker(request.chatExtension);
   const directory = await service.snapshot();
   const selection = requireChatSelection(marker.selection, directory.cards, directory.groups);
+  if (selection.kind === "model") {
+    const profile = modelParticipant(request, directory), participants = [profile];
+    const messageExtension = encodeMessageMarker({ version: 1, selection: marker.selection, promptFunctionType: request.promptFunctionType, primaryOwnerKey: "", profile, participants });
+    return { contextKey: marker.selection, profile, participants, messageExtension };
+  }
   let cards: CharacterRecord[];
   if (selection.kind === "card") cards = [chatRecord(directory.cards, selection.id, "character")];
   else {
@@ -409,7 +417,10 @@ export async function resolveChatExecution(request: ChatConfigurationRequest, se
   if (request.participantId === null && cards.length !== 1) throw new Error("A planned conversation requires an explicit execution participant");
   if (request.participantId !== null) chatRecord(cards, request.participantId, "selected participant");
   const participants: ChatParticipantProfile[] = [];
-  for (const card of cards) participants.push(await chatParticipant(card, request, directory, service));
+  for (const card of cards) {
+    const participant = await chatParticipant(card, request, directory, service);
+    participants.push(selection.kind === "group" ? withGroupParticipantPrompt(participant, cards) : participant);
+  }
   let profile: ChatParticipantProfile;
   if (request.participantId !== null) profile = chatRecord(participants, request.participantId, "selected participant");
   else {

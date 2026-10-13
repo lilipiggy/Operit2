@@ -143,7 +143,7 @@ export interface MemoryGraphRecord {
 /** Defines a stored relationship between memory items. */
 export interface LinkRecord { id: string; sourceMemoryId: string; targetMemoryId: string; type_: string; weight: number; description: string }
 /** Defines the active prompt's externally tagged serialization. */
-export type ActivePromptRecord = { CharacterCard: { id: string } } | { CharacterGroup: { id: string } };
+export type ActivePromptRecord = { CharacterCard: { id: string } } | { CharacterGroup: { id: string } } | { Model: { id: "chat" } };
 /** Defines the editor's complete directory snapshot. */
 export interface SnapshotRecord {
   cards: CharacterRecord[]; groups: GroupRecord[]; stores: StoreRecord[]; tags: TagRecord[];
@@ -201,7 +201,7 @@ export interface BackupImportResult { new: number; updated: number; skipped: num
 /** Defines a repository memory import report. */
 export interface MemoryImportResult { newMemories: number; updatedMemories: number; skippedMemories: number; newLinks: number }
 /** Defines an activation result without invoking another command. */
-export interface ActivationResult { type: "character_card" | "character_group"; id: string; active: boolean }
+export interface ActivationResult { type: "character_card" | "character_group" | "model"; id: string; active: boolean }
 /** Defines an explicitly supplied memory owner. */
 export interface OwnerParams { ownerKey: string }
 /** Defines stable identifier parameters. */
@@ -254,6 +254,7 @@ export interface DomainOperations {
   "group.exportBackup": { input: EmptyParams; output: { content: string } };
   "group.importBackup": { input: { content: string }; output: BackupImportResult };
   "activePrompt.get": { input: EmptyParams; output: ActivePromptRecord };
+  "activePrompt.setModel": { input: EmptyParams; output: ActivationResult };
   "activePrompt.setCard": { input: IdParams; output: ActivationResult };
   "activePrompt.setGroup": { input: IdParams; output: ActivationResult };
   "activePrompt.activateForChat": { input: { characterCardName: string | null; characterGroupId: string | null }; output: { characterCardName: string | null; characterGroupId: string | null; updated: boolean } };
@@ -374,6 +375,8 @@ export const characterCards = {
   activePrompt: {
     /** Reads the active prompt. */
     get: (): Promise<ActivePromptRecord> => call("activePrompt.get", {}),
+    /** Selects ordinary model execution without a role card or group. */
+    setModel: (): Promise<ActivationResult> => call("activePrompt.setModel", {}),
     /** Activates a character card. */
     setCard: (payload: IdParams): Promise<ActivationResult> => call("activePrompt.setCard", payload),
     /** Activates a character group. */

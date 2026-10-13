@@ -57,3 +57,96 @@ test("registered configuration: rejects non-host callers before file/domain read
   await assert.rejects(() => registered.function({ callerPackage: "untrusted-plugin", payload: request("display", "group:unread") }), /authenticated host caller/);
   assert.equal(disk.calls.length, 0);
 });
+
+/** Prepares and commits the real provider-owned binding before resolving an execution. */
+async function committedConfiguration(plugin, selection, participantId = null, chatId = "unpersisted-creation-draft") {
+  await resolveDraft(plugin, { ...request("display", selection), chatId });
+  await plugin.api("chat.configuration.draft.commit", { chatId });
+  return plain(await plugin.api("chat.configuration.resolve", { ...request("execution", selection, participantId), chatId }));
+}
+
+/** The actual registered resolver authors group constraints before native storage freezes the execution snapshot. */
+test("registered configuration: group prompts preserve each speaker and saved member order across historical execution", async t => {
+  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const a = await plugin.api("character.create", { values: { name: "Prompt speaker A", characterSetting: "Exact A setting" } });
+  const b = await plugin.api("character.create", { values: { name: "Prompt speaker B", characterSetting: "Exact B setting" } });
+  const group = await plugin.api("group.create", { values: { name: "Prompt group", members: [{ characterCardId: a.id, orderIndex: 9 }, { characterCardId: b.id, orderIndex: 2 }] } });
+  const selection = "group:" + group.id, result = await committedConfiguration(plugin, selection, a.id);
+  assert.equal(result.profile.id, a.id);
+  assert.match(result.profile.introPrompt, /Exact A setting/);
+  assert.ok(result.profile.introPrompt.includes("Stay in role as " + a.name));
+  assert.ok(result.profile.introPrompt.includes("Group participants: " + b.name + ", " + a.name));
+  for (const participant of result.participants) assert.ok(participant.introPrompt.includes("Stay in role as " + participant.name));
+  const saved = plain(markers.decodeMessageMarker(result.messageExtension));
+  assert.deepEqual(saved.profile, result.profile); assert.deepEqual(saved.participants, result.participants);
+  await plugin.api("character.update", { id: a.id, changes: { name: "Changed current name", characterSetting: "Changed current setting" } });
+  const historical = plain(await plugin.api("chat.configuration.resolve", { ...request("execution", selection, a.id), messageExtension: result.messageExtension }));
+  assert.deepEqual(historical.profile, saved.profile);
+  assert.deepEqual(historical.messageExtension, result.messageExtension);
+});
+
+/** Card execution carries only its authored prompt, while a one-member group retains explicit group semantics. */
+test("registered configuration: single cards and single-member groups retain their own prompt scope", async t => {
+  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const card = await plugin.api("character.create", { values: { name: "Solo prompt speaker", characterSetting: "Exact solo setting" } });
+  const single = await committedConfiguration(plugin, "card:" + card.id);
+  assert.doesNotMatch(single.profile.introPrompt, /Role response plan hint|Group participants/);
+  const group = await plugin.api("group.create", { values: { name: "One member", members: [{ characterCardId: card.id, orderIndex: 0 }] } });
+  const grouped = await committedConfiguration(plugin, "group:" + group.id, card.id, "single-member-group-chat");
+  assert.ok(grouped.profile.introPrompt.includes("Stay in role as " + card.name));
+  assert.ok(grouped.profile.introPrompt.includes("Group participants: " + card.name));
+});
+
+/** Authenticated generic deletion removes the real binding and leaves historical message snapshots usable. */
+test("registered configuration: generic deletion checks its owner, acknowledges real cleanup and preserves history", async t => {
+  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const card = await plugin.api("character.create", { values: { name: "Deletion speaker" } });
+  const selection = "card:" + card.id, executed = await committedConfiguration(plugin, selection);
+  const registered = plugin.apis.get("chat.configuration.delete");
+  assert.equal(registered.function, plugin.main.chatConfigurationDeleteApi);
+  await assert.rejects(() => registered.function({ callerPackage: "other-owner", payload: { chatId: "unpersisted-creation-draft" } }), /host caller/);
+  assert.equal((await plugin.api("chat.configuration.binding.read", { chatId: "unpersisted-creation-draft" })).selection, selection);
+  assert.deepEqual(plain(await plugin.api("chat.configuration.delete", { chatId: "unpersisted-creation-draft" })), { deleted: true });
+  await assert.rejects(() => plugin.api("chat.configuration.binding.read", { chatId: "unpersisted-creation-draft" }));
+  const historical = plain(await plugin.api("chat.configuration.resolve", { ...request("execution", selection, card.id), messageExtension: executed.messageExtension }));
+  assert.deepEqual(historical.profile, executed.profile);
+  assert.deepEqual(plain(await plugin.api("chat.configuration.delete", { chatId: "unpersisted-creation-draft" })), { deleted: true });
+});
+
+/** Existing chats without role associations use a real model profile and keep their own immutable history. */
+test("registered configuration: no role association executes the configured model and provider identity", async t => {
+  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const input = request("execution", "model:chat");
+  const result = plain(await plugin.api("chat.configuration.resolve", input));
+  assert.equal(result.profile.name, input.defaultModelBinding.modelId);
+  assert.equal(result.profile.avatarUri, "provider-logo:fixture-provider-type");
+  assert.equal(result.profile.introPrompt, ""); assert.equal(result.profile.userPreferencesText, "");
+  assert.deepEqual(result.profile.resources, []); assert.equal(result.messageExtension.primaryOwnerKey, "");
+  assert.deepEqual(result.profile.modelBinding, input.defaultModelBinding);
+  const display = plain(await plugin.api("chat.configuration.resolve", { ...input, purpose: "display" }));
+  assert.deepEqual(display.identity, { title: result.profile.name, avatarUri: result.profile.avatarUri });
+  assert.deepEqual(display.participants, [{ id: "model:chat", name: result.profile.name, avatarUri: result.profile.avatarUri }]);
+  const reference = await plugin.api("chat.configuration.snapshot.store", result.messageExtension);
+  const saved = await plugin.api("chat.configuration.snapshot.read", reference);
+  await plugin.api("activePrompt.setCard", { id: "default" });
+  settings.clearCalls();
+  const historical = plain(await plugin.api("chat.configuration.resolve", { ...input, messageExtension: saved }));
+  assert.deepEqual(historical.profile, result.profile); assert.equal(settings.calls.length, 0);
+  const corrupt = plain(saved); corrupt.profile.introPrompt = "Unexpected role prompt"; corrupt.participants[0].introPrompt = corrupt.profile.introPrompt;
+  await assert.rejects(() => plugin.api("chat.configuration.resolve", { ...input, messageExtension: corrupt }), /model-only message snapshot/);
+  settings.failNext("Models.listSummaries", new Error("Configured model directory rejected"));
+  await assert.rejects(() => plugin.api("chat.configuration.resolve", input), /Configured model directory rejected/);
+});
+
+/** The genuine global model selection persists without referencing any stored character or group. */
+test("registered configuration: explicit model selection persists and produces role-free drafts", async t => {
+  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  assert.deepEqual(plain(await plugin.api("activePrompt.setModel", {})), { type: "model", id: "chat", active: true });
+  assert.deepEqual(plain(await plugin.api("activePrompt.get", {})), { Model: { id: "chat" } });
+  const result = await committedConfiguration(plugin, "model:chat");
+  assert.equal(result.profile.id, "model:chat"); assert.equal(result.profile.name, "fixture-model-token");
+  assert.deepEqual(result.profile.resources, []);
+  const reopened = openPlugin(settings.harness);
+  assert.deepEqual(plain(await reopened.api("activePrompt.get", {})), { Model: { id: "chat" } });
+  await assert.rejects(() => reopened.api("chat.configuration.resolve", request("execution", "model:chat", "default")), /Invalid model-only execution participant/);
+});

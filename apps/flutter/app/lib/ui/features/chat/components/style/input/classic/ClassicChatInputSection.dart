@@ -975,7 +975,7 @@ class _ClassicPopupShell extends StatelessWidget {
       children: <Widget>[
         Positioned.fill(
           child: Listener(
-            behavior: HitTestBehavior.translucent,
+            behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => onDismiss(),
             child: const SizedBox.expand(),
           ),

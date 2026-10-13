@@ -70,15 +70,11 @@ impl ToolPkgChatInputHookBridge {
     /// Registers chat input hooks for one application runtime.
     pub fn register(runtime: ToolPkgBridgeRuntime) {
         CHAT_INPUT_RUNTIME.get_or_init(|| runtime.clone());
-        let manager = runtime.package_manager();
-        manager.addToolPkgRuntimeChangeListener(std::sync::Arc::new(|activeContainers| {
-            ToolPkgChatInputHookBridge::syncToolPkgRegistrations(activeContainers);
-        }));
     }
 
     /// Synchronizes actual input hooks whenever the enabled package catalog changes.
     #[allow(non_snake_case)]
-    pub fn syncToolPkgRegistrations(activeContainers: Vec<ToolPkgContainerRuntime>) {
+    pub fn syncToolPkgRegistrations(activeContainers: &[ToolPkgContainerRuntime]) {
         let mut hooks = activeContainers
             .iter()
             .flat_map(|runtime| {

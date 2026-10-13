@@ -58,6 +58,10 @@ export function selectedEntity(selection: ActivePrompt | null, kind: EntityKind,
 /** Validates that the selected prompt is present and permitted by this selector's category. */
 export function validateSelection(selection: ActivePrompt | null, kind: SelectionKind, snapshot: Snapshot): void {
   if (selection === null) return;
+  if ("Model" in selection) {
+    if (kind === "group" || selection.Model.id !== "chat") throw new Error("Invalid model-only selection");
+    return;
+  }
   if ("CharacterCard" in selection) {
     if (kind === "group") throw new Error("群组选择器不能选择角色卡");
     getCard(snapshot, selection.CharacterCard.id);

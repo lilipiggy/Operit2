@@ -48,6 +48,13 @@ pub trait CoreLinkSharedClient {
 
     /// Opens a stream of events for a watched core path through a shared client.
     async fn watch(&self, request: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError>;
+
+    /// Opens a caller-owned input stream through a shared client.
+    #[allow(non_snake_case)]
+    async fn openPush(
+        &self,
+        request: CorePushRequest,
+    ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError>;
 }
 
 #[async_trait(?Send)]

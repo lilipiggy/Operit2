@@ -15,7 +15,6 @@ import 'package:operit2/ui/theme/OperitTheme.dart';
 
 const List<String> _userCapabilities = <String>[
   'network.devices.view',
-  'network.user',
   'chat.read',
   'network.relay',
   'runtime.execute',
@@ -541,7 +540,6 @@ void main() {
     expect(find.text('普通用户'), findsOneWidget);
     for (final label in <String>[
       '查看设备与当前身份',
-      '使用网络',
       '读取聊天记录',
       '中继网络流量',
       '执行任务',

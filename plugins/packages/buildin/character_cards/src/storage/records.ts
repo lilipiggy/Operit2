@@ -136,7 +136,7 @@ export function stateFromRecords(
   const state = {
     version: metadata.version,
     nextId: metadata.nextId,
-    active: metadata.active,
+    active: metadata.active === null ? { Model: { id: "chat" } } : metadata.active,
     memoryPreferences: metadata.memoryPreferences,
     cards: [] as Storage.Value[],
     groups: [] as Storage.Value[],

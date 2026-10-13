@@ -88,6 +88,11 @@ function selection(value: unknown): ActivePrompt {
   if (keys.length !== 1) throw new Error("screen.selection must have one active prompt discriminator");
   const object = value as Record<string, unknown>;
   switch (keys[0]) {
+    case "Model": {
+      const model = fields(object.Model, ["id"], "screen.selection.Model");
+      if (model.id !== "chat") throw new Error("Invalid model selection identity");
+      return { Model: { id: "chat" } };
+    }
     case "CharacterCard": return { CharacterCard: { id: identity(fields(object.CharacterCard, ["id"], "screen.selection.CharacterCard").id, "screen.selection.id") } };
     case "CharacterGroup": return { CharacterGroup: { id: identity(fields(object.CharacterGroup, ["id"], "screen.selection.CharacterGroup").id, "screen.selection.id") } };
     default: throw new Error("screen.selection has an unknown active prompt discriminator");
@@ -109,7 +114,7 @@ export function parseScreenInput(value: unknown): ScreenInput {
       fields(object, ["mode", "kind", "selected"], "screen.input");
       if (object.kind !== "card" && object.kind !== "group" && object.kind !== "all") throw new Error("screen.kind must be card, group, or all");
       const selected = object.selected === null ? null : selection(object.selected);
-      if (selected !== null && ((object.kind === "card" && !("CharacterCard" in selected)) || (object.kind === "group" && !("CharacterGroup" in selected)))) throw new Error("screen.selected does not match screen.kind");
+      if (selected !== null && ((object.kind === "card" && !("CharacterCard" in selected) && !("Model" in selected)) || (object.kind === "group" && !("CharacterGroup" in selected)))) throw new Error("screen.selected does not match screen.kind");
       return { mode: "select", kind: object.kind, selected };
     }
     case "preview":
@@ -134,7 +139,7 @@ export function parseScreenResult(value: unknown, input: PresentedScreen): Scree
     case "select": {
       fields(object, ["mode", "selection"], "screen.result");
       const result = selection(object.selection);
-      if ((input.kind === "card" && !("CharacterCard" in result)) || (input.kind === "group" && !("CharacterGroup" in result))) throw new Error("screen.result.selection does not match screen.kind");
+      if ((input.kind === "card" && !("CharacterCard" in result) && !("Model" in result)) || (input.kind === "group" && !("CharacterGroup" in result))) throw new Error("screen.result.selection does not match screen.kind");
       return { mode: "select", selection: result };
     }
     case "preview":

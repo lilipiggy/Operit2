@@ -379,7 +379,7 @@ export class DatabaseCharacterRepository implements CharacterRepositoryOwner {
         ...metadata,
         version: state.version,
         nextId: state.nextId,
-        active: storedValue(state.active),
+        active: "Model" in state.active ? null : storedValue(state.active),
         memoryPreferences: storedValue(state.memoryPreferences),
       },
       expectedVersion: metadataVersion,

@@ -115,6 +115,10 @@ export function decodeMessageMarker(value: unknown): MessageMarker {
   );
   if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(profile)) throw new Error("Message execution profile does not match its saved participant snapshot");
   if (parsed.kind === "card" && (participants.length !== 1 || profile.id !== parsed.id)) throw new Error("Message card selection does not match its saved participant");
+  if (parsed.kind === "model") {
+    if (participants.length !== 1 || profile.id !== "model:chat" || profile.name !== profile.modelBinding.modelId || extension.primaryOwnerKey !== "" || profile.resources.length !== 0 || profile.introPrompt !== "" || profile.userPreferencesText !== "" || profile.openingStatement !== "") throw new Error("Invalid model-only message snapshot");
+    return { version: 1, selection, promptFunctionType: extension.promptFunctionType, primaryOwnerKey: "", profile, participants };
+  }
   const primaryOwnerKey = requireId(extension.primaryOwnerKey, "message primary memory owner");
   if (!/^(character|shared):[^:\s]+$/u.test(primaryOwnerKey)) throw new Error("Invalid message primary memory owner");
   if (!profile.resources.some(

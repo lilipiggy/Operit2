@@ -7,6 +7,7 @@ import 'package:operit2/core/link/CoreLinkCodec.dart';
 import 'package:operit2/core/link/CoreLinkProtocol.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart' as core;
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
+import 'package:operit2/l10n/generated/app_localizations.dart';
 import 'package:operit2/ui/main/components/CollapsedDrawerContent.dart';
 import 'package:operit2/ui/features/chat/viewmodel/ChatSelectionTransition.dart';
 import 'package:operit2/ui/main/components/DrawerContent.dart';
@@ -368,6 +369,94 @@ void main() {
     },
   );
 
+  testWidgets(
+    'only chats without a binding share the unbound workspace header',
+    (tester) async {
+      final histories = [
+        for (final group in [
+          'pending-a',
+          'pending-b',
+          'unbound-a',
+          'unbound-b',
+        ])
+          core.ChatHistoryListItem.fromJson({
+            ..._history(group, 0).toJson(),
+            'workspaceId': switch (group) {
+              'unbound-a' || 'unbound-b' => null,
+              _ => group,
+            },
+            'workspaceName': null,
+          }),
+      ];
+      final bridge = _DrawerBridge();
+      await _pumpDrawer(tester, bridge, histories);
+      expect(find.text('未绑定工作区'), findsOneWidget);
+      expect(find.text('工作区缺失'), findsNWidgets(2));
+      expect(_visibleIds(tester), [
+        'pending-a-0',
+        'pending-b-0',
+        'unbound-a-0',
+        'unbound-b-0',
+      ]);
+
+      final hydrated = [
+        for (final history in histories)
+          core.ChatHistoryListItem.fromJson({
+            ...history.toJson(),
+            'workspaceName': switch (history.workspaceId) {
+              'pending-a' => 'Project A',
+              'pending-b' => 'Project B',
+              _ => null,
+            },
+          }),
+      ];
+      await _pumpDrawer(tester, bridge, hydrated);
+      expect(find.text('未绑定工作区'), findsOneWidget);
+      expect(find.text('工作区缺失'), findsNothing);
+      expect(find.text('Project A'), findsOneWidget);
+      expect(find.text('Project B'), findsOneWidget);
+      expect(_visibleIds(tester), [
+        'pending-a-0',
+        'pending-b-0',
+        'unbound-a-0',
+        'unbound-b-0',
+      ]);
+    },
+  );
+
+  testWidgets(
+    'a missing workspace record can be detached through the explicit chat',
+    (tester) async {
+      final bridge = _DrawerBridge();
+      final history = core.ChatHistoryListItem.fromJson({
+        ..._history('missing', 0).toJson(),
+        'workspaceName': null,
+      });
+      await _pumpDrawer(tester, bridge, [history]);
+      final row = tester.widget<ConversationDrawerItem>(
+        find.byType(ConversationDrawerItem),
+      );
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(DrawerContent)),
+      )!;
+      row.onLongPress();
+      await _pumpSidebar(tester);
+      await tester.tap(find.text(l10n.workspaceUnbindTitle));
+      await _pumpSidebar(tester);
+      expect(find.text(l10n.workspaceUnbindConfirmation), findsOneWidget);
+      await tester.tap(
+        find.widgetWithText(FilledButton, l10n.workspaceUnbindTitle),
+      );
+      await _pumpSidebar(tester);
+      final calls = bridge.calls
+          .where((call) => call.methodName == 'unbindChatFromWorkspace')
+          .toList();
+      expect(calls, hasLength(1));
+      expect((calls.single.args as Map)['chatId'], 'missing-0');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('renamed workspace metadata keeps preview keyed by identity', (
     tester,
   ) async {
@@ -501,7 +590,10 @@ class _DrawerBridge extends OperitRuntimeBridge {
     final value = switch (request.methodName) {
       'getPreferences' => preferences,
       'getToolPkgNavigationEntries' || 'getToolPkgUiRoutes' => <Object?>[],
-      'updateChatOrderAndGroup' || 'updateChatPinned' || 'switchChat' => null,
+      'updateChatOrderAndGroup' ||
+      'updateChatPinned' ||
+      'switchChat' ||
+      'unbindChatFromWorkspace' => null,
       'deleteChatHistory' => true,
       _ => throw StateError('Unexpected Core call: ${request.methodName}'),
     };

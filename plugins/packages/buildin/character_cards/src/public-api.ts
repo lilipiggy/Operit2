@@ -2,7 +2,7 @@ import type { MemoryQueryRequest, MemoryQueryResult, ChatConfigurationRequest, C
 import { parseDomainPayload, parseMemoryQueryRequest } from "./domain";
 import { MemoryTools } from "./runtime-tools/memory";
 import { dispatchDomain } from "./service-runtime";
-import { readStoredSnapshot, storeSnapshot, readDraftBinding, commitDraftBinding, abortDraftBinding } from "./chat-storage";
+import { findChatBinding, readStoredSnapshot, storeSnapshot, readDraftBinding, commitDraftBinding, abortDraftBinding } from "./chat-storage";
 import type { SnapshotReference } from "./chat-storage";
 import type { MessageMarker } from "./chat-markers";
 export { onMemoryMessagePersisted, onMemoryInterval, registerMemoryJobHooks } from "./memory-jobs/hooks";
@@ -14,8 +14,9 @@ export async function chatConfigurationResolveApi(event: ToolPkg.PublicApiEvent<
   if (event.callerPackage !== "host") throw new Error("chat.configuration.resolve requires an authenticated host caller");
   const request = parseDomainPayload("chat.configuration.resolve", event.payload);
   if (request.chatId !== null && request.messageExtension === null) {
-    const binding = await dispatchDomain("chat.configuration.binding.read", { chatId: request.chatId });
-    request.chatExtension = { version: 1, selection: binding.selection };
+    const binding = await findChatBinding(request.chatId);
+    // A conversation without a role association explicitly uses the ordinary model mode.
+    request.chatExtension = { version: 1, selection: binding === null ? "model:chat" : binding.selection };
   }
   return dispatchDomain("chat.configuration.resolve", request);
 }
@@ -37,6 +38,16 @@ export async function chatConfigurationDraftCommitApi(event: ToolPkg.PublicApiEv
 export async function chatConfigurationDraftAbortApi(event: ToolPkg.PublicApiEvent<{ chatId: string }>): Promise<{ aborted: true }> {
   if (event.callerPackage !== "host") throw new Error("Draft abort requires the host caller");
   await abortDraftBinding(event.payload.chatId); return { aborted: true };
+}
+
+/** Releases plugin-owned conversation state through the generic authenticated configuration lifecycle. */
+export async function chatConfigurationDeleteApi(event: ToolPkg.PublicApiEvent<{ chatId: string }>): Promise<{ deleted: true }> {
+  if (event.callerPackage !== "host") throw new Error("Configuration deletion requires the host caller");
+  const input = parseDomainPayload("chat.configuration.binding.delete", event.payload);
+  if (await findChatBinding(input.chatId) === null) return { deleted: true };
+  const result = await dispatchDomain("chat.configuration.binding.delete", input);
+  if (result.chatId !== input.chatId || !result.deleted) throw new Error("Character binding deletion was not acknowledged");
+  return { deleted: true };
 }
 
 /** Persists a frozen snapshot under the authenticated owner's SQL tables. */
@@ -68,6 +79,7 @@ export async function chatConfigurationBindingDeleteApi(event: ToolPkg.PublicApi
 /** Registers chat APIs without opening storage or evaluating business reads. */
 export function registerChatConfigurationApis(): void {
   ToolPkg.registerApi({ name: "chat.configuration.resolve", function: chatConfigurationResolveApi });
+  ToolPkg.registerApi({ name: "chat.configuration.delete", function: chatConfigurationDeleteApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.read", function: chatConfigurationBindingReadApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.write", function: chatConfigurationBindingWriteApi });
   ToolPkg.registerApi({ name: "chat.configuration.binding.delete", function: chatConfigurationBindingDeleteApi });
@@ -251,6 +263,11 @@ export async function groupImportBackupApi(event: ToolPkg.PublicApiEvent<DomainI
 /** Validates and executes the activePrompt.get public domain method. */
 export async function activePromptGetApi(event: ToolPkg.PublicApiEvent<DomainInput<"activePrompt.get">>): Promise<DomainOutput<"activePrompt.get">> {
   return dispatchDomain("activePrompt.get", parseDomainPayload("activePrompt.get", event.payload));
+}
+
+/** Selects the explicit model-only state through the plugin's canonical service. */
+export async function activePromptSetModelApi(event: ToolPkg.PublicApiEvent<DomainInput<"activePrompt.setModel">>): Promise<DomainOutput<"activePrompt.setModel">> {
+  return dispatchDomain("activePrompt.setModel", parseDomainPayload("activePrompt.setModel", event.payload));
 }
 
 /** Validates and executes the activePrompt.setCard public domain method. */
@@ -475,6 +492,7 @@ export function registerDomainApis(): void {
   ToolPkg.registerApi<DomainInput<"group.import">, DomainOutput<"group.import">>({ name: "group.import", function: groupImportApi });
   ToolPkg.registerApi<DomainInput<"group.exportBackup">, DomainOutput<"group.exportBackup">>({ name: "group.exportBackup", function: groupExportBackupApi });
   ToolPkg.registerApi<DomainInput<"group.importBackup">, DomainOutput<"group.importBackup">>({ name: "group.importBackup", function: groupImportBackupApi });
+  ToolPkg.registerApi<DomainInput<"activePrompt.setModel">, DomainOutput<"activePrompt.setModel">>({ name: "activePrompt.setModel", function: activePromptSetModelApi });
   ToolPkg.registerApi<DomainInput<"activePrompt.get">, DomainOutput<"activePrompt.get">>({ name: "activePrompt.get", function: activePromptGetApi });
   ToolPkg.registerApi<DomainInput<"activePrompt.setCard">, DomainOutput<"activePrompt.setCard">>({ name: "activePrompt.setCard", function: activePromptSetCardApi });
   ToolPkg.registerApi<DomainInput<"activePrompt.setGroup">, DomainOutput<"activePrompt.setGroup">>({ name: "activePrompt.setGroup", function: activePromptSetGroupApi });

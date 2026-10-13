@@ -276,6 +276,14 @@ fn watchRouteKind(request: &CoreWatchRequest, snapshot: bool) -> RoutedCoreReque
         RoutedCoreRequestKind::SpaceBinding
     } else { RoutedCoreRequestKind::SpaceRoute }
 }
+/// Selects Binding routing for annotated inputs and the target namespace for node services.
+fn pushRouteKind(request: &CorePushRequest) -> RoutedCoreRequestKind {
+    if crate::generated_space_push_route(request).is_some() {
+        RoutedCoreRequestKind::SpaceBinding
+    } else {
+        RoutedCoreRequestKind::Target
+    }
+}
 #[async_trait(?Send)]
 impl CoreLinkSharedClient for SessionSpaceClient {
     async fn call(&self, mut r: CoreCallRequest) -> CoreCallResponse {
@@ -293,6 +301,17 @@ impl CoreLinkSharedClient for SessionSpaceClient {
         r.requestId = CoreRequestId::new(nextCoreRouteRequestId("edge-watch"));
         let kind = watchRouteKind(&r, false);
         self.service.watch(&self.identity.peerNodeId, self.route(r, kind)?).await
+    }
+
+    /// Opens an authenticated input stream bound to the current Space admission and session.
+    async fn openPush(
+        &self,
+        mut request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        request.requestId = CoreRequestId::new(nextCoreRouteRequestId("edge-push"));
+        let kind = pushRouteKind(&request);
+        let route = self.route(request, kind)?;
+        self.service.openPush(&self.identity.peerNodeId, route).await
     }
 }
 pub(super) fn spaceConnection(service: &HostRuntimePeerService) -> Option<crate::NodeServices::SpaceClientConnection> {
@@ -515,7 +534,31 @@ mod tests {
         fn exists(&self,p:&str) -> operit_host_api::HostResult<bool> { Ok(self.0.lock().unwrap().contains_key(p)) }
         fn list(&self,p:&str) -> operit_host_api::HostResult<Vec<operit_host_api::RuntimeStorageEntry>> { Ok(self.0.lock().unwrap().iter().filter(|(k,_)| k.starts_with(p)).map(|(k,v)|operit_host_api::RuntimeStorageEntry {path:k.clone(),isDirectory:false,size:v.len() as i64}).collect()) }
     }
-    struct Router { node:String,scope:Mutex<Option<String>>,calls:AtomicUsize }
+    struct Router {
+        node: String,
+        scope: Mutex<Option<String>>,
+        calls: AtomicUsize,
+        inputRequests: Mutex<Vec<RoutedCoreRequest<CorePushRequest>>>,
+        inputValues: Arc<Mutex<Vec<CoreValue>>>,
+        inputCloses: Arc<AtomicUsize>,
+    }
+    struct Input {
+        values: Arc<Mutex<Vec<CoreValue>>>,
+        closes: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl CoreLinkPushSession for Input {
+        /// Records the exact typed value delivered by the encrypted shared session.
+        async fn send(&mut self, value: CoreValue) -> Result<(), CoreLinkError> {
+            self.values.lock().unwrap().push(value);
+            Ok(())
+        }
+        /// Records successful completion rather than treating disconnect as a commit.
+        async fn close(self: Box<Self>) -> Result<(), CoreLinkError> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
     #[async_trait(?Send)]
     impl PeerRouter for Router {
         fn localNodeId(&self) -> String { self.node.clone() }
@@ -525,12 +568,19 @@ mod tests {
         }
         async fn routedWatchSnapshot(&self,_:String,_:RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEvent,CoreLinkError> { Err(error("unused")) }
         async fn routedWatch(&self,_:String,_:RoutedCoreRequest<CoreWatchRequest>) -> Result<CoreEventStream,CoreLinkError> { Err(error("unused")) }
-        async fn routedOpenPush(&self,_:String,_:RoutedCoreRequest<CorePushRequest>) -> Result<Box<dyn CoreLinkPushSession>,CoreLinkError> { Err(error("unused")) }
+        /// Opens a recording input session behind the production authenticated dispatch.
+        async fn routedOpenPush(&self, _: String, request: RoutedCoreRequest<CorePushRequest>) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
+            self.inputRequests.lock().unwrap().push(request);
+            Ok(Box::new(Input { values: self.inputValues.clone(), closes: self.inputCloses.clone() }))
+        }
     }
     fn service(node:&str) -> (HostRuntimePeerService,Arc<Router>) {
         let storage=Arc::new(Storage::default());
         operit_store::CoreSpaceStore::CoreSpaceStore::newNodeLocal(storage.clone()).initialize().unwrap();
-        let router=Arc::new(Router {node:node.into(),scope:Mutex::new(Some("space".into())),calls:AtomicUsize::new(0)});
+        let router=Arc::new(Router {
+            node: node.into(), scope: Mutex::new(Some("space".into())), calls: AtomicUsize::new(0),
+            inputRequests: Mutex::default(), inputValues: Arc::new(Mutex::default()), inputCloses: Arc::new(AtomicUsize::new(0)),
+        });
         let service=HostRuntimePeerService { state:Arc::new(State { limits:PeerRuntimeLimits::default(),
             host:Arc::new(HostManager {runtimeStorageHost:Some(storage.clone()),..HostManager::default()}),link:HostPeerLink::default(),
             store:PeerStateStore::new(storage),nodeId:node.into(),info:LinkDeviceInfo {platform:"test".into(),model:"test".into(), pairingIncarnation: None },router:Arc::downgrade(&(router.clone() as Arc<dyn PeerRouter>)),
@@ -612,6 +662,9 @@ mod tests {
         assert_eq!(old.identity.spaceId, new.identity.spaceId);
         let result = old.client.call(CoreCallRequest::new("stale", CORE_INTERNAL_TARGET, "ensureRoutedChat", CoreValue::Null)).await;
         assert_eq!(result.result.unwrap_err().code, "SPACE_ENTRY_CHANGED");
+        let stalePush = old.client.openPush(CorePushRequest::new("stale-push", "core/services.attachmentTransferManager", "writeAttachmentUpload")).await;
+        assert!(matches!(stalePush, Err(error) if error.code == "SPACE_ENTRY_CHANGED"));
+        assert!(router.inputRequests.lock().unwrap().is_empty());
         *router.scope.lock().unwrap() = Some("other-space".into());
         *replacement.returnScope.lock().unwrap() = Some("other-space".into());
         assert_eq!(spaceConnection(&service).unwrap().identity.spaceId, "other-space");
@@ -675,6 +728,7 @@ mod tests {
             a.close().await; b.close().await;
         }
     }
+    /// Exercises shared Call and Push over an encrypted return channel and rejects revoked inputs.
     #[tokio::test]
     async fn serial_return_uses_original_directional_pairing_and_rejects_revocation() {
         let (a,b)=pair();let ap=start(&a);let bp=start(&b);
@@ -697,8 +751,35 @@ mod tests {
             let response=spaceClient(&edge).unwrap().call(request).await;
             assert_eq!(response.result.unwrap(),CoreValue::String("physical-transport-contract".into()));
             assert_eq!(coreRouter.calls.load(Ordering::SeqCst),1);
+            let client = spaceClient(&edge).unwrap();
+            let inputRequest = || CorePushRequest::new("caller-input", "core/services.attachmentTransferManager", "writeAttachmentUpload")
+                .withArgs(CoreValue::Map(BTreeMap::from([("uploadId".into(), CoreValue::String("opaque-upload".into()))])));
+            let mut input = client.openPush(inputRequest()).await.unwrap();
+            let values = [CoreValue::Bytes(vec![0, 255, 17].into()), CoreValue::Bytes(vec![42; 65536].into())];
+            for value in &values { input.send(value.clone()).await.unwrap(); }
+            input.close().await.unwrap();
+            assert_eq!(*coreRouter.inputValues.lock().unwrap(), values.to_vec());
+            assert_eq!(coreRouter.inputCloses.load(Ordering::SeqCst), 1);
+            {
+                let requests = coreRouter.inputRequests.lock().unwrap();
+                let route = &requests[0];
+                assert_eq!(route.spaceId, "space");
+                assert_eq!(route.originNodeId, "edge");
+                assert_eq!(route.targetNodeId, "core");
+                assert_eq!(route.routeKind, RoutedCoreRequestKind::Target);
+                assert_eq!(route.payload.target, inputRequest().target);
+                assert_eq!(route.payload.args, inputRequest().args);
+                assert_ne!(route.payload.requestId.0, "caller-input");
+            }
+            let mut revokedInput = client.openPush(inputRequest()).await.unwrap();
+            assert_eq!(coreRouter.inputRequests.lock().unwrap().len(), 2);
             *coreRouter.scope.lock().unwrap()=None;
-            let response=spaceClient(&edge).unwrap().call(CoreCallRequest::new("revoked","chat","send",CoreValue::Null)).await;
+            assert!(revokedInput.send(CoreValue::Bytes(vec![99].into())).await.is_err());
+            assert_eq!(*coreRouter.inputValues.lock().unwrap(), values.to_vec(), "Revocation must block the next input value");
+            assert_eq!(coreRouter.inputCloses.load(Ordering::SeqCst), 1, "Disconnect must not commit the revoked input");
+            assert!(client.openPush(inputRequest()).await.is_err());
+            assert_eq!(coreRouter.inputRequests.lock().unwrap().len(), 2);
+            let response=client.call(CoreCallRequest::new("revoked","chat","send",CoreValue::Null)).await;
             assert!(response.result.is_err());
             assert_eq!(coreRouter.calls.load(Ordering::SeqCst),1,"Revoked scope cannot execute even on an existing encrypted carrier");
             a.close().await;b.close().await;

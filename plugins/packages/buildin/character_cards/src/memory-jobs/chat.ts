@@ -27,6 +27,7 @@ export async function requireChat(chatId: string): Promise<MemoryChat> {
 export async function chatParticipants(chatId: string, repository: CharacterRepository): Promise<Card[]> {
   const binding = await repository.readChatBinding(chatId), cards = await repository.listCharacters(), groups = await repository.listGroups();
   const selection = requireChatSelection(binding.selection, cards, groups);
+  if (selection.kind === "model") return [];
   if (selection.kind === "card") return [await repository.getCharacter(selection.id)];
   const group = await repository.getGroup(selection.id);
   if (group.members.length === 0) throw new Error("Selected chat group has no participants: " + group.id);

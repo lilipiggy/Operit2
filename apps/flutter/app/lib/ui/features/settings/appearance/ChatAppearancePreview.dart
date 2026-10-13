@@ -77,7 +77,6 @@ class _ChatAppearancePreviewState extends State<ChatAppearancePreview> {
                         splitMarkdownContent:
                             (widget.viewModel ?? _defaultViewModel)
                                 .splitMarkdownContent,
-                        identityAvatarUri: null,
                         enableDialogs: false,
                       ),
                       const SizedBox(height: 8),
@@ -92,7 +91,6 @@ class _ChatAppearancePreviewState extends State<ChatAppearancePreview> {
                         splitMarkdownContent:
                             (widget.viewModel ?? _defaultViewModel)
                                 .splitMarkdownContent,
-                        identityAvatarUri: null,
                         enableDialogs: false,
                       ),
                     ],

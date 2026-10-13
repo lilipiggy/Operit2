@@ -73,7 +73,7 @@ pub trait RuntimePeerService: Send + Sync {
     /// 停止监听并关闭由本服务管理的连接和流；不删除持久化配对记录。
     async fn stop(&self) -> Result<(), CoreLinkError>;
 
-    /// Router 选出下一跳后直接调用此方法；不再查找旧 PeerLinkClient。
+    /// Submits a routed call to the adjacent node selected by the Router.
     /// nextNodeId 是相邻节点，request.targetNodeId 是最终节点，二者不能混淆。
     /// 内部根据配对记录选择端点和传输，建立连接、完成鉴权、发送 Call 并关联响应。
     /// 原调用方、Space、路由种类和 TTL 必须保留；不在此重新选路或执行 Proxy。

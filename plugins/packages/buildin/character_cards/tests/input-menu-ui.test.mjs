@@ -44,10 +44,10 @@ test("registered TS input menu reproduces one avatar and two-line character row 
 test("unbound TS menu shows its original row and opens a real selector without borrowing global active", async t => {
   const runtime = await selectorEnvironment(t), card = await runtime.api("character.create", { values: { name: "User-selected role" } });
   const ui = menu(runtime, "selector-chat"); await ui.load(); const tree = ui.render().tree;
-  assert.deepEqual(texts(tree), ["当前角色卡", "未绑定"]);
+  assert.deepEqual(texts(tree), ["当前角色卡", "仅使用模型"]);
   assert.equal(runtime.records.get("selector-chat").extension, null);
   const response = await ui.dispatch(keyedNode(tree, "current-character").props.onClick);
-  assert.equal(response.actionResult.input.selected, null);
+  assert.deepEqual(plain(response.actionResult.input.selected), { Model: { id: "chat" } });
   const selector = mountRegisteredSelector(runtime, { requestId: "menu-bind", input: response.actionResult.input }); await selector.load();
   await selector.dispatch(keyedNode(selector.render().tree, "card:" + card.id).props.onClick);
   assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id);
@@ -109,7 +109,7 @@ test("input menu labels and selector action do not wait for any avatar resource"
   };
   const ui = menu(runtime, "selector-chat");
   const loaded = await ui.load();
-  assert.deepEqual(texts(loaded.tree), ["当前角色卡", "未绑定"]);
+  assert.deepEqual(texts(loaded.tree), ["当前角色卡", "仅使用模型"]);
   const response = await ui.dispatch(keyedNode(loaded.tree, "current-character").props.onClick);
   assert.equal(response.actionResult.type, "toolpkg.ui.present");
   complete();

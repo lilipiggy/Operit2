@@ -35,6 +35,7 @@ use operit_runtime::services::TtsSynthesisService::TtsSynthesisService;
 use operit_store::repository::ChatHistoryManager::ChatHistoryManager;
 use operit_tools::tools::ToolPermissionSystem::{AiPermissionMode, PermissionRequestResult};
 use operit_tools::ToolExecutionManager::{AITool, ToolParameter};
+use operit_tools::tools::packTool::RuntimePackageManager::ToolPkgCoreCommandInfo;
 use operit_util::stream::Stream::Stream;
 use operit_util::GithubReleaseUtil::{
     FullUpdateProgressEvent, FullUpdateStatus, FullUpdateTarget, GithubReleaseUtil,
@@ -115,23 +116,16 @@ pub(crate) async fn run_cli_root(args: &[String]) -> Result<(), String> {
 /// Dispatches one CLI invocation after global options are removed.
 async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
-        print_cli_usage();
-        return Ok(());
+        return print_cli_usage().await;
     }
 
-    // Help and unknown-command handling run before any Core runtime is created.
+    // Local help routes remain explicit; plugin help uses the ready Core command catalog.
     if matches!(args[0].as_str(), "help" | "-h" | "--help") {
         return print_cli_help(args.get(1).map(String::as_str)).await;
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "help" | "-h" | "--help") {
         return print_cli_help(Some(&args[0])).await;
     }
-    if !CLI_COMMANDS.iter().any(|(name, _)| *name == args[0]) {
-        eprintln!("Unknown command: {}", args[0]);
-        eprintln!("Run 'operit2 cli help' to list commands.");
-        return Ok(());
-    }
-
     if args[0].as_str() == "link" {
         return run_link_command(&args[1..]).await;
     }
@@ -154,6 +148,7 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
 
     let localArgs = scope_cli_storage_command_args(args)?;
     let mut core = local_cli_core().await?;
+    let pluginCommands = read_cli_plugin_commands(&mut core).await?;
 
     let result = match localArgs[0].as_str() {
         "model" if localArgs.get(1).map(String::as_str) == Some("codex-login") => {
@@ -166,7 +161,6 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
         "log" => run_core_command_and_print(&mut core, &args).await,
         "local-models" => run_core_command_and_print(&mut core, &args).await,
         "stt" => run_core_command_and_print(&mut core, &args).await,
-        "memory" => run_core_command_and_print(&mut core, &args).await,
         "tts" => run_tts_cli_command(&core, &args[1..]).await,
         "export" => run_export_command(&mut core, &args[1..]).await,
         "import" => run_import_command(&mut core, &args[1..]).await,
@@ -178,10 +172,6 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
         "workspace" => run_core_command_and_print(&mut core, &args).await,
         "storage" => run_local_core_command_and_print(&mut core, &localArgs).await,
         "shell" => run_shell_command(&mut core, &args[1..]).await,
-        "tag" => run_core_command_and_print(&mut core, &args).await,
-        "character" => run_core_command_and_print(&mut core, &args).await,
-        "group" => run_core_command_and_print(&mut core, &args).await,
-        "active-prompt" => run_core_command_and_print(&mut core, &args).await,
         "approval" => run_core_command_and_print(&mut core, &args).await,
         "tool" => run_core_command_and_print(&mut core, &args).await,
         "market" => run_market_cli_command(&mut core, &args).await,
@@ -192,10 +182,10 @@ async fn run_cli_root_inner(args: &[String]) -> Result<(), String> {
         "plugin" => run_core_command_and_print(&mut core, &args).await,
         "mcp" => run_core_command_and_print(&mut core, &args).await,
         "usage" => run_core_command_and_print(&mut core, &args).await,
-        _ => {
-            print_cli_usage();
-            Ok(())
+        command if pluginCommands.iter().any(|entry| entry.name == command) => {
+            run_core_command_and_print(&mut core, &localArgs).await
         }
+        command => Err(format!("Unknown command: {command}; run 'operit2 cli help' to list commands.")),
     };
     result.map_err(rewrite_cli_usage_message)
 }
@@ -1814,18 +1804,12 @@ pub(crate) fn print_root_usage() {
 }
 
 /// One CLI command family with the short description shown by `operit2 cli help`.
-/// Every dispatched family must appear here; help routes core-owned families back
-/// to the core so its per-family usage stays the single source of truth.
+/// Inherent CLI families live here; plugin families come from the enabled Core catalog.
 const CLI_COMMANDS: &[(&str, &str)] = &[
     ("version", "Show CLI, core, and link versions"),
     ("identity", "Manage local node identities"),
     ("chat", "Manage chat sessions and messages"),
     ("shell", "Interactive chat shell"),
-    ("character", "Manage character cards"),
-    ("group", "Manage character groups"),
-    ("tag", "Manage prompt tags"),
-    ("active-prompt", "Show or set the active prompt card"),
-    ("memory", "Manage character and shared memory"),
     ("tts", "Configure text-to-speech and synthesize"),
     ("stt", "Configure speech-to-text and transcribe"),
     ("model", "Manage providers, models, and parameters"),
@@ -1855,17 +1839,40 @@ const CLI_COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Prints the compact level-1 command list shown by `operit2 cli [help]`.
-fn print_cli_usage() {
+async fn print_cli_usage() -> Result<(), String> {
+    let mut core = local_cli_core().await?;
+    let pluginCommands = read_cli_plugin_commands(&mut core).await?;
+    let lines = cli_usage_lines(&pluginCommands);
     if cli_json_mode() {
-        emit_cli_json(serde_json::json!({ "usage": cli_usage_lines() }));
-        return;
+        emit_cli_json(serde_json::json!({ "usage": lines }));
+    } else {
+        for line in lines {
+            println!("{line}");
+        }
     }
-    for line in cli_usage_lines() {
-        println!("{line}");
-    }
+    Ok(())
 }
 
-fn cli_usage_lines() -> Vec<String> {
+/// Reads enabled plugin commands through the existing authenticated Core registry.
+async fn read_cli_plugin_commands(
+    core: &mut crate::core_proxy::CliCore,
+) -> Result<Vec<ToolPkgCoreCommandInfo>, String> {
+    let output = core
+        .runCoreCommand(&["plugin".to_string(), "commands".to_string(), "--json".to_string()])
+        .await
+        .map_err(core_command_error_message)?;
+    let commands: Vec<ToolPkgCoreCommandInfo> = serde_json::from_str(&output.stdout)
+        .map_err(|error| format!("Invalid plugin command catalog: {error}"))?;
+    for command in &commands {
+        if CLI_COMMANDS.iter().any(|(name, _)| *name == command.name) {
+            return Err(format!("Plugin command conflicts with CLI command: {}", command.name));
+        }
+    }
+    Ok(commands)
+}
+
+/// Formats inherent CLI commands together with the actual enabled plugin descriptions.
+fn cli_usage_lines(pluginCommands: &[ToolPkgCoreCommandInfo]) -> Vec<String> {
     let mut lines = vec![
         "operit2 cli <command> [arguments...]".to_string(),
         String::new(),
@@ -1878,6 +1885,9 @@ fn cli_usage_lines() -> Vec<String> {
     for (name, description) in CLI_COMMANDS {
         lines.push(format!("  {name:<15}  {description}"));
     }
+    for command in pluginCommands {
+        lines.push(format!("  {:<15}  {}", command.name, command.description));
+    }
     lines.push(String::new());
     lines.push("Run 'operit2 cli help <command>' for details on one command.".to_string());
     lines
@@ -1888,8 +1898,7 @@ fn cli_usage_lines() -> Vec<String> {
 /// locally; the rest forward to the core, which prints its own usage.
 async fn print_cli_help(command: Option<&str>) -> Result<(), String> {
     let Some(command) = command else {
-        print_cli_usage();
-        return Ok(());
+        return print_cli_usage().await;
     };
     match command {
         "identity" => {
@@ -1928,10 +1937,13 @@ async fn print_cli_help(command: Option<&str>) -> Result<(), String> {
             let mut core = local_cli_core().await?;
             run_core_command_and_print(&mut core, &[family.to_string()]).await
         }
-        other => {
-            eprintln!("Unknown command: {other}");
-            eprintln!("Run 'operit2 cli help' to list commands.");
-            Ok(())
+        command => {
+            let mut core = local_cli_core().await?;
+            let pluginCommands = read_cli_plugin_commands(&mut core).await?;
+            if !pluginCommands.iter().any(|entry| entry.name == command) {
+                return Err(format!("Unknown command: {command}; run 'operit2 cli help' to list commands."));
+            }
+            run_core_command_and_print(&mut core, &[command.to_string()]).await
         }
     }
 }
@@ -2017,7 +2029,8 @@ fn print_chat_message(message: &operit_model::ChatMessage::ChatMessage) {
     println!("--- message ---");
     println!("Sender: {}", message.sender);
     println!("Timestamp: {}", message.timestamp);
-    println!("Role: {}", message.roleName);
+    let responder = if message.roleName.is_empty() { &message.modelName } else { &message.roleName };
+    println!("Responder: {}", responder);
     println!("Selected variant: {}", message.selectedVariantIndex);
     println!("Variants: {}", message.variantCount);
     println!("Provider: {}", message.provider);
@@ -2179,7 +2192,7 @@ mod tests {
         let uniqueCount = names.len();
         names.dedup();
         assert_eq!(names.len(), uniqueCount, "CLI_COMMANDS names must be unique");
-        assert_eq!(uniqueCount, 35, "CLI_COMMANDS must cover every dispatched family");
+        assert_eq!(uniqueCount, 30, "CLI_COMMANDS must cover inherent CLI families");
         assert!(CLI_COMMANDS
             .iter()
             .all(|(_, description)| !description.is_empty()));

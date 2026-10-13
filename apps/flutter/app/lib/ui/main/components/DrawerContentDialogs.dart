@@ -13,6 +13,7 @@ enum ConversationAction {
   moveDown,
   togglePinned,
   toggleLocked,
+  unbindWorkspace,
   delete,
 }
 
@@ -105,6 +106,7 @@ class ConversationActionDialog extends StatelessWidget {
   final bool canMoveUp;
   final bool canMoveDown;
 
+  /// Offers chat actions and explicit detachment for existing workspace bindings.
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -171,6 +173,13 @@ class ConversationActionDialog extends StatelessWidget {
             onTap: () =>
                 Navigator.of(context).pop(ConversationAction.toggleLocked),
           ),
+          if (history.workspaceId?.trim().isNotEmpty == true)
+            _ConversationActionTile(
+              icon: Icons.link_off,
+              label: l10n.workspaceUnbindTitle,
+              onTap: () =>
+                  Navigator.of(context).pop(ConversationAction.unbindWorkspace),
+            ),
           _ConversationActionTile(
             icon: Icons.delete_outline,
             label: l10n.delete,

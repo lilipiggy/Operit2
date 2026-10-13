@@ -45,7 +45,9 @@ const ready = section(support, "pub async fn ready(", "/// Returns the authentic
 verify((ready.match(/RuntimePackageManager::readySnapshot\(/g) ?? []).length === 1, "Configuration readiness must resolve one canonical snapshot");
 verify(/getEnabledToolPkgContainerRuntimes\(\)/.test(ready) && /runtime\.publicApis/.test(ready), "Owner selection must inspect actual enabled public API registrations");
 verify(!/com\.operit\.character_cards|character_cards|HostProvider|PluginStore|callDependency/.test(support), "Native configuration calls must not name a plugin or withdrawn framework");
-verify(/match candidates\.len\(\)/.test(support) && /Duplicate chat\.configuration\.resolve/.test(support), "Unknown and duplicate owners must be explicit errors");
+verify(/match candidates\.len\(\)/.test(support) && /Duplicate chat\.configuration\.resolve/.test(support), "Duplicate registered owners must be explicit errors");
+verify(/0 => Ok\(MODEL_CONFIGURATION_OWNER\.to_string\(\)\)/.test(support), "An empty enabled catalog must select ordinary native model conversations");
+verify(/fn modelExecution\(/.test(support) && /fn modelDisplay\(/.test(support) && /validateModelSnapshot/.test(support), "Standalone model display, execution and immutable snapshots must be owned by the native runtime");
 verify(support.includes('"chat.configuration.resolve"'), "Missing registered resolve API");
 verify(!/chat\.configuration\.binding|readBinding|writeBinding|deleteBinding/.test(support + history + core), "Core must not maintain plugin binding mirrors");
 verify(/invokeToolPkgPublicApi/.test(support) && !/SoftwareSettings\.exec|execCore|callDependency/.test(support), "Typed native invocations must use the authenticated existing public API bridge");
@@ -55,8 +57,8 @@ verify(/ToolPkgChatLifecycleHookBridge::snapshot\(\)\.await\?/.test(create), "Cr
 verify(create.indexOf("dispatchBeforeCreate") < create.indexOf("resolveDraft") && create.indexOf("resolveDraft") < create.indexOf("commitChatDraft"), "Creation must complete hook and draft resolve before committing any record");
 verify(create.indexOf("commitChatDraft") < create.lastIndexOf("publishChatConfiguration"), "Creation cannot publish before atomic commit");
 verify(/sourceChatId: sourceChatId\.clone\(\)/.test(create) && /sourceMessageTimestamp/.test(create), "Lifecycle must receive genuine explicit source and branch point");
-verify(!/configuration\.contextKey|inheritGroup|\.selection\b/.test(create), "Core must not interpret plugin inheritance markers");
-verify(/current\.pluginExtensions == draft\.pluginExtensions/.test(create) && /current\.workspaceId == draft\.workspaceId/.test(create) && /hasUserMessage/.test(create), "Empty-chat reuse must compare complete generic draft identity and workspace");
+verify(!/inheritGroup|\.selection\b|contextKey\.(?:split|strip_prefix|starts_with)/.test(create), "Core must not interpret plugin inheritance markers");
+verify(/existingConfiguration\.contextKey == configuration\.contextKey/.test(create) && /current\.workspaceId == draft\.workspaceId/.test(create) && /hasUserMessage/.test(create), "Empty-chat reuse must compare provider-resolved opaque context identity and workspace");
 verify(/for \(initial of configuration/.test(create) || /for initial in &configuration\.initialMessages/.test(create), "Creation must persist exactly the ordered initialMessages explicitly declared by the plugin");
 verify(/if let Some\(snapshot\) = &initial\.messageExtension/.test(create) && /opening\.pluginExtensions\.insert/.test(create), "Only explicit optional initial-message snapshots may be persisted under the authenticated owner");
 verify(!/profile\.openingStatement|participants\.first|configuration\.profile/.test(create), "Core must not infer opening statements or select an execution participant during draft display");
@@ -95,7 +97,7 @@ const branch = section(history, "pub async fn createBranch(", "/// Loads branche
 verify(/ToolPkgChatCreationKind::Branch/.test(branch) && /createChatDraft/.test(branch), "Branches must use the same real lifecycle and draft transaction");
 verify(/pub async fn currentChatIdFlow/.test(core) && /self\.initializeChatConfiguration\(\)\.await\?/.test(core), "Startup flow must await initialization");
 verify(/pub async fn chatConfigurationForMessage/.test(core) && /PluginExtensionTarget::Message/.test(core) && /messageExtension: Some\(snapshot\)/.test(core), "Historical profiles must read the exact persisted message revision snapshot");
-verify(/applyConfigurationSnapshot\(&mut aiMessage, &configuration\)/.test(processor), "Every generated revision requires its fresh execution snapshot before persistence");
+verify(/applyConfigurationSnapshot\(&mut aiMessage, &configuration, &request\.enhancedAiService\.tool_handler\)\.await/.test(processor), "Every generated revision must await authenticated storage of its fresh execution snapshot before persistence");
 verify(/beginChatExecution\(&chatId\)/.test(coordinator) && /executionLease: Option<ChatExecutionLease>/.test(processor), "Generation protection must be acquired and retained by the real streaming runtime");
 verify(/runtime\.executionLease\.take\(\)/.test(processor) && /protectRevision/.test(processor), "Completion/cancel must release guards protecting exact dirty revisions");
 verify(/runtime\.chatConfiguration\.profile\.id/.test(enhanced) && /"executionContext"/.test(enhanced), "Prompt hooks must receive the resolved execution participant");
@@ -147,8 +149,8 @@ verify(/manager\.beginChatExecution\(&chatId\)/.test(nativeTransport) && /lease:
 verify(/execution\.owner != owner/.test(nativeTransport) && /sequence\.owner != owner/.test(nativeTransport), "Execution and sequence operations must reject foreign authenticated owners");
 const chatTools = source("core/crates/tool/services/src/tools/defaultTool/standard/StandardChatManagerTool.rs");
 const registration = source("core/crates/tool/services/src/tools/ToolRegistration.rs");
-verify(/context\.requirePluginOwner\(\)\?/.test(chatTools) && /runtimeSupport\(\)\.openPluginChatMessage\(&owner/.test(chatTools), "Chat admission requires native invocation ownership and the canonical service");
-verify(/runtimeSupport\(\)\.requestPluginChatCancellation\(&context\.requirePluginOwner\(\)\?, &args\.chat_id\)/.test(registration), "Registered cancellation directly uses the native owner and canonical runtime");
+verify(/context\.requirePluginOwner\(\)\?/.test(chatTools) && /runtimeSupport\(\)\s*\.openPluginChatMessage\(&owner/.test(chatTools), "Chat admission requires native invocation ownership and the canonical service");
+verify(/runtimeSupport\(\)\s*\.requestPluginChatCancellation\(\s*&context\.requirePluginOwner\(\)\?,\s*&args\.chat_id,?\s*\)/.test(chatTools), "Registered cancellation directly uses the native owner and canonical runtime");
 verify(!/RuntimeToolExecutor|RuntimeToolRequest|executeRuntimeOperation/.test(nativeHost), "The handler must not contain a second runtime business dispatcher");
 verify(/handler\.executeToolInvocation\(&call, ToolExecutionPolicy::Direct\)/.test(nativeHost), "JavaScript enters the common pipeline without AI permission preflight");
 verify(/ownedActiveExecution\(owner, chatId\)/.test(toolsRuntime)

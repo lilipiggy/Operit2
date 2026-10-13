@@ -135,17 +135,6 @@ class AppLocalizationsEn extends AppLocalizations {
       'Receiving AI response after tool execution...';
 
   @override
-  String get roleResponsePlannerPlanning => 'Planning group speaking order...';
-
-  @override
-  String roleResponsePlannerMemberReplying(String memberName) {
-    return 'Generating a reply from \"$memberName\"...';
-  }
-
-  @override
-  String get roleResponsePlannerFailed => 'Group planning failed';
-
-  @override
   String get summarizingMemories => 'Summarizing memories...';
 
   @override
@@ -227,12 +216,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get toolApprovalAlwaysAllow => 'Always allow in this session';
-
-  @override
-  String get createGroupTitle => 'New group';
-
-  @override
-  String get groupNameLabel => 'Group name';
 
   @override
   String get renameConversationTitle => 'Edit title';
@@ -968,7 +951,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsCategoryGlobalBehaviorDescription =>
-      'Configure input and interaction behavior that does not vary by character card.';
+      'Configure application-wide input and interaction behavior.';
 
   @override
   String get settingsCategoryAppearanceTitle => 'Appearance & Interaction';
@@ -989,7 +972,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsCategoryDataDescription =>
-      'Back up chats, characters, and model settings, restore backup content, and view data statistics.';
+      'Back up chats, plugin data, and model settings, restore backup content, and view data statistics.';
 
   @override
   String get settingsCategoryAccessLinksTitle => 'Device Space';
@@ -1032,7 +1015,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsComingSoon =>
-      'This area will continue connecting existing runtime capabilities. Models, characters, and tools are being completed first.';
+      'This area will continue connecting existing runtime capabilities. Model and tool settings are being completed first.';
 
   @override
   String get settingsAdvanced => 'Advanced settings';
@@ -2594,17 +2577,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceThemeMode => 'Current mode';
 
   @override
-  String get settingsAppearanceThemeTarget => 'Theme save target';
-
-  @override
-  String get settingsAppearanceThemeTargetGlobal => 'Global';
-
-  @override
-  String settingsAppearanceThemeTargetGroup(Object name) {
-    return 'Current group: $name';
-  }
-
-  @override
   String get settingsAppearanceThemeSystem => 'System';
 
   @override
@@ -2949,7 +2921,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceShowThinkingProcess => 'Show thinking process';
 
   @override
-  String get settingsAppearanceShowRoleName => 'Show role name';
+  String get settingsAppearanceShowRoleName => 'Show custom responder names';
 
   @override
   String get settingsAppearanceShowUserName => 'Show user name';
@@ -3397,7 +3369,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsDataExportRawSnapshotDescription =>
-      'Pack chats, characters, model settings, and local files into one backup file. Restoring replaces current data with the backup.';
+      'Pack chats, plugin data, model settings, and local files into one backup file. Restoring replaces current data with the backup.';
 
   @override
   String settingsDataSnapshotBytes(int bytes) {
@@ -3649,9 +3621,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsRuntimeControlCapabilityRuntimeExecute => 'Run tasks';
 
   @override
-  String get settingsRuntimeControlCapabilityNetworkUser => 'Use the network';
-
-  @override
   String get settingsRuntimeControlCapabilityChatRead => 'Read chat history';
 
   @override
@@ -3813,7 +3782,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String chatMessageRole(String roleName) {
-    return 'Role: $roleName';
+    return 'Responder: $roleName';
   }
 
   @override
@@ -4161,7 +4130,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceThemeConfigCustomHint =>
-      'Click + to create a theme configuration and bind it to a character or group.';
+      'Click + to create and manage independent theme configurations.';
 
   @override
   String get settingsAppearanceThemeConfigEditingHint =>

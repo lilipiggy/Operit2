@@ -330,7 +330,7 @@ impl SystemToolPrompts {
         categories
     }
 
-    /// Returns the built-in tools that can be assigned to a character card.
+    /// Returns the built-in tool catalog available for explicit execution access policies.
     #[allow(non_snake_case)]
     pub fn getManageableToolPrompts(use_english: bool) -> Vec<ManageableToolPrompt> {
         let base_categories = if use_english {

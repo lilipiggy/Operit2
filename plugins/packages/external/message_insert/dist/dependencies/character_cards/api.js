@@ -77,6 +77,8 @@ exports.characterCards = {
     activePrompt: {
         /** Reads the active prompt. */
         get: () => call("activePrompt.get", {}),
+        /** Selects ordinary model execution without a role card or group. */
+        setModel: () => call("activePrompt.setModel", {}),
         /** Activates a character card. */
         setCard: (payload) => call("activePrompt.setCard", payload),
         /** Activates a character group. */

@@ -123,7 +123,6 @@ fn network_capability_label(capability: &str) -> String {
         "network.relay" => "relay network traffic".to_string(),
         "storage.provide" => "provide storage".to_string(),
         "runtime.execute" => "run tasks".to_string(),
-        "network.user" => "use the network".to_string(),
         value => value.to_string(),
     }
 }
@@ -139,7 +138,6 @@ pub(crate) fn network_capabilities(values: &[String]) -> Result<BTreeSet<String>
                 "relay" => "network.relay",
                 "storage" => "storage.provide",
                 "execute" => "runtime.execute",
-                "network" => "network.user",
                 "view" => "network.devices.view",
                 "manage-identities" => "network.identity.manage",
                 "assign-identity" => "network.identity.assign",

@@ -334,6 +334,14 @@ impl CoreLinkSharedClient for LocalCoreProxy {
                 error
             })
     }
+
+    /// Opens one generated reverse stream through the shared local Core client.
+    async fn openPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+        self.openPushLocal(request)
+    }
 }
 
 #[async_trait(?Send)]
@@ -378,6 +386,14 @@ impl LocalApplicationBridgeTarget for LocalCoreProxy {
             request,
             self.streamAttachmentAdopter(),
         )
+    }
+
+    /// Opens one generated application input stream through the local reverse-stream dispatcher.
+    async fn openLocalApplicationPush(
+        &self,
+        request: operit_link::CorePushRequest,
+    ) -> Result<Box<dyn CoreLinkPushSession>, CoreLinkError> {
+        self.openPushLocal(request)
     }
 }
 

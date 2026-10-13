@@ -33,3 +33,21 @@ test("plugin internal contracts do not erase known SDK and domain result types",
   assert.match(service, /dispatch<R extends Request>\(request: R\): Promise<RequestOutput<R>>/);
   assert.match(contracts, /type GroupSubmissionAttachment = Chat\.SendAttachment/);
 });
+
+/** CLI command names and descriptions belong to enabled plugin registrations, including independently installed providers. */
+test("CLI resolves plugin commands and help from the actual catalog without role command literals", () => {
+  const cli = readFileSync(new URL("../../../../../apps/cli/src/cli/mod.rs", import.meta.url), "utf8");
+  assert.doesNotMatch(cli, /"(?:character|group|tag|active-prompt|memory)"/);
+  assert.match(cli, /read_cli_plugin_commands/);
+  assert.match(cli, /pluginCommands\.iter\(\)\.any\(\|entry\| entry\.name == command\)/);
+  assert.match(cli, /for command in pluginCommands/);
+  assert.match(cli, /command\.name, command\.description/);
+});
+
+/** Generic host deletion delegates domain cleanup to the authenticated provider and requires its exact receipt. */
+test("Core configuration deletion does not invoke plugin binding business APIs", () => {
+  const support = readFileSync(new URL("../../../../../core/crates/runtime/application/src/services/ProviderRuntimeSupportService.rs", import.meta.url), "utf8");
+  assert.doesNotMatch(support, /chat\.configuration\.binding/);
+  assert.match(support, /"chat\.configuration\.delete"/);
+  assert.match(support, /json!\(\{"deleted":true\}\)/);
+});

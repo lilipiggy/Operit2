@@ -752,7 +752,7 @@ fn run_link_control_identity_command(
     coreApplication: &operit_core_application::CoreApplication,
     args: &[String],
 ) -> Result<(), String> {
-    const USAGE: &str = "usage: operit2 cli link control identity <list|define <name> <all|audit|relay|storage|execute|network|view|manage-identities|assign-identity|approve|join>...|set <device-name> <identity-name>|clear <device-name>>";
+    const USAGE: &str = "usage: operit2 cli link control identity <list|define <name> <all|audit|relay|storage|execute|view|manage-identities|assign-identity|approve|join>...|set <device-name> <identity-name>|clear <device-name>>";
     match args {
         [command] if command == "list" => {
             let state = service.deviceSpaceControl()?;
@@ -1098,7 +1098,7 @@ pub(crate) fn print_link_usage() {
     println!("operit2 cli link space approve|reject <request-id> <assignment-version> | sync");
     println!("operit2 cli link session <http|ws|tcp> [--bind <host:port>] [--no-discovery]  # live interactive management");
     println!("operit2 cli link control <show|bootstrap|audit|identity|device|policy>");
-    println!("  identity list|define <name> <all|audit|relay|storage|execute|network|view|manage-identities|assign-identity|approve|join>...|set <device-name> <identity-name>|clear <device-name>");
+    println!("  identity list|define <name> <all|audit|relay|storage|execute|view|manage-identities|assign-identity|approve|join>...|set <device-name> <identity-name>|clear <device-name>");
     println!("  device list|admit <device-name>|remove <device-name>|disconnect <device-name>");
     println!("operit2 cli link stream-probe <node-id>");
     println!("operit2 cli link edge-plugin <device> list");

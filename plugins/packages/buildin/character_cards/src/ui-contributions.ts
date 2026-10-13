@@ -109,9 +109,10 @@ export function requireUiCaller(caller: string): void {
 }
 
 /** Resolves the plugin's deliberately opaque selection token using its exact declared grammar. */
-export function decodeSelection(selection: string, directory: Pick<Snapshot, "cards" | "groups">): { entity: EntityKind; id: string; prompt: ActivePrompt; title: string; avatarUri: string | null } {
+export function decodeSelection(selection: string, directory: Pick<Snapshot, "cards" | "groups">): { entity: EntityKind | "model"; id: string; prompt: ActivePrompt; title: string; avatarUri: string | null } {
   const parsed = parseChatSelection(selection), id = parsed.id;
   switch (parsed.kind) {
+    case "model": return { entity: "model", id, prompt: { Model: { id: "chat" } }, title: "仅使用模型", avatarUri: null };
     case "card": {
       const cards = directory.cards.filter(
         /** Requires one exact persisted identity, not a replacement active actor. */
@@ -142,7 +143,7 @@ export function encodeSelection(selection: ActivePrompt): string {
 export function contextActions(routes: ChatUiRoutes, target: ContextSelection, directory: Snapshot): ContextActions {
   const selected = target.selection === null ? null : decodeSelection(target.selection, directory);
   return {
-    identity: selected === null ? null : { title: selected.title, avatarUri: selected.avatarUri, avatarAction: previewAction(routes.editor, selected.entity, selected.id) },
+    identity: selected === null || selected.entity === "model" ? null : { title: selected.title, avatarUri: selected.avatarUri, avatarAction: previewAction(routes.editor, selected.entity, selected.id) },
     backgroundUri: null,
   };
 }
@@ -174,6 +175,8 @@ export function listSections(routeId: string, directory: Snapshot, bindings: rea
     for (const chatId of chatIds) if (byChat.get(chatId) === selection) result.push(chatId);
     return result;
   }
+  const modelChats = boundChats("model:chat");
+  if (modelChats.length > 0) sections.push({ id: "model:chat", title: "仅使用模型", avatarUri: null, selection: "model:chat", preview: { routeId: chatUiRoutes.selection, input: { mode: "select", chatId: null, kind: "all", selected: { Model: { id: "chat" } } } }, chatIds: modelChats });
   return { sections };
 }
 
@@ -251,10 +254,12 @@ export function createUiScreenSession(presentation: UiPresentation | null): UiSc
             const selection = encodeSelection(result.selection);
             if (selectorTarget.chatId === null) {
               const identity = parseChatSelection(selection);
-              const active = identity.kind === "card"
+              const active = identity.kind === "model"
+                ? await callMainDomain("activePrompt.setModel", {})
+                : identity.kind === "card"
                 ? await callMainDomain("activePrompt.setCard", { id: identity.id })
                 : await callMainDomain("activePrompt.setGroup", { id: identity.id });
-              if (!active.active || active.id !== identity.id || active.type !== (identity.kind === "card" ? "character_card" : "character_group")) throw new Error("Main runtime did not confirm the selected global active prompt");
+              if (!active.active || active.id !== identity.id || active.type !== (identity.kind === "model" ? "model" : identity.kind === "card" ? "character_card" : "character_group")) throw new Error("Main runtime did not confirm the selected global active prompt");
             } else {
               const chatId = selectorTarget.chatId;
               const binding = await callMainDomain("chat.configuration.binding.write", { chatId, selection });

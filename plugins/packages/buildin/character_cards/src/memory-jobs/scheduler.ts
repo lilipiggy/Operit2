@@ -52,6 +52,7 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
   if (input.sourceType === "reply_finalized_auto") {
     const marker = await readMessageSnapshot(input.chatId, message.timestamp, message.variantIndex);
     const ownerKey = input.ownerKey === null ? marker.primaryOwnerKey : input.ownerKey;
+    if (ownerKey === "") return { owners: [], candidateIds: [] };
     if (!marker.profile.resources.some(
       /** Authorizes only the exact submitted resource through the already-read historical snapshot. */
       resource => resource.key === ownerKey && resource.writable,

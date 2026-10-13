@@ -101,6 +101,35 @@ class ProviderLogo extends StatelessWidget {
   }
 }
 
+/// Renders an exact provider brand for message identity without substituting another avatar.
+class ProviderIdentityLogo extends StatelessWidget {
+  /// Creates a message logo using the configured provider's actual type identifier.
+  const ProviderIdentityLogo({
+    super.key,
+    required this.providerTypeId,
+    required this.size,
+  });
+
+  final String providerTypeId;
+  final double size;
+
+  /// Requires a declared logo and shares the settings renderer's brand color policy.
+  @override
+  Widget build(BuildContext context) {
+    final asset = providerLogoAssets[providerTypeId];
+    if (asset == null) {
+      throw StateError('Provider logo is not declared: $providerTypeId');
+    }
+    return Center(
+      child: _ProviderLogoAsset(
+        asset: asset,
+        providerTypeId: providerTypeId,
+        size: size * 0.75,
+      ),
+    );
+  }
+}
+
 class _ProviderLogoAsset extends StatelessWidget {
   const _ProviderLogoAsset({
     required this.asset,

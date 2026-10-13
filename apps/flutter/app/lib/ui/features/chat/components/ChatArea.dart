@@ -1001,7 +1001,6 @@ class _ChatAreaState extends State<ChatArea>
       colorScheme: colorScheme,
       key: ValueKey<String>(_messageWidgetKey(message)),
       message: message,
-      identityAvatarUri: widget.identityAvatarUri,
       onIdentityTap: widget.onIdentityTap,
       splitMarkdownContent: widget.splitMarkdownContent,
       onDeleteMessage: widget.onDeleteMessage,

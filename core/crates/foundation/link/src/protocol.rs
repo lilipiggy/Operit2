@@ -758,8 +758,8 @@ impl CorePushRequest {
     }
 }
 
-/// One standard application Link request. Transports must expose only these
-/// three operation families; pairing/session control is not a Link operation.
+/// One standard Link request. Transports expose only these three operation
+/// families; node pairing and session control use ordinary Call messages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "body")]
 pub enum CoreLinkRequest {
@@ -849,100 +849,6 @@ pub struct RoutedCoreRequest<T> {
     #[serde(default)]
     pub routeKind: RoutedCoreRequestKind,
     pub payload: T,
-}
-
-/// Carries one asynchronous standard PeerLink message across any authenticated carrier.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerFrame {
-    pub messageId: String,
-    pub payload: PeerFramePayload,
-}
-
-/// Carries an ordered batch of PeerLink frames on batch-oriented carriers.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerFrameBatch {
-    pub frames: Vec<PeerFrame>,
-}
-
-/// Defines every message exchanged by a bidirectional Space PeerLink.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "body")]
-pub enum PeerFramePayload {
-    Request(PeerRequest),
-    Response(PeerResponse),
-    WatchEvent(PeerWatchEvent),
-    WatchClosed(PeerWatchClosed),
-    Heartbeat(PeerHeartbeat),
-}
-
-/// Carries a sequence-numbered heartbeat probe or its exact acknowledgement.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "body")]
-pub enum PeerHeartbeat {
-    Probe { sequence: u64, sentAt: i64 },
-    Ack { sequence: u64, sentAt: i64 },
-}
-
-/// Defines one routed Core operation requested by an adjacent Space member.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "body")]
-pub enum PeerRequest {
-    Call(RoutedCoreRequest<CoreCallRequest>),
-    WatchSnapshot(RoutedCoreRequest<CoreWatchRequest>),
-    WatchOpen(PeerWatchOpenRequest),
-    WatchClose(PeerWatchCloseRequest),
-    PushOpen(PeerPushOpenRequest),
-    PushItem(CorePushItem),
-    PushClose(PeerPushCloseRequest),
-}
-
-/// Defines the typed response to one PeerLink request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "body")]
-pub enum PeerResponse {
-    Call(CoreCallResponse),
-    WatchSnapshot(Result<CoreEvent, CoreLinkError>),
-    Operation(Result<(), CoreLinkError>),
-}
-
-/// Opens one routed watch under a stable subscription identifier.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerWatchOpenRequest {
-    pub subscriptionId: String,
-    pub request: RoutedCoreRequest<CoreWatchRequest>,
-}
-
-/// Closes one routed watch opened on the same PeerLink.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerWatchCloseRequest {
-    pub subscriptionId: String,
-}
-
-/// Delivers one routed watch event.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerWatchEvent {
-    pub subscriptionId: String,
-    pub event: CoreEvent,
-}
-
-/// Reports that a routed watch ended before a completion event.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerWatchClosed {
-    pub subscriptionId: String,
-    pub error: CoreLinkError,
-}
-
-/// Opens one routed push under a stable push identifier.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerPushOpenRequest {
-    pub pushId: String,
-    pub request: RoutedCoreRequest<CorePushRequest>,
-}
-
-/// Closes one routed push opened on the same PeerLink.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PeerPushCloseRequest {
-    pub pushId: String,
 }
 
 impl CoreWatchRequest {

@@ -311,6 +311,14 @@ mod core_edge {
         async fn watch(&self, _: CoreWatchRequest) -> Result<CoreEventStream, CoreLinkError> {
             Err(CoreLinkError::methodNotFound("test.watch"))
         }
+
+        /// Rejects input methods outside the application spy contract.
+        async fn openPush(
+            &self,
+            request: operit_link::CorePushRequest,
+        ) -> Result<Box<dyn operit_link::CoreLinkPushSession>, operit_link::CoreLinkError> {
+            Err(CoreLinkError::methodNotFound(&request.methodName))
+        }
     }
 
     struct RecordingEdgeRouter {

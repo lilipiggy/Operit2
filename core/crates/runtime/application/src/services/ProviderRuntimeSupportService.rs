@@ -10,7 +10,7 @@ use operit_plugin_sdk::toolpkg::ToolPkgHooks::{
 };
 use operit_providers::runtime_support::{
     ChatConfigurationDisplayResult, ChatConfigurationPurpose, ChatConfigurationRequest,
-    ChatConfigurationResult, ProviderFunctionModelBinding, ProviderMessageTiming,
+    ChatConfigurationResult, ChatDisplayIdentity, ChatDisplayParticipant, ChatParticipantProfile, ChatToolAccess, ProviderFunctionModelBinding, ProviderMessageTiming,
     ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
     ProviderRuntimeSupportFuture, ProviderToolPkgAiProviderRegistration,
 };
@@ -35,15 +35,19 @@ impl ProviderRuntimeSupportService {
     }
 }
 
-/// Holds one uniquely registered configuration owner and its immutable ready catalog.
+/// Identifies the built-in model conversation owner independently of optional plugins.
+pub const MODEL_CONFIGURATION_OWNER: &str = "host.chat.model";
+
+/// Holds the explicit model owner or one registered plugin owner on a ready immutable catalog.
 #[derive(Clone)]
 pub struct ChatConfigurationApi {
+    toolHandler: AIToolHandler,
     manager: RuntimePackageManager,
     ownerPackage: String,
 }
 
 impl ChatConfigurationApi {
-    /// Selects only the unique enabled resolve registration without requiring association APIs.
+    /// Selects ordinary model mode or the unique configuration plugin from one ready catalog.
     pub async fn ready(toolHandler: &AIToolHandler) -> Result<Self, String> {
         let manager =
             RuntimePackageManager::readySnapshot(toolHandler.getOrCreatePackageManager()).await?;
@@ -56,6 +60,7 @@ impl ChatConfigurationApi {
             }
         }
         Ok(Self {
+            toolHandler: toolHandler.clone(),
             ownerPackage: selectChatConfigurationOwner(candidates)?,
             manager,
         })
@@ -66,32 +71,48 @@ impl ChatConfigurationApi {
         &self.ownerPackage
     }
 
-    /// Resolves presentation from a real conversation without requiring an executable profile or snapshot.
+    /// Selects the native owner for a saved model revision regardless of the current plugin catalog.
+    pub fn forModelSnapshot(mut self) -> Self {
+        self.ownerPackage = MODEL_CONFIGURATION_OWNER.into();
+        self
+    }
+
+    /// Resolves generic presentation through the selected model or registered configuration mode.
     pub async fn resolveDisplay(
         &self,
         request: ChatConfigurationRequest,
     ) -> Result<ChatConfigurationDisplayResult, String> {
         request.requirePurpose(ChatConfigurationPurpose::Display)?;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return self.modelDisplay(&request);
+        }
         decodeDisplayConfigurationResult(
             self.invokeRegisteredResolve(request).await?,
             &self.ownerPackage,
         )
     }
 
-    /// Resolves an existing execution through the selected owner's plugin datastore.
+    /// Resolves an existing execution through its explicit model or plugin configuration mode.
     pub async fn resolve(
         &self,
         request: ChatConfigurationRequest,
     ) -> Result<ChatConfigurationResult, String> {
         request.requirePurpose(ChatConfigurationPurpose::Execution)?;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return self.modelExecution(request);
+        }
         self.invokeResolve(request).await
     }
 
-    /// Persists frozen configuration in the authenticated plugin before committing a Core reference.
+    /// Validates a native snapshot or stores a registered owner snapshot before Core commits its reference.
     pub async fn storeSnapshot(
         &self,
         snapshot: operit_providers::runtime_support::JsonObject,
     ) -> Result<operit_providers::runtime_support::JsonObject, String> {
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            validateModelSnapshot(&snapshot)?;
+            return Ok(snapshot);
+        }
         let value = self
             .manager
             .invokeToolPkgPublicApi(
@@ -115,11 +136,15 @@ impl ChatConfigurationApi {
         Ok(reference.clone())
     }
 
-    /// Resolves an immutable plugin reference without interpreting business fields in Core.
+    /// Reads an immutable native snapshot or the selected registered owner reference.
     pub async fn readSnapshot(
         &self,
         reference: operit_providers::runtime_support::JsonObject,
     ) -> Result<operit_providers::runtime_support::JsonObject, String> {
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            validateModelSnapshot(&reference)?;
+            return Ok(reference);
+        }
         self.manager
             .invokeToolPkgPublicApi(
                 &self.ownerPackage,
@@ -143,6 +168,9 @@ impl ChatConfigurationApi {
             requireChatId(chatId)?;
         }
         request.chatExtension = chatExtension;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return self.modelDisplay(&request);
+        }
         let value = self
             .manager
             .invokeToolPkgPublicApi(
@@ -156,6 +184,10 @@ impl ChatConfigurationApi {
 
     /// Publishes a prepared plugin binding only after the Core chat transaction succeeds.
     pub async fn commitDraft(&self, chatId: &str) -> Result<(), String> {
+        requireChatId(chatId)?;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return Ok(());
+        }
         let value = self
             .manager
             .invokeToolPkgPublicApi(
@@ -172,6 +204,10 @@ impl ChatConfigurationApi {
 
     /// Discards an explicit prepared draft when an existing empty chat is reused.
     pub async fn abortDraft(&self, chatId: &str) -> Result<(), String> {
+        requireChatId(chatId)?;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return Ok(());
+        }
         let value = self
             .manager
             .invokeToolPkgPublicApi(
@@ -186,16 +222,74 @@ impl ChatConfigurationApi {
         Ok(())
     }
 
-    /// Removes the plugin-owned binding as part of a requested Core chat deletion.
-    pub async fn deleteBinding(&self, chatId: &str) -> Result<(), String> {
-        self.manager
+    /// Asks the selected configuration owner to release its state after the conversation is deleted.
+    pub async fn deleteConfiguration(&self, chatId: &str) -> Result<(), String> {
+        requireChatId(chatId)?;
+        if self.ownerPackage == MODEL_CONFIGURATION_OWNER {
+            return Ok(());
+        }
+        let value = self.manager
             .invokeToolPkgPublicApi(
                 &self.ownerPackage,
-                "chat.configuration.binding.delete",
+                "chat.configuration.delete",
                 serde_json::json!({"chatId":chatId}),
             )
             .await?;
+        if value != serde_json::json!({"deleted":true}) {
+            return Err("Plugin did not acknowledge configuration deletion".into());
+        }
         Ok(())
+    }
+
+    /// Reads the exact configured model through the runtime's platform-neutral host-backed manager.
+    fn modelProfile(&self, request: &ChatConfigurationRequest) -> Result<ChatParticipantProfile, String> {
+        let support = RuntimeProviderSupport { tool_handler: self.toolHandler.clone() };
+        let binding = &request.defaultModelBinding;
+        let model = support.resolvedModelConfig(support.dataDir()?, &binding.providerId, &binding.modelId)?;
+        if request.defaultTtsConfigId.trim().is_empty() {
+            return Err("Model conversation speech configuration is empty".into());
+        }
+        Ok(ChatParticipantProfile {
+            id: "model:chat".into(), name: model.modelId,
+            avatarUri: Some(format!("provider-logo:{}", model.apiProviderTypeId)),
+            introPrompt: String::new(), userPreferencesText: String::new(), openingStatement: String::new(),
+            modelBinding: binding.clone(), ttsConfigId: request.defaultTtsConfigId.clone(),
+            toolAccess: ChatToolAccess { enabled: false, allowedBuiltinTools: vec![], allowedPackages: vec![], allowedSkills: vec![], allowedMcpServers: vec![] },
+            resources: vec![],
+        })
+    }
+
+    /// Presents the ordinary model conversation when the ready catalog has no configuration plugin.
+    fn modelDisplay(&self, request: &ChatConfigurationRequest) -> Result<ChatConfigurationDisplayResult, String> {
+        let profile = self.modelProfile(request)?;
+        let result = ChatConfigurationDisplayResult {
+            contextKey: Some("model:chat".into()),
+            identity: Some(ChatDisplayIdentity { title: profile.name.clone(), avatarUri: profile.avatarUri.clone() }),
+            participants: vec![ChatDisplayParticipant { id: profile.id, name: profile.name, avatarUri: profile.avatarUri }],
+            initialMessages: vec![], extensionOwner: MODEL_CONFIGURATION_OWNER.into(),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    /// Resolves a built-in model execution or its immutable native snapshot without invoking plugin APIs.
+    fn modelExecution(&self, request: ChatConfigurationRequest) -> Result<ChatConfigurationResult, String> {
+        let snapshot = match request.messageExtension.clone() {
+            Some(snapshot) => snapshot,
+            None => {
+                let profile = self.modelProfile(&request)?;
+                serde_json::json!({ "schemaVersion": 1, "contextKey": "model:chat", "profile": profile, "participants": [profile] })
+                    .as_object().cloned().ok_or("Model snapshot is not an object")?
+            }
+        };
+        let saved = validateModelSnapshot(&snapshot)?;
+        if request.participantId.as_ref().is_some_and(|id| id != &saved.profile.id) {
+            return Err("Model execution participant does not match its snapshot".into());
+        }
+        let result = ChatConfigurationResult { contextKey: saved.contextKey, profile: saved.profile, participants: saved.participants,
+            messageExtension: snapshot, extensionOwner: MODEL_CONFIGURATION_OWNER.into() };
+        result.validate()?;
+        Ok(result)
     }
 
     /// Invokes the exact selected declaration and injects its authenticated owner after successful decoding.
@@ -270,8 +364,11 @@ fn decodeConfigurationResult(raw: Value, owner: &str) -> Result<ChatConfiguratio
 
 /// Resolves a unique registered configuration owner without naming any plugin domain.
 fn selectChatConfigurationOwner(mut candidates: Vec<String>) -> Result<String, String> {
+    if candidates.iter().any(|owner| owner == MODEL_CONFIGURATION_OWNER) {
+        return Err("Plugin registration cannot claim the native model configuration owner".into());
+    }
     match candidates.len() {
-        0 => Err("No enabled plugin registers chat.configuration.resolve".to_string()),
+        0 => Ok(MODEL_CONFIGURATION_OWNER.to_string()),
         1 => Ok(candidates.remove(0)),
         _ => {
             candidates.sort();
@@ -281,6 +378,40 @@ fn selectChatConfigurationOwner(mut candidates: Vec<String>) -> Result<String, S
             ))
         }
     }
+}
+
+/// Defines the immutable native snapshot for plugin-independent model conversations.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(non_snake_case)]
+struct ModelConfigurationSnapshot {
+    schemaVersion: u32,
+    contextKey: String,
+    profile: ChatParticipantProfile,
+    participants: Vec<ChatParticipantProfile>,
+}
+
+/// Validates native snapshots without reading the current provider catalog or optional plugin storage.
+fn validateModelSnapshot(snapshot: &operit_providers::runtime_support::JsonObject) -> Result<ModelConfigurationSnapshot, String> {
+    let saved: ModelConfigurationSnapshot = serde_json::from_value(Value::Object(snapshot.clone())).map_err(|error| error.to_string())?;
+    if saved.schemaVersion != 1 || saved.contextKey != "model:chat" || saved.profile.id != "model:chat"
+        || saved.profile.name != saved.profile.modelBinding.modelId || saved.participants != vec![saved.profile.clone()]
+        || !saved.profile.resources.is_empty() || !saved.profile.introPrompt.is_empty()
+        || !saved.profile.userPreferencesText.is_empty() || !saved.profile.openingStatement.is_empty() {
+        return Err("Invalid native model configuration snapshot".into());
+    }
+    Ok(saved)
+}
+
+/// Authenticates the complete native model snapshot supplied to generic tool policy hooks.
+pub(crate) fn validateNativeModelExecutionSnapshot(snapshot: &operit_providers::runtime_support::JsonObject, participantId: Option<&str>) -> Result<(), String> {
+    let saved = validateModelSnapshot(snapshot)?;
+    if participantId != Some(saved.profile.id.as_str()) {
+        return Err("Native model tool participant differs from its saved profile".into());
+    }
+    let result = ChatConfigurationResult { contextKey: saved.contextKey, profile: saved.profile, participants: saved.participants,
+        messageExtension: snapshot.clone(), extensionOwner: MODEL_CONFIGURATION_OWNER.into() };
+    result.validate()
 }
 
 /// Rejects empty conversation identities before canonical record operations.
@@ -550,7 +681,7 @@ fn providerRegistrationToProvider(
 mod chat_configuration_contract_tests {
     use super::{
         decodeConfigurationResult, decodeDisplayConfigurationResult, requireChatId,
-        selectChatConfigurationOwner,
+        selectChatConfigurationOwner, validateNativeModelExecutionSnapshot, MODEL_CONFIGURATION_OWNER,
     };
 
     /// Selects arbitrary uniquely registered owners without a built-in identity whitelist.
@@ -562,17 +693,42 @@ mod chat_configuration_contract_tests {
         );
     }
 
-    /// Preserves errors for missing and duplicate actual declarations.
+    /// Allows standalone model operation and preserves duplicate registration errors.
     #[test]
-    fn rejects_missing_and_duplicate_owners() {
+    fn supports_no_plugin_and_rejects_duplicate_owners() {
         assert_eq!(
-            selectChatConfigurationOwner(Vec::new()).unwrap_err(),
-            "No enabled plugin registers chat.configuration.resolve"
+            selectChatConfigurationOwner(Vec::new()).unwrap(),
+            MODEL_CONFIGURATION_OWNER
         );
         assert_eq!(
             selectChatConfigurationOwner(vec!["owner-a".into(), "owner-b".into()]).unwrap_err(),
             "Duplicate chat.configuration.resolve registrations: owner-a, owner-b"
         );
+    }
+
+    /// Verifies that an ordinary model snapshot is valid without any plugin declaration or datastore.
+    #[test]
+    fn native_model_snapshots_do_not_require_a_plugin_owner() {
+        let profile = serde_json::json!({
+            "id":"model:chat", "name":"actual-model", "avatarUri":"provider-logo:OPENAI",
+            "introPrompt":"", "userPreferencesText":"", "openingStatement":"",
+            "modelBinding":{"providerId":"actual-provider", "modelId":"actual-model"}, "ttsConfigId":"actual-voice",
+            "toolAccess":{"enabled":false, "allowedBuiltinTools":[], "allowedPackages":[], "allowedSkills":[], "allowedMcpServers":[]},
+            "resources":[]
+        });
+        let snapshot = serde_json::json!({"schemaVersion":1, "contextKey":"model:chat", "profile":profile, "participants":[profile]}).as_object().unwrap().clone();
+        validateNativeModelExecutionSnapshot(&snapshot, Some("model:chat")).unwrap();
+        assert!(validateNativeModelExecutionSnapshot(&snapshot, Some("different-participant")).is_err());
+        assert!(validateNativeModelExecutionSnapshot(&snapshot, None).is_err());
+        let mut changed = snapshot;
+        changed.get_mut("profile").unwrap()["introPrompt"] = serde_json::json!("unexpected role prompt");
+        assert!(validateNativeModelExecutionSnapshot(&changed, Some("model:chat")).is_err());
+    }
+
+    /// Keeps registered packages from impersonating the native configuration mode.
+    #[test]
+    fn rejects_plugin_registration_using_the_native_model_owner() {
+        assert!(selectChatConfigurationOwner(vec![MODEL_CONFIGURATION_OWNER.into()]).is_err());
     }
 
     /// Injects only the exact selected registration owner while preserving the plugin's complete opaque execution snapshot.

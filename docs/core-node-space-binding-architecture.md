@@ -282,7 +282,7 @@ origin -> next peer -> ... -> target CoreNode
 origin <- next peer <- ... <- target CoreNode
 ```
 
-响应沿正在等待的逐跳调用链返回。现有 `requestId`、`subscriptionId` 和 `pushId` 继续
+响应沿正在等待的逐跳调用链返回。标准 Link 的 `requestId` 和 `pushId` 继续
 标识逻辑调用与流，不建立第二套流身份。
 
 ### 5.1 RouteTable

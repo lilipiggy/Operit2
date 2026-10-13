@@ -355,7 +355,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
           children: <Widget>[
             Positioned.fill(
               child: Listener(
-                behavior: HitTestBehavior.translucent,
+                behavior: HitTestBehavior.opaque,
                 onPointerDown: (_) => _dismissInputMenuPopup(),
                 child: const SizedBox.expand(),
               ),
@@ -399,7 +399,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
           children: <Widget>[
             Positioned.fill(
               child: Listener(
-                behavior: HitTestBehavior.translucent,
+                behavior: HitTestBehavior.opaque,
                 onPointerDown: (_) => _dismissAttachmentPopup(),
                 child: const SizedBox.expand(),
               ),

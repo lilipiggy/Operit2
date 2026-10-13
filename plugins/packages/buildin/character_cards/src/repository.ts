@@ -256,7 +256,8 @@ export class RepositorySession implements CharacterRepository {
   /** Writes an explicitly selected existing active entity. */
   async writeActive(active: ActivePrompt): Promise<void> {
     if ("CharacterCard" in active) get(this.state.cards, active.CharacterCard.id, "character");
-    else get(this.state.groups, active.CharacterGroup.id, "group");
+    else if ("CharacterGroup" in active) get(this.state.groups, active.CharacterGroup.id, "group");
+    else if (active.Model.id !== "chat") throw new Error("Invalid model selection");
     this.state.active = copy(active);
   }
   /** Rejects deletion using only selections on existing authoritative host records. */

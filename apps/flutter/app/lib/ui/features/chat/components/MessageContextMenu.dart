@@ -570,7 +570,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
                 if (message.roleName.isNotEmpty)
                   Text(
                     l10n?.chatMessageRole(message.roleName) ??
-                        '角色: ${message.roleName}',
+                        '回复者: ${message.roleName}',
                   ),
                 if (message.modelName.isNotEmpty)
                   Text(

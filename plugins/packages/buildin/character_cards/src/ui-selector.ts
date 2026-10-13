@@ -10,8 +10,8 @@ import type { ComposeDslContext, ComposeNode } from "../../../../types/compose-d
 export interface SelectorInput extends SelectScreen { readonly chatId: string | null }
 /** Projects a persisted record into one native row without changing its identity, description or avatar. */
 export interface SelectorOption {
-  key: string; kind: "card" | "group"; id: string; title: string; description: string;
-  selection: ActivePrompt; token: string; avatar: { type: "uri"; uri: string } | { type: "resource"; path: string | null } | { type: "group" };
+  key: string; kind: "card" | "group" | "model"; id: string; title: string; description: string;
+  selection: ActivePrompt; token: string; avatar: { type: "uri"; uri: string } | { type: "resource"; path: string | null } | { type: "group" } | { type: "model" };
 }
 /** Returns real list records and the freshly read authoritative target selection, not the caller's stale check mark. */
 export interface SelectorData { options: SelectorOption[]; selected: string | null }
@@ -46,10 +46,11 @@ export async function readSelectorData(input: SelectorInput): Promise<SelectorDa
   if (input.chatId === null) selected = encodeSelection(await callMainDomain("activePrompt.get", {}));
   else {
     const binding = await findChatBinding(input.chatId);
-    selected = binding === null ? null : binding.selection;
+    selected = binding === null ? "model:chat" : binding.selection;
   }
   if (selected !== null) requireChatSelection(selected, cards, groups);
   const options: SelectorOption[] = [];
+  if (input.kind === "card" || input.kind === "all") options.push({ key: "model:chat", token: "model:chat", kind: "model", id: "chat", title: "仅使用模型", description: "不使用角色卡提示词和角色记忆", selection: { Model: { id: "chat" } }, avatar: { type: "model" } });
   if (input.kind === "card" || input.kind === "all") {
     for (const card of cards) {
       let avatar: SelectorOption["avatar"];
@@ -147,6 +148,7 @@ export function selectorAvatar(ctx: ComposeDslContext, option: SelectorOption): 
     case "resource": return option.avatar.path === null
       ? ctx.UI.Box({ width: 28, height: 28, contentAlignment: "center" }, ctx.UI.Icon({ name: "Person", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }))
       : ctx.UI.Image({ ...props, path: option.avatar.path });
+    case "model": return ctx.UI.Box({ width: 28, height: 28, contentAlignment: "center" }, ctx.UI.Icon({ name: "SmartToy", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }));
     case "group": return ctx.UI.Box({ width: 28, height: 28, contentAlignment: "center" }, ctx.UI.Icon({ name: "Groups", size: 22, tint: "onSurfaceVariant", contentDescription: option.title }));
   }
 }

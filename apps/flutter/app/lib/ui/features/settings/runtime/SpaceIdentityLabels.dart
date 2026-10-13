@@ -24,7 +24,6 @@ String spaceCapabilityLabel(String capability, AppLocalizations l10n) {
     'network.relay' => l10n.settingsRuntimeControlCapabilityNetworkRelay,
     'storage.provide' => l10n.settingsRuntimeControlCapabilityStorageProvide,
     'runtime.execute' => l10n.settingsRuntimeControlCapabilityRuntimeExecute,
-    'network.user' => l10n.settingsRuntimeControlCapabilityNetworkUser,
     'chat.read' => l10n.settingsRuntimeControlCapabilityChatRead,
     'network.identity.manage' => l10n.settingsRuntimeControlManageIdentities,
     'network.identity.assign' => l10n.settingsRuntimeControlAssignIdentity,

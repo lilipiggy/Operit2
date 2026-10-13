@@ -367,7 +367,12 @@ export function parseActivePromptCommand(args: readonly string[]): CommandInvoca
     case "show": {
       arity(args, 1, 1, ACTIVE_PROMPT_USAGE[0]);
       /** Formats the externally tagged active prompt without changing its JSON shape. */
-      return invocation("activePrompt.get", {}, value => result(lines([`Active prompt: ${"CharacterCard" in value ? `character card ${value.CharacterCard.id}` : `character group ${value.CharacterGroup.id}`}`]), value));
+      return invocation("activePrompt.get", {}, value => result(lines([`Active prompt: ${"Model" in value ? "model only" : "CharacterCard" in value ? `character card ${value.CharacterCard.id}` : `character group ${value.CharacterGroup.id}`}`]), value));
+    }
+    case "set-model": {
+      arity(args, 1, 1, "active-prompt set-model");
+      /** Explicitly removes the active role selection while retaining ordinary model execution. */
+      return invocation("activePrompt.setModel", {}, value => result(lines(["Active prompt: model only"]), value));
     }
     case "set-card": {
       arity(args, 2, 2, ACTIVE_PROMPT_USAGE[1]);

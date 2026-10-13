@@ -184,7 +184,7 @@ pub fn logMessageTiming(stage: &str, startTimeMs: MessageTiming, details: Option
 }
 
 impl AIMessageManager {
-    /// Persists a frozen plugin snapshot before attaching its generic reference to a new revision.
+    /// Persists the immutable model or plugin snapshot and display identity for one message revision.
     pub async fn applyConfigurationSnapshot(
         message: &mut ChatMessage,
         configuration: &ChatConfigurationResult,
@@ -194,12 +194,17 @@ impl AIMessageManager {
         let api =
             crate::services::ProviderRuntimeSupportService::ChatConfigurationApi::ready(handler)
                 .await?;
+        let api = if configuration.extensionOwner == crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER { api.forModelSnapshot() } else { api };
         if api.extensionOwner() != configuration.extensionOwner {
             return Err("Configuration snapshot owner changed".into());
         }
         let reference = api
             .storeSnapshot(configuration.messageExtension.clone())
             .await?;
+        message.pluginExtensions.insert(
+            "host.chat.identity".into(),
+            serde_json::json!({"title": configuration.profile.name, "avatarUri": configuration.profile.avatarUri}),
+        );
         message.pluginExtensions.insert(
             configuration.extensionOwner.clone(),
             serde_json::Value::Object(reference),
@@ -623,8 +628,6 @@ impl AIMessageManager {
                 request.workspaceFolders,
                 request.promptFunctionType,
                 Some(request.runtime.chatConfiguration.profile.id.clone()),
-                false,
-                None,
                 request.proxySenderName,
                 request.chatProviderIdOverride,
                 request.chatModelIdOverride,

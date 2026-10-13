@@ -815,7 +815,6 @@ fn builtinRoles() -> BTreeMap<String, NetworkControlRole> {
             "User",
             [
                 NETWORK_DEVICES_VIEW_CAPABILITY,
-                "network.user",
                 "chat.read",
                 "network.relay",
                 "runtime.execute",

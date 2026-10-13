@@ -45,7 +45,13 @@ impl ToolPkgToolLifecycleBridge {
     ) -> Result<(), String> {
         if let Some(context) = context {
             context.validateSnapshot()?;
-            Self::requireExecutionOwner(manager, &context.extensionOwner)?;
+            if context.extensionOwner == crate::services::ProviderRuntimeSupportService::MODEL_CONFIGURATION_OWNER {
+                crate::services::ProviderRuntimeSupportService::validateNativeModelExecutionSnapshot(
+                    &context.messageExtension, context.callerParticipantId.as_deref(),
+                )?;
+            } else {
+                Self::requireExecutionOwner(manager, &context.extensionOwner)?;
+            }
         }
         Ok(())
     }
@@ -84,7 +90,7 @@ impl ToolPkgToolLifecycleBridge {
 
     /// Synchronizes lifecycle notification registrations with the actual active containers.
     #[allow(non_snake_case)]
-    pub fn syncToolPkgRegistrations(activeContainers: Vec<ToolPkgContainerRuntime>) {
+    pub fn syncToolPkgRegistrations(activeContainers: &[ToolPkgContainerRuntime]) {
         let hooks = activeContainers
             .iter()
             .flat_map(|container| {

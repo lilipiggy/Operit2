@@ -507,15 +507,6 @@ impl CliToolModeSupport {
     }
 
     #[allow(non_snake_case)]
-    pub fn buildRoleAccessDeniedMessage(useEnglish: bool) -> String {
-        if useEnglish {
-            "The current role card is not allowed to access this hidden tool.".to_string()
-        } else {
-            "当前角色卡无权访问这个隐藏工具。".to_string()
-        }
-    }
-
-    #[allow(non_snake_case)]
     fn buildBuiltinAndInternalCategories(
         useEnglish: bool,
         hostEnvironment: &HostEnvironmentDescriptor,

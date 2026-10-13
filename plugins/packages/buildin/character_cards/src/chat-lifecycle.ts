@@ -3,7 +3,7 @@ import { parseChatSelection, requireChatSelection, selectionForActive } from "./
 import { markerObject, decodeChatMarker, encodeChatMarker } from "./chat-markers";
 import { record } from "./domain";
 import { dispatchDomain } from "./service-runtime";
-import { readChatBinding, prepareChatBinding } from "./chat-storage";
+import { findChatBinding, prepareChatBinding } from "./chat-storage";
 
 /** Describes the sole plugin-owned opaque creation input and initial namespace marker. */
 export interface ChatSelectionMarker { version: 1; selection: string }
@@ -111,7 +111,10 @@ async function requireSelection(selection: string): Promise<void> {
 export async function beforeChatCreate(event: ToolPkgTypes.ChatLifecycleHookEvent): Promise<ChatInitializationResult> {
   if (event.eventName !== "before_create") throw new Error("Character chat lifecycle requires before_create");
   const payload = { ...event.eventPayload };
-  if (payload.sourceChatId !== null) payload.sourceExtension = { version: 1, selection: (await readChatBinding(payload.sourceChatId)).selection };
+  if (payload.sourceChatId !== null) {
+    const binding = await findChatBinding(payload.sourceChatId);
+    payload.sourceExtension = { version: 1, selection: binding === null ? "model:chat" : binding.selection };
+  }
   const result = await initializeChatExtension(payload, { readActiveSelection, requireSelection });
   const marker = decodeChatMarker(result.extension);
   await prepareChatBinding({ chatId: payload.chat.id, selection: marker.selection });

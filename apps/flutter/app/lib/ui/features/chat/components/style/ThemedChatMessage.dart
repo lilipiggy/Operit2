@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../common/markdown/StreamMarkdownRenderer.dart';
+import '../../../../common/ChatMessageIdentity.dart';
 import '../../viewmodel/ChatViewModel.dart';
 import 'bubble/BubbleStyleChatMessage.dart';
 import 'bubble/BubbleSurface.dart';
@@ -18,13 +19,13 @@ Widget buildThemedChatMessage({
   required ThemePreferenceSnapshot snapshot,
   required ColorScheme colorScheme,
   required ChatUiMessage message,
-  String? identityAvatarUri,
   VoidCallback? onIdentityTap,
   MarkdownContentSplitter? splitMarkdownContent,
   Future<void> Function(int timestamp)? onDeleteMessage,
   ValueChanged<ChatUiMessage>? onEditSummary,
   bool enableDialogs = true,
 }) {
+  final identityAvatarUri = readChatMessageIdentity(message)?.avatarUri;
   if (snapshot.chatStyle != UserPreferencesManager.CHAT_STYLE_BUBBLE) {
     return CursorStyleChatMessage(
       key: key,

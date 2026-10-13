@@ -37,7 +37,7 @@ export const TAG_USAGE = [
 /** Documents the active prompt manager's original tree. */
 export const ACTIVE_PROMPT_USAGE = [
   "operit2 active-prompt show", "operit2 active-prompt set-card <id>", "operit2 active-prompt set-group <id>",
-  "operit2 active-prompt activate-for-chat [character-card-name] [character-group-id]", "operit2 active-prompt resolved-card",
+  "operit2 active-prompt activate-for-chat [character-card-name] [character-group-id]", "operit2 active-prompt resolved-card", "operit2 active-prompt set-model",
 ];
 /** Documents the memory root without inventing an alternate command name. */
 export const MEMORY_USAGE = [

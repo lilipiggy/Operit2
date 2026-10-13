@@ -3236,6 +3236,14 @@ fn notifyPreferencesDataStoreSubscribers(signal: &PreferencesDataStoreChangeSign
         .expect("preferences observer task must be scheduled");
 }
 
+/// Installs the synchronous observation host used by repository preference tests.
+#[cfg(test)]
+pub(crate) fn installPreferenceObserverTestHost() {
+    operit_host_api::HostManager::setDefaultHostRuntimeTaskSchedulerHost(Arc::new(
+        PreferencesDataStoreTests::ImmediatePreferenceObserverScheduler,
+    ));
+}
+
 #[cfg(test)]
 #[path = "tests/PreferencesDataStoreTests.rs"]
 mod PreferencesDataStoreTests;

@@ -16,8 +16,10 @@ const coreBusinessScopes = [
   "core/crates/persistence/store/src", "core/crates/provider/services/src/chat",
   "core/crates/runtime/application/src/core", "core/crates/runtime/application/src/data/preferences",
   "core/crates/runtime/application/src/services", "apps/cli/src",
+  "core/crates/tool/services/src/tools/climode/CliToolModeSupport.rs",
 ];
 const retiredBusiness = /\b(?:ObjectBoxStore|Memory(?:Repository|SearchSettingsPreferences|Library|AutoSaveScheduler|Window|SettingsRepository|AutoSaveCandidateRepository|Graph|GraphNode|GraphEdge|ExportData|ExportModel|SearchDebugInfo|AutoSaveStatus|RebuildProgress|QueryResultData|LinkResultData|LinkQueryResultData)|UserMarkdownRepository|Character(?:Card|GroupCard|CardChatStats|GroupChatStats|CardInfo|CardListResultData)|PromptTag|TavernCharacter(?:Card|Data)|ToolPkgActivePrompt(?:Type|Snapshot))\b/;
+const retiredRoleSemantics = /\b(?:characterName|enableGroupOrchestrationHint|groupParticipantNamesText|enable_group_orchestration_hint|group_orchestration_role_name|group_participant_names_text|buildGroupOrchestrationHint|personaCardGenerationSystemPrompt|groupRoleResponsePlannerPrompt|buildGroupRoleResponsePlannerPrompt|GROUP_ROLE_RESPONSE_PLANNER_PROMPT(?:_CN)?|buildRoleAccessDeniedMessage|character_card_id|role_card_id|waifuRulesText|avatarMoodRulesText|waifu_rules_text|avatar_mood_rules_text|waifuEmotionRule|waifuNoCustomEmojiRule|waifuCustomPromptRule|waifuSelfieRule|avatarMoodRulesText|memoryAutoCategorizeUserMessage|knowledgeGraphExistingMemoriesPrefix|knowledgeGraphNoExistingMemoriesMessage|knowledgeGraphExistingFoldersPrompt|knowledgeGraphDuplicateTitleInstruction|knowledgeGraphSimilarTitleInstruction|knowledgeGraphDuplicateHeader|buildMemoryAutoCategorizePrompt|buildKnowledgeGraphExtractionPrompt)\b/;
 const dedicatedNames = /\bCharacterCards(?:Host|Bridge|Runtime|Dto|DTO|Import|Character|Group|Tag|ActivePrompt|Memory|Model|Tts|Tool|Chat|Graph)[A-Za-z0-9_]*\b|\bCharacterCards[A-Za-z0-9_]*(?:Host|Bridge|Runtime|Dto|DTO|Import)[A-Za-z0-9_]*\b|\bcharacter_cards_(?:host|bridge|dto|runtime|import)[A-Za-z0-9_]*\b/;
 const dedicatedModule = /(?:^|\/)(?:CharacterCards(?:Host|Bridge|Runtime|Dto|DTO|Import)[A-Za-z0-9_]*|character_cards_(?:host|bridge|dto|runtime|import)[A-Za-z0-9_]*)\.(?:rs|ts|js|mjs)$/;
 const retiredFramework = /\b(?:HostProvider|PluginDataStore|SurfaceContribution)\b|\bToolPkg\.(?:data|sources)\b/;
@@ -55,8 +57,10 @@ export function coreArchitectureViolations() {
     for (const file of files) {
       // Published v1 JavaScript adapters preserve their existing protocol names.
       if (file.startsWith("core/crates/plugin/sdk/src/compat/v1/") && file.endsWith(".js")) continue;
-      const match = retiredBusiness.exec(source(file));
+      const text = source(file), match = retiredBusiness.exec(text);
       if (match !== null) violations.push(`${file}: retired character/memory business belongs only in the migration boundary: ${match[0]}`);
+      const role = retiredRoleSemantics.exec(text);
+      if (role !== null) violations.push(`${file}: retired role semantics must be authored by the plugin: ${role[0]}`);
     }
   }
   return violations;
@@ -67,7 +71,7 @@ export function flutterArchitectureViolations() {
   const violations = [];
   const retiredFlutter = /\b(?:CharacterAvatar(?:Image|Store)?|MemoryGraph(?:Canvas|Controller|Screen)?|GeneratedRepositoryMemoryRepositoryCoreProxy|repositoryMemoryRepositoryForOwner|characterAvatarsDirPath|chatHistoryGroupingModeFlow|loadChatHistoryGroupingMode|saveChatHistoryGroupingMode|CHAT_HISTORY_GROUPING_CHARACTER|CHAT_HISTORY_GROUPING_WORKSPACE|_KEY_CHAT_HISTORY_GROUPING_MODE)\b/;
   for (const file of sourceFiles("apps/flutter/app/lib").filter(file => file.endsWith(".dart"))) {
-    const text = source(file), match = retiredBusiness.exec(text) ?? retiredFlutter.exec(text);
+    const text = source(file), match = retiredBusiness.exec(text) ?? retiredFlutter.exec(text) ?? /\brole_response_planner_(?:planning|failed|member_replying)\b/.exec(text);
     if (match !== null) violations.push(`${file}: retired character/memory business must be removed from Flutter: ${match[0]}`);
   }
   return violations;
