@@ -503,7 +503,7 @@ void main() {
     expect(find.text('本机身份'), findsOneWidget);
     expect(find.text('管理员'), findsOneWidget);
     expect(find.text('全部权限'), findsOneWidget);
-    expect(find.text('设置设备身份'), findsOneWidget);
+    expect(find.text('设置设备身份'), findsNothing);
     // Both long lists start collapsed and only advertise their size.
     expect(find.text('身份权限'), findsOneWidget);
     expect(find.text('2 个身份'), findsOneWidget);

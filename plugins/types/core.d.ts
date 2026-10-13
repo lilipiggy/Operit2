@@ -165,35 +165,6 @@ export interface DynamicToolResult extends BaseResult {
 export type ToolResult = StringResult | BooleanResult | NumberResult | DynamicToolResult;
 
 /**
- * Describes one real executable tool parameter returned by the global catalog.
- */
-export interface ToolCatalogParameter {
-  name: string;
-  type: string;
-  description: string;
-  required: boolean;
-  default: any;
-}
-
-/**
- * Describes one executable tool in the existing global catalog, not a source-directory entry.
- */
-export interface ToolCatalogEntry {
-  name: string;
-  description: string;
-  parameters: ToolCatalogParameter[];
-  category: string;
-  source: string;
-}
-
-/**
- * Describes the real global executable catalog envelope.
- */
-export interface ToolCatalog {
-  tools: ToolCatalogEntry[];
-}
-
-/**
  * Resolves a statically known tool name to its declared result type.
  */
 export type ToolReturnType<T> = T extends keyof import("./tool-types").ToolResultMap ? import("./tool-types").ToolResultMap[T] : any;

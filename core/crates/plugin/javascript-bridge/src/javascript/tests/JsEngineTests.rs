@@ -248,7 +248,6 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         context: &ToolPkgExecutionContext,
     ) -> Result<Arc<dyn JsExecutionHost>, String> {
         self.toolPkgContextBindings.fetch_add(1, Ordering::SeqCst);
-        if let Some(error) = self.toolCatalogError.lock().unwrap().clone() { return Err(error); }
         if context.container_package_name.trim().is_empty() || context.context_key.trim().is_empty()
         {
             return Err("Invalid test execution context".to_string());
@@ -3451,10 +3450,10 @@ async fn structured_tool_calls_preserve_values_and_avoid_json_text() {
                 var savedStringify = JSON.stringify, savedParse = JSON.parse;
                 var parameters = {
                     text: '\"\n\u2028中'.repeat(16384),
-                    integer: 7, large: 1e16, date: new Date('2020-01-01T00:00:00Z'),
-                    nested: {x:true, omit:undefined}, array: [undefined, , NaN, 2],
-                    boxed: new Boolean(false), ['__proto__']: {polluted:true},
-                    custom: {toJSON:function(key){return {key:key};}}
+                    integer: 7, large: 1e16, date: '2020-01-01T00:00:00.000Z',
+                    nested: {x:true}, array: [null, null, null, 2],
+                    boxed: false, ['__proto__']: {polluted:true},
+                    custom: {key: "custom"}
                 };
                 JSON.stringify = function(value) {
                     if(value && value.text===parameters.text) throw new Error('Tool request serialized as text');
@@ -3492,6 +3491,7 @@ async fn structured_tool_calls_preserve_values_and_avoid_json_text() {
     engine.destroy();
 }
 
+/// Rejects unsupported JSON values without preventing subsequent valid or binary calls.
 #[tokio::test(flavor = "current_thread")]
 async fn structured_tool_calls_recover_from_invalid_parameters_and_preserve_binary_results() {
     let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
@@ -3499,7 +3499,10 @@ async fn structured_tool_calls_recover_from_invalid_parameters_and_preserve_bina
         .execute_script_function(
             r#"exports.main = async function() {
             var failures=[]; var cycle={};cycle.self=cycle;
-            for (var p of [cycle,{big:1n},[],{get x(){throw new Error('getter');}}]) {
+            for (var p of [cycle,{big:1n},[],{get x(){throw new Error('getter');}},
+                {date:new Date()},{boxed:new Boolean(false)},{omit:undefined},
+                {array:[undefined]},{array:[,]},{number:NaN},{number:Infinity},
+                {custom:{toJSON:function(){return {};}}}]) {
                 try {await toolCall('echo',p);failures.push(false);}catch(e){failures.push(true);}
             }
             return {failures:failures, good:(await toolCall('echo',{x:42})).x,
@@ -3518,7 +3521,7 @@ async fn structured_tool_calls_recover_from_invalid_parameters_and_preserve_bina
         serde_json::from_str(&expect_js_output(result, "invalid parameters recovery")).unwrap();
     assert_eq!(
         output,
-        serde_json::json!({"failures":[true,true,true,true],"good":42,"binary":"AQID"})
+        serde_json::json!({"failures":[true,true,true,true,true,true,true,true,true,true,true,true],"good":42,"binary":"AQID"})
     );
     engine.destroy();
 }
@@ -3971,6 +3974,11 @@ async fn compose_dsl_character_card_webview_interface_survives_native_commits() 
             return {{success: true, data: null}};
         }};
         ToolPkg.readResource = async function() {{return '/fixture/character-memory.html';}};
+        ToolPkg.ipc.on('character-memory.request', function(request, metadata) {{
+            if (request.action !== 'snapshot' || metadata.currentRuntime !== 'main')
+                throw Error('Unexpected character snapshot request');
+            return {{cards: []}};
+        }});
         {source}
     "#);
     let mut params = testParams();
@@ -3981,13 +3989,15 @@ async fn compose_dsl_character_card_webview_interface_survives_native_commits() 
     let on_load = first["update"]["upserts"].as_array().unwrap().iter().find_map(|node| node["props"]["onLoad"]["__actionId"].as_str()).unwrap();
     expect_js_output(engine.actionForAssertions(on_load, None, &params, &BTreeMap::new(), None).await, "character onLoad");
     let raw = engine.execute_script_function(
-        "exports.inspect = function() {return globalThis.characterWebViewCommand.payload.object.currentTheme.__actionId;};",
+        "exports.inspect = function() {return globalThis.characterWebViewCommand.payload.object.loadScreen.__actionId;};",
         "inspect", &params, &BTreeMap::new(), None, true, 5, None
     ).await.unwrap().unwrap();
     let id: String = serde_json::from_str(&raw).unwrap();
     for _ in 0..5 {
-        let result = expect_js_output(engine.actionForAssertions(&id, None, &params, &BTreeMap::new(), None).await, "character currentTheme");
-        assert_eq!(result["actionResult"]["brightness"], "dark");
+        let result = expect_js_output(engine.actionForAssertions(&id, Some(serde_json::json!([])), &params, &BTreeMap::new(), None).await, "character loadScreen");
+        assert_eq!(result["actionResult"]["theme"]["brightness"], "dark");
+        assert_eq!(result["actionResult"]["snapshot"], serde_json::json!({"cards": []}));
+        assert_eq!(result["actionResult"]["screen"]["input"]["mode"], "manage");
         assert!(result.get("state").is_none() && result.get("memo").is_none());
     }
     engine.destroy();
@@ -4124,7 +4134,7 @@ fn unclaimed_prepared_engine_destroys_runtime() {
     assert!(!alive.load(Ordering::Acquire));
 }
 
-/// Reproduces the duplicate-catalog startup failure and verifies the Host worker remains usable.
+/// Preserves catalog errors from explicit discovery and keeps the same Host worker usable.
 #[test]
 fn catalog_initialization_failure_returns_error_without_killing_host_worker() {
     testJavaScriptRuntimeHost();
@@ -4136,16 +4146,19 @@ fn catalog_initialization_failure_returns_error_without_killing_host_worker() {
         context_key: "duplicate-catalog-test".into(), container_package_name: "test.package".into(),
         api_version: "2.0.0".into(), text_resource_host: Arc::new(StaticToolPkgTextResourceHost { resources: BTreeMap::new() }),
     });
-    let error = create().err().expect("catalog error must reject construction");
-    assert_eq!(error.kind, JsExecutionErrorKind::Initialization);
+    let engine = create().expect("Catalog discovery must remain explicit");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let script = "exports.read = function() { return getToolCatalog(); };";
+    let error = runtime.block_on(engine.execute_script_function(
+        script, "read", &BTreeMap::new(), &BTreeMap::new(), None, false, 60, None,
+    )).expect_err("Catalog errors must reject discovery");
+    assert_eq!(error.kind, JsExecutionErrorKind::Runtime);
     assert!(error.message.contains(reason), "{}", error.message);
     *host.toolCatalogError.lock().unwrap() = None;
-    let engine = create().expect("worker must accept subsequent initialization");
-    let output = expect_js_output(tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(engine.execute_script_function(
-        "exports.read = function() { return {alive:true}; };", "read",
-        &BTreeMap::new(), &BTreeMap::new(), None, false, 60, None,
+    let output = expect_js_output(runtime.block_on(engine.execute_script_function(
+        script, "read", &BTreeMap::new(), &BTreeMap::new(), None, false, 60, None,
     )), "engine after catalog repair");
-    assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["alive"], true);
+    assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), serde_json::json!({"tools": []}));
     engine.destroy();
 }
 
@@ -4361,6 +4374,8 @@ async fn compose_shared_compilation_keeps_page_heaps_independent() {
     let independent = second.actionForAssertions(action, None, &options, &BTreeMap::new(), None).await.unwrap().unwrap();
     assert_eq!(independent["tree"]["props"]["label"], "1");
     first.destroy(); second.destroy();
+}
+
 /// Uses the real generated namespaces and native bridge, including overload dispatch.
 #[tokio::test(flavor = "current_thread")]
 async fn device_tools_cross_native_bridge_without_leaking_target_into_parameters() {

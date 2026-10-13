@@ -9,7 +9,6 @@ import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as generated;
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
-import '../../../theme/OperitFormStyles.dart';
 import '../components/SettingsControlStyles.dart';
 import 'SpaceAuditLabels.dart';
 import 'SpaceIdentityLabels.dart';
@@ -150,13 +149,6 @@ class _NetworkControlPanelState extends State<NetworkControlPanel> {
     final actions = Row(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        if (canAssignIdentities)
-          TextButton.icon(
-            style: SettingsControlStyles.sectionTextButton(),
-            onPressed: () => _assignIdentity(l10n),
-            icon: const Icon(Icons.assignment_ind_outlined, size: 16),
-            label: Text(l10n.settingsRuntimeControlAssignIdentity),
-          ),
         refresh,
       ],
     );
@@ -664,54 +656,6 @@ class _NetworkControlPanelState extends State<NetworkControlPanel> {
     );
   }
 
-  /// Opens the administrator assignment editor for one device identity.
-  Future<void> _assignIdentity(AppLocalizations l10n) async {
-    final state = _state;
-    final topology = _topology;
-    if (state == null || topology == null) {
-      return;
-    }
-    final directory = _DeviceDirectory(topology.devices);
-    final result = await _IdentityAssignmentEditor.show(
-      context,
-      title: l10n.settingsRuntimeControlAssignIdentity,
-      devices: topology.devices
-          .map(
-            (device) => _Choice(
-              label: directory.optionLabel(device.deviceId),
-              value: device.deviceId,
-            ),
-          )
-          .toList(growable: false),
-      identities: state.roles.values
-          .where(
-            (role) => spaceCapabilityValues(
-              role.capabilities,
-            ).every((capability) => _hasCapability(topology, capability)),
-          )
-          .map(
-            (role) => _Choice(
-              label: spaceIdentityDisplayName(role.displayName, l10n),
-              value: role.roleId,
-            ),
-          )
-          .toList(growable: false),
-    );
-    if (result == null) {
-      return;
-    }
-    await _runCommand(
-      () =>
-          widget.clients.server.runtimeRemoteLinkService.setDeviceSpaceIdentity(
-            assignment: generated.NetworkControlIdentityAssignment(
-              nodeId: result.deviceId,
-              roleId: result.identityId,
-            ),
-          ),
-      feedback: l10n.settingsRuntimeControlIdentityAssignment,
-    );
-  }
-
   /// Runs one administrator command and refreshes the synchronized state.
   Future<void> _runCommand(
     Future<void> Function() command, {
@@ -884,15 +828,6 @@ Widget _listDivider(BuildContext context) => Divider(
   thickness: 1,
   color: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.35),
 );
-
-/// Represents one human-facing dropdown option and its internal value.
-class _Choice {
-  /// Creates one choice.
-  const _Choice({required this.label, required this.value});
-
-  final String label;
-  final String value;
-}
 
 /// Represents the submitted identity definition form.
 class _IdentityDefinition {

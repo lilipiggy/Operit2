@@ -120,7 +120,7 @@ export { Catalog } from './catalog';
 export { UI, UINode } from './ui';
 export { ToolPkg } from './toolpkg';
 export { Chat } from './chat';
-export { Edge, Io } from './edge';
+export { DeviceEdge, DeviceIo } from './edge';
 export type { EdgeInterfaceInfo, IoInterfaceInfo, EdgeActionEvent, EdgeEventBatch, EdgeEventPayload, EdgeEventHookEvent, EdgeEventAck } from './edge';
 export * from './storage';
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use operit_host_api::HostEnvironmentDescriptor;
 use operit_host_api::HostManager::HostManager;
 use operit_plugin_sdk::javascript::{
-    JsExecutionHost, JsToolCallRequest, JsToolCallResult,
+    JsExecutionHost, JsToolCallRequest, JsToolCallResult, JsToolCallResultData,
     JsToolNameResolutionRequest, JsToolPkgIpcCompletion, JsToolPkgIpcRequest,
     JsToolPkgResourceRequest, JsToolPkgWasmRequest, JsToolPkgWasmResult, ToolPkgConfigScope,
 };
@@ -1271,7 +1271,7 @@ impl JsExecutionHost for AIToolHandler {
             let host = self.clone();
             let tool = crate::tools::DeviceTools::tool_from_request(&request);
             let preflight = Box::pin(async move {
-                match host.checkToolInterception(&tool).await {
+                match host.checkToolInterception(&tool).await? {
                     AIToolHookDecision::Block(reason) => Err(reason),
                     _ => Ok(()),
                 }
