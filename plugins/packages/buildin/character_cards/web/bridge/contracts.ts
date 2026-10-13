@@ -5,6 +5,7 @@ import type {
 import type { EntityKind, PresentationCancel, PresentationComplete, ScreenResult } from "./screens";
 import type { ScreenBootstrap } from "../../src/presentation";
 import type { GraphCamera, NodeSize, Point } from "../features/graph/layout";
+import type { ComposeFileSaveResult } from "../../../../../types/compose-dsl";
 
 /** Describes actual service results used by this finite editor bridge. */
 export type WebResponses = Pick<RequestResults, "snapshot" | "writeGlobalMemoryPreference" | "searchMemoryDebug" | "readMemoryLink" | "exportMemory" | "importMemory" | "activate" | "saveStore" | "deleteStore" | "readUser" | "writeUser" | "graph" | "searchMemory" | "listMemories" | "listMemoryFolders" | "saveMemory" | "deleteMemory" | "createLink" | "deleteLink" | "updateLink" | "readMemorySettings" | "readMemorySearchConfig" | "writeMemorySettings" | "writeMemorySearchConfig" | "writeMemoryOwnerSettings" | "readMemoryAutoSaveStatus" | "listMemoryChats" | "startMemoryRebuild" | "readMemoryRebuildProgress" | "cancelMemoryRebuild" | "rebuildMemoryEmbeddings" | "updateChatMemory" | "autoCategorizeMemory" | "importCharacter" | "importGroup">;
@@ -25,8 +26,8 @@ export interface CharacterMemoryBridge {
   avatarImage(uri: string | null): Promise<string>;
   /** Opens the sole plugin-authored native entity surface. */
   openEntity(mode: "create" | "edit" | "preview", entity: EntityKind, id: string): Promise<void>;
-  /** Writes an explicitly chosen VFS export path through the host filesystem. */
-  exportFile(path: string, content: string): Promise<boolean>;
+  /** Saves JSON using the host file selector and returns its explicit cancellation result. */
+  exportFile(name: string, content: string): Promise<ComposeFileSaveResult>;
 }
 declare global {
   interface Window {
@@ -57,7 +58,7 @@ export interface LinkDialog extends DialogState { type: "link"; ownerKey: string
 export interface LinkEditDialog extends DialogState { type: "link-edit"; ownerKey: string; linkId: WebRequest<"updateLink">["linkId"]; draft: LinkDraft }
 export type DeleteRequest = WebRequest<"deleteStore" | "deleteMemory" | "deleteLink">;
 export interface ConfirmDialog extends DialogState { type: "confirm"; title: string; message: string; operation: DeleteRequest; closeParent: boolean }
-export interface ExportDialog extends DialogState { type: "export"; path: string; content: string; typeName: "character" | "group" | "memory" }
+export interface ExportDialog extends DialogState { type: "export"; name: string; content: string; typeName: "character" | "group" | "memory" }
 export interface ImportDialog extends DialogState { type: "import"; target: "card" | "group" | "memory"; ownerKey: string | null; format: "operit" | "tavern"; strategy: "SKIP" | "UPDATE" | "CREATE_NEW"; content: string }
 export interface InfoDialog extends DialogState { type: "info"; title: string; content: string }
 export type EditableDialog = StoreDialog | MemoryEditDialog | LinkDialog | LinkEditDialog | UserDialog | ImportDialog | ExportDialog | OwnerSettingsDialog;

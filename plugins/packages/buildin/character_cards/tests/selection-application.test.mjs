@@ -155,7 +155,7 @@ test("group application uses only its own independent theme and never infers fir
 
 /** A selection owner error is propagated unchanged; no independent application is allowed without confirmation. */
 test("failed real selection publication propagates the original IO error and performs zero config apply", async t => {
-  const env = await environment(t), original = new Error("Actual selection file write rejected"); env.disk.failNext("storage.commit", original);
+  const env = await environment(t), original = new Error("Actual selection file write rejected"); env.disk.failNext("storage.transaction", original);
   await assert.rejects(commitActive(env),
     /** Preserves the genuine file-owner rejection instead of inventing a successful selection receipt. */
     failure => failure === original,

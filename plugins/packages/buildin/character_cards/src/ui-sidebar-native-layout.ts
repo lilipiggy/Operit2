@@ -30,6 +30,9 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
   const query = state.query.trim().toLocaleLowerCase();
   const muted = colors.onSurfaceVariant.copy({ alpha: 0.80 });
   const rows: ComposeNode[] = [];
+  /** Encodes the exact plugin-owned drag scope without repeating its member directory. */
+  function dragType(section: CharacterSidebarSection): string { return 'character-sidebar.chat:' + section.id; }
+  /** Creates a fixed-size spacer for the sidebar hierarchy. */
   const gap = (width: number): ComposeNode => ctx.UI.Spacer({ width });
 
   function more(kind: "chat" | "group", id: string, selected = false): ComposeNode {
@@ -44,7 +47,7 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
     const status = ctx.UI.ActivityDots({ key: 'sidebar-status-' + chat.id, width: 10, height: 13.5,
       running, selected, restingColor: selected ? colors.onSecondaryContainer.copy({ alpha: 0.70 }) : colors.onSurfaceVariant.copy({ alpha: 0.30 }),
       activeColor: colors.primary });
-    const content: ComposeNode[] = [ctx.UI.Draggable({ key: 'sidebar-chat-drag-' + chat.id, data: chat.id, dragType: 'character-sidebar.chat', enabled: true,
+    const content: ComposeNode[] = [ctx.UI.Draggable({ key: 'sidebar-chat-drag-' + chat.id, data: chat.id, dragType: dragType(section), enabled: true,
       feedback: ctx.UI.Row({ width: 220, height: 34, paddingHorizontal: 10, verticalAlignment: 'center', background: colors.surfaceContainerHighest, backgroundShape: { cornerRadius: 8 } },
         ctx.UI.Text({ text: chat.title, weight: 1, maxLines: 1, overflow: 'ellipsis', fontSize: 13, color: colors.onSurface })) }, status), gap(5), ctx.UI.Text({ key: 'sidebar-chat-title-' + chat.id, text: chat.title,
       weight: 1, fontSize: 13, fontWeight: selected ? '600' : '400', maxLines: 1, overflow: 'ellipsis', color: titleColor,
@@ -74,8 +77,8 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
         hoverStyle: { width: 2, height: selected ? 16 : 10,
           backgroundColor: selected ? colors.primary : colors.onSurface.copy({ alpha: 0.55 }) } }),
     ]);
-    return ctx.UI.DragTarget({ key: 'sidebar-chat-drop-' + chat.id, acceptedTypes: ['character-sidebar.chat'],
-      acceptedData: section.chats.filter(value => value.id !== chat.id).map(value => value.id),
+    return ctx.UI.DragTarget({ key: 'sidebar-chat-drop-' + chat.id, acceptedTypes: [dragType(section)],
+      excludedData: [chat.id],
       hoverBorderColor: colors.primary.copy({ alpha: 0.55 }), shape: { cornerRadius: 8 }, fillMaxWidth: true,
       onDrop: (id) => actions.drop(String(id), section.id, groupId, chat.id) },
     ctx.UI.HoverRegion({ key: 'sidebar-chat-hover-' + chat.id, fillMaxWidth: true },
@@ -118,8 +121,8 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
       ctx.UI.Icon({ name: section.kind === 'group' ? 'Groups' : 'AccountTree', size: 14, tint: colors.onSurfaceVariant }));
     return ctx.UI.Column({ key: 'sidebar-section-' + section.id, fillMaxWidth: true,
       paddingStart: m.categoryStart, paddingEnd: m.categoryEnd, paddingTop: 10, paddingBottom: 5 },
-      ctx.UI.DragTarget({ key: 'sidebar-category-drop-' + section.id, acceptedTypes: ['character-sidebar.chat'],
-        acceptedData: section.chats.map(chat => chat.id), onDrop: (id) => actions.drop(String(id), section.id, null) },
+      ctx.UI.DragTarget({ key: 'sidebar-category-drop-' + section.id, acceptedTypes: [dragType(section)],
+        onDrop: (id) => actions.drop(String(id), section.id, null) },
       ctx.UI.Row({ fillMaxWidth: true, verticalAlignment: 'center', height: 24, onClick: () => actions.toggleSection(section.id),
         modifier: ctx.Modifier.clip({ cornerRadius: m.categoryRadius }) }, [avatar, gap(8),
         ctx.UI.Text({ text: section.title, style: 'titleSmall', fontWeight: '700', maxLines: 1, overflow: 'ellipsis',
@@ -142,8 +145,8 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
     ]);
     return ctx.UI.Column({ key: 'sidebar-group-' + group.id, fillMaxWidth: true, paddingStart: m.groupStart,
       paddingEnd: m.groupEnd, paddingTop: 4, paddingBottom: expanded ? 2 : 0 },
-      ctx.UI.DragTarget({ key: 'sidebar-group-drop-' + group.id, acceptedTypes: ['character-sidebar.chat'],
-        acceptedData: section.chats.map(chat => chat.id), hoverBorderColor: colors.primary.copy({ alpha: 0.55 }), shape: { cornerRadius: m.groupRadius },
+      ctx.UI.DragTarget({ key: 'sidebar-group-drop-' + group.id, acceptedTypes: [dragType(section)],
+        hoverBorderColor: colors.primary.copy({ alpha: 0.55 }), shape: { cornerRadius: m.groupRadius },
         onDrop: (id) => actions.drop(String(id), section.id, ungrouped ? null : group.id) },
       ctx.UI.HoverRegion({ shape: { cornerRadius: m.groupRadius } }, groupBody)));
   }

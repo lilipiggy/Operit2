@@ -131,17 +131,21 @@ export async function createDiskHarness(testContext) {
     },
     /** Injects one negative IO event; no successful domain operation is implemented by the harness. */
     failNext(method, failure) {
-      if (!Object.hasOwn(methods, method) && !["storage.commit", "storage.open", "storage.list", "storage.get"].includes(method)) throw new Error("Cannot fail an unsupported disk method: " + method);
+      if (!Object.hasOwn(methods, method) && !["storage.commit", "storage.open", "storage.list", "storage.get", "storage.transaction", "storage.query", "storage.execute"].includes(method)) throw new Error("Cannot fail an unsupported disk method: " + method);
       if (faults.has(method)) throw new Error("A disk failure is already scheduled for " + method);
       faults.set(method, failure);
     },
     /** Reconstructs assertion data independently from actual persisted SQLite records. */
     readState() {
       return storage.inspect(sql => {
-        const schema = loadModule("src/storage/records.ts"), rows = sql.prepare("SELECT * FROM records ORDER BY collection,key").all();
-        const meta = rows.find(row => row.collection === "meta" && row.key === "state");
-        if (meta === undefined) throw new Error("Test database has no metadata");
-        return schema.stateFromRecords(JSON.parse(meta.value), rows.filter(row => schema.collections.includes(row.collection)).map(row => ({ collection: row.collection, key: row.key, value: JSON.parse(row.value), version: row.version })));
+        const schema = loadModule("src/storage/records.ts"), codec = loadModule("src/storage/relational.ts"), records = [];
+        let metadata;
+        for (const collection of ["meta", ...schema.collections]) {
+          const rows = new Map(codec.tables(codec.layouts[collection]).map(table => [table.name, sql.prepare('SELECT * FROM "' + table.name + '" ORDER BY "_key"').all()]));
+          for (const row of rows.get(collection)) { const value = codec.decode(collection, row, rows); if (collection === "meta" && row._key === "state") metadata = value; else records.push({ collection, key: row._key, value, version: row._revision }); }
+        }
+        if (metadata === undefined) throw new Error("Test database has no metadata");
+        return schema.stateFromRecords(metadata, records);
       });
     },
     /** Returns deterministic assertion bytes for the current database domain records. */
@@ -149,12 +153,15 @@ export async function createDiskHarness(testContext) {
     /** Writes deliberate test data directly to SQLite without supplying domain responses through the host. */
     replaceState(state) {
       storage.inspect(sql => {
-        const schema = loadModule("src/storage/records.ts");
+        const schema = loadModule("src/storage/records.ts"), codec = loadModule("src/storage/relational.ts");
         sql.exec("BEGIN");
         try {
-          for (const collection of schema.collections) sql.prepare("DELETE FROM records WHERE collection=?").run(collection);
-          for (const row of schema.records(state)) sql.prepare("INSERT INTO records VALUES(?,?,?,?)").run(row.collection, row.key, JSON.stringify(row.value), "test-edit");
-          sql.prepare("UPDATE records SET value=?,version='test-edit' WHERE collection='meta' AND key='state'").run(JSON.stringify({ version: state.version, nextId: state.nextId, active: state.active, memoryPreferences: state.memoryPreferences }));
+          for (const collection of ["meta", ...schema.collections]) for (const table of codec.tables(codec.layouts[collection])) sql.prepare('DELETE FROM "' + table.name + '"').run();
+          for (const record of [...schema.records(state), { collection: "meta", key: "state", value: { version: state.version, nextId: state.nextId, active: state.active, memoryPreferences: state.memoryPreferences } }]) {
+            for (const [table, rows] of codec.encode(record.collection, record.key, record.value, "test-edit")) for (const row of rows) {
+              const columns = Object.keys(row); sql.prepare('INSERT INTO "' + table + '" (' + columns.map(name => '"' + name + '"').join(",") + ') VALUES (' + columns.map(() => "?").join(",") + ")").run(...columns.map(name => Object.prototype.toString.call(row[name]) === "[object Uint8Array]" ? Buffer.from(row[name]) : row[name]));
+            }
+          }
           sql.exec("COMMIT");
         } catch (error) { sql.exec("ROLLBACK"); throw error; }
       });

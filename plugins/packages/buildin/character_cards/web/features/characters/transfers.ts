@@ -8,8 +8,8 @@ export function createCharactersTransfersFeature(context: EditorContext) {
     switch (action) {
       case "save-export": {
         const dialog = topDialog("export");
-        if (dialog.path.trim() === "") throw new Error("请输入导出文件 VFS 路径");
-        if (!await host().exportFile(dialog.path, dialog.content)) throw new Error("宿主未确认文件导出成功");
+        const result = await host().exportFile(dialog.name, dialog.content);
+        if (result.cancelled) return;
         popDialog(); toast("文件已导出"); return;
       }
 

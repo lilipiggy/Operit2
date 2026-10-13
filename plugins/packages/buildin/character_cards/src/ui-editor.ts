@@ -87,13 +87,12 @@ export function renderScreen(ctx: ComposeDslContext, definition: Definition, req
           managedLive.current = request; setManaged(request);
           return null;
         },
-        /** Saves an export to the VFS path explicitly supplied by the user. */
+        /** Saves an export through the same host boundary used for file selection. */
         exportFile: async (...args: unknown[]) => {
-          const [path, content] = webArguments(args, 2);
-          if (typeof path !== "string" || path.trim() === "") throw new Error("请输入导出文件的 VFS 路径");
+          const [name, content] = webArguments(args, 2);
+          if (typeof name !== "string" || name.trim() === "") throw new Error("导出文件名不能为空");
           if (typeof content !== "string") throw new Error("导出内容必须是字符串");
-          await Tools.Files.create(path, content);
-          return true;
+          return ctx.saveFile({ suggestedName: name, content, mimeType: "application/json", extensions: ["json"] });
         },
       });
       unsubscribe.current = ctx.Theme.subscribe(applyTheme);

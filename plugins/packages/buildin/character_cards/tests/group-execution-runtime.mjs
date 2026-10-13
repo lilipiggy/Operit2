@@ -66,7 +66,8 @@ export async function groupEnvironment(t, transport) {
   const b = await service.dispatchDomain("character.create", { values: { name: "Participant B", avatarUri: "b.png" } });
   const group = await service.dispatchDomain("group.create", { values: { name: "Controlled saved group", members: [{ characterCardId: a.id, orderIndex: 1 }, { characterCardId: b.id, orderIndex: 0 }] } });
   const selection = "group:" + group.id;
-  records.set(chatId, { [owner]: { version: 1, selection, audit: { preserved: true } }, [otherOwner]: { version: 37, selection: "not-this-owner" } });
+  await loadModule("src/chat-storage.ts", globals).writeChatBinding({ chatId, selection });
+  records.set(chatId, { [otherOwner]: { version: 37, selection: "not-this-owner" } });
   const wrapped = {
     /** Captures the exact full initial input before invoking the controlled turn boundary. */
     async submit(input) { calls.push({ method: "submit", input: plain(input) }); return transport.submit(input); },

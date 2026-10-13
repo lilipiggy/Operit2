@@ -94,6 +94,10 @@ export namespace Chat {
    */
   export interface HostListChatsParams {
     /**
+     * Selects an explicit batch of 1..200 generic chat identities through SQL.
+     */
+    chat_ids?: string[];
+    /**
      * Contains the text or pattern used to filter conversations.
      */
     query?: string;

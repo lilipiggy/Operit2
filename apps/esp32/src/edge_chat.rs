@@ -1633,7 +1633,7 @@ pub fn sendImage(bytes: Vec<u8>, mime: String) -> Result<(), String> {
             let args = operit_link::CoreValue::Map(std::collections::BTreeMap::from([
                 ("chatId".into(), CoreValue::String(session.chatId.clone())),
                 ("mimeType".into(), CoreValue::String(mime)),
-                ("imageBytes".into(), CoreValue::Bytes(bytes)),
+                ("imageBytes".into(), CoreValue::Bytes(bytes.into())),
             ]));
             let response = session
                 .client

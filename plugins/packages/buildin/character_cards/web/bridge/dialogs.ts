@@ -1,5 +1,6 @@
 import { exportSpec, importSpec } from "../features/characters/import-export-view";
 import { setGraphViewport } from "../features/graph/canvas";
+import { cancelGraphCameraAnimation } from "../features/graph/camera";
 import { graphHeader, graphSpec } from "../features/graph/view";
 import { ownerSettingsBody, ownerSettingsFooter } from "../features/memory/controls-view";
 import { memoryEditorSpec } from "../features/memory/item-view";
@@ -54,6 +55,7 @@ export function createDialogRenderer(context: EditorContext) {
   function renderDialogs() {
     const active = state.dialogs[state.dialogs.length - 1];
     for (const [dialog, element] of surfaces) {
+      if (dialog !== active && dialog.type === "graph") cancelGraphCameraAnimation(dialog);
       if (element.open) {
         const body = element.querySelector<HTMLElement>(".dialog-body");
         if (body !== null) dialog.scroll = body.scrollTop;

@@ -111,6 +111,8 @@ pub enum ChatHostListChatsParamsSortOrder {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Configures filtering, ordering, and result limits when listing conversations.
 pub struct ChatHostListChatsParams {
+    /// Selects an explicit batch of 1..200 generic chat identities through SQL.
+    pub chat_ids: Option<Vec<String>>,
     /// Contains the text or pattern used to filter conversations.
     pub query: Option<String>,
     /// Selects how the query is compared with chat titles and identifiers.

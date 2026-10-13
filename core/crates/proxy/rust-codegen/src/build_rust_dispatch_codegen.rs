@@ -1128,7 +1128,7 @@ fn render_call_body(
 /// Renders a typed runtime value as a native CoreValue result.
 fn render_core_value_result(value_type: &str, value: &str) -> String {
     if value_type == "Vec<u8>" {
-        format!("Ok(operit_link::CoreValue::Bytes({value}))")
+        format!("Ok(operit_link::CoreValue::Bytes(({value}).into()))")
     } else {
         format!("operit_rslink_runtime::to_core_value({value})")
     }

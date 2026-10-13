@@ -5,7 +5,7 @@ import { graphData, graphItems, selectedMemory } from "./data";
 export function graphInspector(dialog: GraphDialog): string {
   let list = "";
   const items = graphItems(dialog);
-  for (const item of items) list += `<button type="button" class="memory-item ${dialog.selected === item.uuid ? "selected" : ""}" data-action="select-memory" data-id="${escapeHtml(item.uuid)}"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.content.slice(0, 70))}</small></button>`;
+  for (const item of items) list += `<button type="button" class="memory-item ${dialog.selected === item.uuid ? "selected" : ""}" data-action="locate-memory" data-id="${escapeHtml(item.uuid)}"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.content.slice(0, 70))}</small></button>`;
   const selected = selectedMemory(dialog);
   let detail = "";
   if (selected !== null) {

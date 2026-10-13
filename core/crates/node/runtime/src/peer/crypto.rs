@@ -130,7 +130,7 @@ impl Channel {
         let sequence = cipher.next;
         cipher.seal(&mut bytes)?;
         self.raw.send(PeerMessage::Request(CoreLinkRequest::Call(CoreCallRequest::new(
-            sequence.to_string(), "$peer.session", "data", CoreValue::Bytes(bytes))))).await.map_err(error)
+            sequence.to_string(), "$peer.session", "data", CoreValue::Bytes(bytes.into()))))).await.map_err(error)
     }
     pub fn setDuplex(&self, duplex: Arc<super::duplex::Duplex>) { *self.duplex.lock().unwrap() = Some(duplex); }
     pub fn duplex(&self) -> Option<Arc<super::duplex::Duplex>> { self.duplex.lock().unwrap().clone() }
@@ -151,7 +151,8 @@ impl Channel {
         if request.target != "$peer.session" || request.methodName != "data" || request.requestId.0 != cipher.next.to_string() {
             return Err(error(format!("Unexpected/replayed session message: expected={}, received={:?}", cipher.next, request.requestId.0.parse::<u64>().ok())));
         }
-        let CoreValue::Bytes(mut bytes) = request.args else { return Err(error("Encrypted bytes required")); };
+        let CoreValue::Bytes(bytes) = request.args else { return Err(error("Encrypted bytes required")); };
+        let mut bytes = bytes.to_vec();
         let nonce = cipher.nonce()?;
         let plaintext = cipher.key.open_in_place(nonce, aead::Aad::from(&cipher.context), &mut bytes)
             .map_err(|_| error("Session authentication tag rejected"))?;

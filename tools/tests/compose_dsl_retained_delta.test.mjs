@@ -37,8 +37,36 @@ test('detached dirty branches never remove transient nodes that were not deliver
   }
   assert.equal(client.size, 1);
   assert.equal(client.get(update.rootId).children.length, 0);
-  assert.equal(Array.from(update.removed).some(id => id.includes('temporary')), false);
   assert.equal(graph.commit(root).removed.length, 0);
+});
+
+/** Checks opaque handles, keyed identity, type changes, and removal through real retained commits. */
+test('transport handles stay compact across deep nesting and preserve keyed sibling identity', () => {
+  const { graph, node } = retained();
+  const first = node('Text', 'first-' + 'x'.repeat(1000));
+  const second = node('Text', 'second');
+  const branch = node('Column', 'branch', [first, second]);
+  let root = branch;
+  for (let index = 0; index < 40; index++) root = node('Box', 'depth-' + index, [root]);
+  const initial = graph.commit(root);
+  assert.ok(initial.upserts.every(record => record.id.length < 12));
+  const firstId = initial.upserts.find(record => record.props.key === first.props.key).id;
+  const secondId = initial.upserts.find(record => record.props.key === second.props.key).id;
+  branch.children = [second, first];
+  const reordered = graph.commit(root);
+  assert.deepEqual(Array.from(reordered.upserts.find(record => record.props.key === 'branch').children), [secondId, firstId]);
+  assert.equal(reordered.removed.length, 0);
+  const replacement = node('Button', first.props.key);
+  branch.children = [replacement, second];
+  const changed = graph.commit(root);
+  assert.deepEqual(Array.from(changed.removed), [firstId]);
+  const replacementId = changed.upserts.find(record => record.nodeType === 'Button').id;
+  assert.notEqual(replacementId, firstId);
+  branch.children = [second]; graph.commit(root);
+  branch.children = [replacement];
+  const reopened = graph.commit(root);
+  assert.notEqual(reopened.upserts.find(record => record.nodeType === 'Button').id, replacementId);
+  assert.ok(reopened.upserts.every(record => record.id.length < 12));
 });
 
 

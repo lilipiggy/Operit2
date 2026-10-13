@@ -236,12 +236,7 @@
               "props": {
                 "key": "sidebar-category-drop-card:travel",
                 "acceptedTypes": [
-                  "character-sidebar.chat"
-                ],
-                "acceptedData": [
-                  "c1",
-                  "c2",
-                  "c3"
+                  "character-sidebar.chat:card:travel"
                 ],
                 "onDrop": {
                   "__actionId": "__action_126"
@@ -275,7 +270,7 @@
                       "type": "Image",
                       "props": {
                         "key": "sidebar-avatar-card:travel",
-                        "uri": "data:image/png;base64,iVBORw0KGgo=",
+                        "uri": "/app/data/cache/toolpkg_resource_exports/operit-avatar.png",
                         "width": 22,
                         "height": 22,
                         "contentScale": "crop",
@@ -424,12 +419,7 @@
               "props": {
                 "key": "sidebar-group-drop-1",
                 "acceptedTypes": [
-                  "character-sidebar.chat"
-                ],
-                "acceptedData": [
-                  "c1",
-                  "c2",
-                  "c3"
+                  "character-sidebar.chat:card:travel"
                 ],
                 "hoverBorderColor": {
                   "__colorToken": "primary",
@@ -678,11 +668,10 @@
           "props": {
             "key": "sidebar-chat-drop-c1",
             "acceptedTypes": [
-              "character-sidebar.chat"
+              "character-sidebar.chat:card:travel"
             ],
-            "acceptedData": [
-              "c2",
-              "c3"
+            "excludedData": [
+              "c1"
             ],
             "hoverBorderColor": {
               "__colorToken": "primary",
@@ -901,7 +890,7 @@
                                   "props": {
                                     "key": "sidebar-chat-drag-c1",
                                     "data": "c1",
-                                    "dragType": "character-sidebar.chat",
+                                    "dragType": "character-sidebar.chat:card:travel",
                                     "enabled": true
                                   },
                                   "children": [
@@ -1193,11 +1182,10 @@
           "props": {
             "key": "sidebar-chat-drop-c2",
             "acceptedTypes": [
-              "character-sidebar.chat"
+              "character-sidebar.chat:card:travel"
             ],
-            "acceptedData": [
-              "c1",
-              "c3"
+            "excludedData": [
+              "c2"
             ],
             "hoverBorderColor": {
               "__colorToken": "primary",
@@ -1418,7 +1406,7 @@
                                   "props": {
                                     "key": "sidebar-chat-drag-c2",
                                     "data": "c2",
-                                    "dragType": "character-sidebar.chat",
+                                    "dragType": "character-sidebar.chat:card:travel",
                                     "enabled": true
                                   },
                                   "children": [
@@ -1722,12 +1710,7 @@
               "props": {
                 "key": "sidebar-group-drop-ungrouped:card:travel",
                 "acceptedTypes": [
-                  "character-sidebar.chat"
-                ],
-                "acceptedData": [
-                  "c1",
-                  "c2",
-                  "c3"
+                  "character-sidebar.chat:card:travel"
                 ],
                 "hoverBorderColor": {
                   "__colorToken": "primary",
@@ -1952,11 +1935,10 @@
           "props": {
             "key": "sidebar-chat-drop-c3",
             "acceptedTypes": [
-              "character-sidebar.chat"
+              "character-sidebar.chat:card:travel"
             ],
-            "acceptedData": [
-              "c1",
-              "c2"
+            "excludedData": [
+              "c3"
             ],
             "hoverBorderColor": {
               "__colorToken": "primary",
@@ -2177,7 +2159,7 @@
                                   "props": {
                                     "key": "sidebar-chat-drag-c3",
                                     "data": "c3",
-                                    "dragType": "character-sidebar.chat",
+                                    "dragType": "character-sidebar.chat:card:travel",
                                     "enabled": true
                                   },
                                   "children": [

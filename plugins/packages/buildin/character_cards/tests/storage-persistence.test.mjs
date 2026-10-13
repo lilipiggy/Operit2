@@ -10,7 +10,7 @@ function card(name) { return { ...plain(loadModule("src/drafts.ts").createCharac
 /** Supplies an explicit memory creation command without fabricating a persisted memory. */
 function memory(title) { return { title, content: "Persisted memory", contentType: "text/plain", source: "manual", credibility: 0.8, importance: 0.6, folderPath: null, tags: [] }; }
 /** Selects only actual storage transactions from the generic host audit. */
-function commits(disk) { return disk.calls.filter(call => call.method === "storage.commit"); }
+function commits(disk) { return disk.calls.filter(call => call.method === "storage.transaction"); }
 
 test("new installation stores independent records and reopens without mutations", async t => {
   const disk = await createDiskHarness(t), owner = await open(disk), state = plain(disk.readState());
@@ -32,8 +32,9 @@ test("one memory edit publishes only that memory and the metadata guard", async 
   await owner.run(session => session.updateMemory("character:default", first.id, memory("Edited")));
   assert.equal(commits(disk).length, 1);
   const mutations = commits(disk)[0].args[0];
-  assert.deepEqual(mutations.map(row => [row.collection, row.key]), [["memories", "character:default/" + first.id], ["meta", "state"]]);
-  assert.equal(mutations.every(row => typeof row.expectedVersion === "string"), true);
+  assert.equal(mutations.filter(row => /^UPDATE "memories" /.test(row.sql)).length, 1);
+  assert.equal(mutations.filter(row => /^UPDATE "meta" /.test(row.sql)).length, 1);
+  assert.equal(mutations.filter(row => /^INSERT INTO "cards" /.test(row.sql)).length, 0);
   const reopened = await open(disk); assert.equal((await reopened.run(session => session.listMemories("character:default").then(rows => rows.find(row => row.id === first.id)))).title, "Edited");
 });
 
@@ -50,13 +51,13 @@ test("concurrent writers reject stale snapshots without overwriting an unrelated
   const pending = first.run(async session => { entered(); await gate; return session.updateCharacter({ ...(await session.getCharacter("default")), description: "Stale write" }); });
   await ready;
   await second.run(session => session.updateCharacter({ ...card("Actual committed name"), id: "default" }));
-  proceed(); await assert.rejects(pending, /version conflict/);
+  proceed(); await assert.rejects(pending, /affected-row precondition/);
   assert.equal(disk.readState().cards[0].name, "Actual committed name");
 });
 
 test("transaction failures preserve original errors and authoritative database records", async t => {
   const disk = await createDiskHarness(t), owner = await open(disk), before = disk.stateBytes(), failure = new Error("Exact storage failure");
-  disk.failNext("storage.commit", failure);
+  disk.failNext("storage.transaction", failure);
   await assert.rejects(owner.run(session => session.updateCharacter({ ...card("Rejected name"), id: "default" })), error => error === failure);
   assert.deepEqual(disk.stateBytes(), before);
   await assert.rejects(owner.run(session => session.listCharacters()), error => error === failure);
@@ -65,7 +66,7 @@ test("transaction failures preserve original errors and authoritative database r
 
 test("interrupted migration metadata prevents plugin operations and is never replaced with defaults", async t => {
   const disk = await createDiskHarness(t); await open(disk);
-  disk.storage.inspect(sql => { const row = sql.prepare("SELECT value FROM records WHERE collection='meta' AND key='state'").get(); const value = JSON.parse(row.value); value.migrationStatus = "writing"; sql.prepare("UPDATE records SET value=? WHERE collection='meta' AND key='state'").run(JSON.stringify(value)); });
+  disk.storage.inspect(sql => sql.prepare('UPDATE "meta" SET "migrationStatus" = ?, "migrationStatus__state" = 2 WHERE "_key" = ?').run("writing", "state"));
   const before = disk.stateBytes.bind(disk); disk.clearCalls();
   await assert.rejects(open(disk), /migration has not completed/);
   assert.equal(commits(disk).length, 0); assert.equal(typeof before, "function");
@@ -85,7 +86,7 @@ test("owner pages preserve exact int64 identities and more than 1000 independent
 test("rejected profile commit retains the actual published USER.md and original error", async t => {
   const disk = await createDiskHarness(t), owner = await open(disk);
   await owner.run(session => session.writeUser("character:default", "Original profile"));
-  const failure = new Error("Profile record commit rejected"); disk.failNext("storage.commit", failure);
+  const failure = new Error("Profile record commit rejected"); disk.failNext("storage.transaction", failure);
   await assert.rejects(owner.run(session => session.writeUser("character:default", "Rejected profile")), error => error === failure);
   const reopened = await open(disk);
   assert.equal((await reopened.run(session => session.readUser("character:default"))).content, "Original profile");
@@ -112,30 +113,27 @@ test("embedding cache stores long multiline text with bounded independent keys",
   });
   const reopened = await open(disk), retained = await reopened.run(session => session.readMemorySpace("character:default"));
   assert.equal(retained.embeddings[0].text, text);
-  assert.equal(commits(disk).at(-1).args[0].find(row => row.collection === "embeddings").key, "character:default/00000000000000000000");
+  disk.storage.inspect(sql => { const row = sql.prepare('SELECT "_key", "record__vector", "record__text" FROM "embeddings"').get(); assert.equal(row._key, "character:default/00000000000000000000"); assert.equal(row.record__text, text); assert.equal(row.record__vector.byteLength, 16); });
 });
 
 /** Gates production collection reads without replacing the repository or stored records. */
 async function gatedCollections(t, failure = null) {
-  const disk = await createDiskHarness(t), originalOpen = disk.storage.objects.open;
+  const disk = await createDiskHarness(t), originalOpen = disk.storage.sqlite.open;
   let armed = false, release, entered;
   const gate = new Promise(resolve => { release = resolve; });
   const allEntered = new Promise(resolve => { entered = resolve; });
   const started = new Set();
-  disk.storage.objects.open = async options => {
-    const database = await originalOpen(options), collection = database.collection;
-    database.collection = name => {
-      const records = collection(name), list = records.list;
-      records.list = async (...args) => {
-        if (armed) {
-          started.add(name);
-          if (started.size === 11) entered();
-          if (name === "cards" && failure !== null) throw failure;
-          await gate;
-        }
-        return list(...args);
-      };
-      return records;
+  disk.storage.sqlite.open = async options => {
+    const database = await originalOpen(options), query = database.query;
+    database.query = async (...args) => {
+      const match = /^SELECT \* FROM "([A-Za-z]+)" ORDER BY/.exec(args[0]);
+      if (armed && match !== null && match[1] !== "meta") {
+        const name = match[1]; started.add(name);
+        if (started.size === 11) entered();
+        if (name === "cards" && failure !== null) throw failure;
+        await gate;
+      }
+      return query(...args);
     };
     return database;
   };

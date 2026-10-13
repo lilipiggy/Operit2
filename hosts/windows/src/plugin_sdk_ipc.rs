@@ -237,7 +237,7 @@ impl PluginSdkIpcHost for WindowsPluginSdkIpcHost {
                     };
                     if let Err(error) = pipe_io::accept(&file, &stop) {
                         if !stop.load(Ordering::SeqCst) {
-                            eprintln!("Plugin SDK pipe accept failed: {error}");
+                            operit_host_api::logHostError("WindowsPluginSdkIpc", &format!("Plugin SDK pipe accept failed: {error}"));
                         }
                         break;
                     }
@@ -249,7 +249,7 @@ impl PluginSdkIpcHost for WindowsPluginSdkIpcHost {
                         nextSession: nextSession.clone(),
                     };
                     if let Err(error) = carrier.attachFile(file, callbacks.clone(), true) {
-                        eprintln!("Plugin SDK pipe accept failed: {error}");
+                        operit_host_api::logHostError("WindowsPluginSdkIpc", &format!("Plugin SDK pipe accept failed: {error}"));
                     }
                 }
             })

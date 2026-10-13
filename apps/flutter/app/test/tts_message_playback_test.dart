@@ -539,7 +539,10 @@ class _MessageVoiceBridge extends OperitRuntimeBridge {
 }
 
 /// Provides a complete actual voice configuration for the exact saved or preview ID.
-core.TtsConfig _config(String id, String providerType) => core.TtsConfig(
+core.CoreOperitModelTtsConfigTtsConfig _config(
+  String id,
+  String providerType,
+) => core.CoreOperitModelTtsConfigTtsConfig(
   id: id,
   name: 'Voice $id',
   providerType: providerType,

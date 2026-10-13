@@ -40,10 +40,10 @@ function mount(current, data, adapters = {}) {
   runtime.context.module = { exports: runtime.load('dist/ui/chat-sidebar/index.ui.js') };
   vm.runInContext(sdkScript('ToolPkgComposeDslBridge.rs'), runtime.context);
   vm.runInContext(sdkScript('ToolPkgComposeDslRuntimeScript.rs'), runtime.context);
-  composeStreamFixture(runtime.context).adapt();
+  const stream = composeStreamFixture(runtime.context); stream.adapt();
   const options = { packageName: 'com.operit.character_cards', executionContextKey: 'native-sidebar-test' };
   const first = runtime.context.__operit_render_compose_dsl({ ...options, state: current });
-  const session = { first, calls,
+  const session = { first, calls, events: stream.events,
     bundle() { return runtime.context.__operit_compose_bundle; },
     update(next) { return runtime.context.__operit_render_compose_dsl({ ...options, __operit_update_inputs: true, __operit_input_state: next }); },
     render() { return runtime.context.__operit_render_compose_dsl({ ...options, __operit_update_inputs: true }); },
@@ -91,10 +91,13 @@ test('native role sidebar restores rounded nested legacy layout without timestam
   const draggable = keyedNode(tree, 'sidebar-chat-drag-c1');
   assert.equal(draggable.type, 'Draggable');
   assert.equal(draggable.props.data, 'c1');
+  assert.equal(draggable.props.dragType, 'character-sidebar.chat:card:travel');
   assert.ok(draggable.slots.feedback);
   const target = keyedNode(tree, 'sidebar-chat-drop-c1');
   assert.equal(target.type, 'DragTarget');
-  assert.deepEqual(Array.from(target.props.acceptedData), ['c2', 'c3']);
+  assert.equal(target.props.acceptedData, undefined);
+  assert.deepEqual(Array.from(target.props.acceptedTypes), [draggable.props.dragType]);
+  assert.deepEqual(Array.from(target.props.excludedData), ['c1']);
   const swipe = keyedNode(tree, 'sidebar-chat-swipe-c1');
   assert.equal(swipe.type, 'SwipeActions');
   assert.ok(swipe.props.onStartAction.__actionId); assert.ok(swipe.props.onEndAction.__actionId);
@@ -210,6 +213,30 @@ test('native previews retain current pinned and streaming rows, and search finds
   const filtered = await screen.dispatch(search.props.onValueChange, '对话 c5');
   assert.equal(keyedNode(filtered.tree, 'sidebar-chat-c5').type, 'Row');
   assert.equal(composeNodes(filtered.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 1);
+});
+
+/** Checks transport growth and backend isolation through the actual compiled sidebar and SDK. */
+test('expanding chat previews sends linear drag filters and a single commit without catalog IO', async () => {
+  const chats = Array.from({ length: 200 }, (_, i) => summary('c' + i, { group: null }));
+  const data = catalog(chats);
+  data.sections[0].conversationGroups = []; data.sections[0].ungroupedChats = chats;
+  const screen = mount(context(chats), data);
+  const loaded = await screen.load(), calls = screen.calls.length, before = screen.events.length;
+  const expanded = await screen.click(loaded.tree, 'sidebar-preview-ungrouped:card:travel');
+  const targets = composeNodes(expanded.tree, node => node.type === 'DragTarget');
+  assert.equal(composeNodes(expanded.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, chats.length);
+  assert.ok(targets.every(node => node.props.acceptedData === undefined));
+  assert.equal(targets.reduce((count, node) => count + (node.props.excludedData?.length ?? 0), 0), chats.length);
+  assert.ok(targets.every(node => node.props.acceptedTypes.length === 1));
+  assert.equal(screen.calls.length, calls, 'Local expansion must not read authoritative catalogs or resources');
+  assert.equal(screen.events.length - before, 1, 'A synchronous toggle must render only its final commit');
+  const update = screen.events[before].response.update;
+  assert.ok(update.upserts.every(node => node.id.length < 12), 'Transport handles must not carry ancestor paths');
+  assert.ok(JSON.stringify(update).length < chats.length * 6500, 'Expanded updates must stay within a linear per-chat transport budget');
+  const collapsed = await screen.click(expanded.tree, 'sidebar-preview-ungrouped:card:travel');
+  assert.equal(composeNodes(collapsed.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 4);
+  assert.equal(screen.calls.length, calls);
+  assert.ok(JSON.stringify(screen.events.at(-1).response.update).length < chats.length * 250, 'Collapse must transmit compact removal handles');
 });
 
 test('obsolete sidebar browser files, registration and archive builder are removed', async () => {

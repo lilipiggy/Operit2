@@ -43,6 +43,22 @@ impl ChatDao {
             .transpose()
     }
 
+    /// Selects a bounded set of chat metadata through the primary-key index.
+    pub fn getChatsByIds(&self, ids: &[String]) -> Result<Vec<ChatEntity>, SqliteStoreError> {
+        if ids.is_empty() || ids.len() > 200 {
+            return Err(SqliteStoreError::Message(
+                "Chat ID batch requires 1..200 identities".into(),
+            ));
+        }
+        self.selectChats(
+            &format!(
+                "SELECT * FROM chats WHERE id IN ({})",
+                vec!["?"; ids.len()].join(",")
+            ),
+            ids.iter().cloned().map(SqliteValue::Text).collect(),
+        )
+    }
+
     /// Inserts one metadata record with validated plugin-owned namespaces.
     pub fn insertChat(&self, chat: ChatEntity) -> Result<(), SqliteStoreError> {
         self.store

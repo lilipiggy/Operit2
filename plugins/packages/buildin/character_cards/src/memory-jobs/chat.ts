@@ -2,7 +2,7 @@ import type { CharacterRepository } from "../canonical";
 import type { Card, MemoryChat, MemoryChatMessage, MemoryJobWindow, MemoryRebuild } from "../model";
 import { requireChatSelection } from "../chat-bindings";
 import type { MessageMarker } from "../chat-markers";
-import { readMessageExtensionMarker } from "../chat-extensions";
+import { readMessageSnapshot, chatsForMemoryOwner } from "../chat-storage";
 import { assertBoolean, assertInteger, assertMemoryChatMessage, assertObject, assertString, requireId } from "../validation";
 
 /** Requires exact generic chat-summary fields without inventing unavailable history metadata. */
@@ -64,7 +64,7 @@ export async function requireChatOwner(chatId: string, ownerKey: string, reposit
 /** Requires a writable destination from the exact saved message revision, never the current chat selection. */
 export async function requireMessageOwner(chatId: string, message: MemoryChatMessage, ownerKey: string, repository: CharacterRepository): Promise<MessageMarker> {
   assertMemoryChatMessage(message); await repository.readMemorySpace(ownerKey);
-  const marker = await readMessageExtensionMarker(chatId, message.timestamp, message.variantIndex);
+  const marker = await readMessageSnapshot(chatId, message.timestamp, message.variantIndex);
   if (!marker.profile.resources.some(
     /** Checks only this saved participant's explicit writable resource grants. */
     resource => resource.key === ownerKey && resource.writable,
@@ -76,7 +76,7 @@ export async function requireMessagesOwner(chatId: string, messages: MemoryChatM
   await repository.readMemorySpace(ownerKey); let permitted = false;
   for (const message of messages) {
     if (message.sender !== "ai" && message.sender !== "assistant") continue;
-    const marker = await readMessageExtensionMarker(chatId, message.timestamp, message.variantIndex);
+    const marker = await readMessageSnapshot(chatId, message.timestamp, message.variantIndex);
     if (marker.profile.resources.some(
       /** Requires an actual saved writable grant without deriving identity from a display name. */
       resource => resource.key === ownerKey && resource.writable,
@@ -85,18 +85,16 @@ export async function requireMessagesOwner(chatId: string, messages: MemoryChatM
   if (!permitted) throw new Error("History has no saved assistant identity writable for this memory owner: " + ownerKey);
 }
 /** Lists real host summaries under their stored plugin binding, excluding genuinely unbound chats. */
-export async function listMemoryChats(ownerKey: string, repository: CharacterRepository): Promise<MemoryChat[]> {
-  await repository.readMemorySpace(ownerKey);
-  const bindings = await repository.listChatBindings(), selected = new Set<string>();
-  for (const binding of bindings) {
-    const cards = await chatParticipants(binding.chatId, repository);
-    for (const card of cards) {
-      if (await primaryOwner(card, repository) === ownerKey) selected.add(binding.chatId);
-      for (const mount of card.sharedMemoryMounts) if (mount.writable && "shared:" + mount.sharedMemoryId === ownerKey) selected.add(binding.chatId);
-    }
-  }
+export async function listMemoryChats(ownerKey: string, repository: Pick<CharacterRepository, "readMemorySettings">): Promise<MemoryChat[]> {
+  await repository.readMemorySettings(ownerKey);
+  const selected = await chatsForMemoryOwner(ownerKey);
   const chats: MemoryChat[] = [];
-  for (const id of selected) chats.push(await requireChat(id));
+  for (let offset = 0; offset < selected.length; offset += 200) {
+    const ids = selected.slice(offset, offset + 200), result = await Tools.Chat.listChats({ chat_ids: ids, limit: 200 });
+    if (result.totalCount !== ids.length || result.chats.length !== ids.length) throw new Error("Stored bindings reference missing Core conversations");
+    const remaining = new Set(ids);
+    for (const chat of result.chats) { assertChat(chat); if (!remaining.delete(chat.id)) throw new Error("Chat batch returned an unrelated or duplicate identity"); chats.push(chat); }
+  }
   return chats.sort(
     /** Keeps the host directory's updated-at descending presentation without limiting the bound records. */
     (left, right) => {

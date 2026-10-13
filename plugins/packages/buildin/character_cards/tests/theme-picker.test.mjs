@@ -11,7 +11,7 @@ async function open(plugin, entity, id) {
 }
 
 test("one native theme picker searches exact independent IDs and stages the owner reference only until save", async t => {
-  const plugin = await selectorEnvironment(t, {Theme: { async listConfigs() { return themes; }
+  const plugin = await selectorEnvironment(t, {Theme: { async listConfigs() { return { configs: themes }; }
   }});
   for (const entity of ["card", "group"]) {
     const api = entity === "card" ? "character" : "group", record = await plugin.api(api + ".create", { values: { name: "独立主题测试" } });
@@ -34,7 +34,7 @@ test("one native theme picker searches exact independent IDs and stages the owne
 });
 
 test("missing theme references stay visible; picker cancellation preserves the original record", async t => {
-  const plugin = await selectorEnvironment(t, {Theme: { async listConfigs() { return themes; }
+  const plugin = await selectorEnvironment(t, {Theme: { async listConfigs() { return { configs: themes }; }
   }});
   const card = await plugin.api("character.create", { values: { name: "失效绑定", themeConfigId: "deleted-theme" } });
   const ui = await open(plugin, "card", card.id);
@@ -52,7 +52,7 @@ test("pending theme directory IO does not lock cancellation and late completion 
     const ui = await open(plugin, "card", card.id);
     assert.equal(keyedNode(ui.render().tree, "entity-cancel").props.enabled, true);
     const result = await click(ui, "entity-cancel"); assert.equal(result.actionResult.type, "toolpkg.presentation.cancel");
-    if (fail) reject(new Error("late theme error")); else resolve(themes);
+    if (fail) reject(new Error("late theme error")); else resolve({ configs: themes });
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(composeNodes(ui.render().tree, node => node.props.key === "entity-primary").length, 0);
     assert.equal((await plugin.api("character.get", { id: card.id })).themeConfigId, null);
@@ -68,7 +68,7 @@ test("the single native picker receives its pending real catalogue while keeping
   await click(ui, "entity-theme-switch", "onCheckedChange", true);
   assert.ok(composeNodes(ui.render().tree, node => node.props.text === "正在读取主题配置…").length);
   assert.equal(keyedNode(ui.render().tree, "entity-cancel").props.enabled, true);
-  resolve(themes); await new Promise(resolve => setImmediate(resolve));
+  resolve({ configs: themes }); await new Promise(resolve => setImmediate(resolve));
   await click(ui, "entity-picker-independent-theme-two"); await click(ui, "entity-primary");
   assert.equal((await plugin.api("character.get", { id: card.id })).themeConfigId, "independent-theme-two");
 });

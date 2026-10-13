@@ -18,10 +18,12 @@ use operit_model::FunctionType::FunctionType;
 use operit_model::PluginExtensionTarget::PluginExtensionTarget;
 use operit_model::PromptFunctionType::PromptFunctionType;
 use operit_providers::chat::EnhancedAIService::EnhancedAIService;
-use operit_providers::runtime_support::{ChatConfigurationDisplayResult, ChatConfigurationPurpose, ChatConfigurationRequest};
-use operit_store::repository::ChatHistoryManager::ChatHistoryManager;
-use operit_store::PreferencesDataStore::{mutableStateFlow, MutableStateFlow, StateFlow};
+use operit_providers::runtime_support::{
+    ChatConfigurationDisplayResult, ChatConfigurationPurpose, ChatConfigurationRequest,
+};
+use operit_store::PreferencesDataStore::{MutableStateFlow, StateFlow, mutableStateFlow};
 use operit_store::SyncOperationStore::SyncClock;
+use operit_store::repository::ChatHistoryManager::ChatHistoryManager;
 use operit_tools::files::PathMapper::PathMapper;
 use operit_util::AppLogger::AppLogger;
 use operit_util::ChainLogger::{self, MESSAGE_STORE_CHAIN};
@@ -1325,7 +1327,11 @@ impl ChatHistoryDelegate {
     }
 
     /// Publishes only a successfully validated display descriptor, never an execution identity, to UI state.
-    pub fn publishChatConfiguration(&self, chatId: &str, configuration: ChatConfigurationDisplayResult) {
+    pub fn publishChatConfiguration(
+        &self,
+        chatId: &str,
+        configuration: ChatConfigurationDisplayResult,
+    ) {
         let mut configurations = self.chatConfigurationsFlow.value();
         configurations.insert(chatId.to_string(), configuration);
         self.chatConfigurationsFlow.set_value(configurations);
@@ -1458,8 +1464,7 @@ impl ChatHistoryDelegate {
                         .loadChatHistory(currentId.clone())
                         .map_err(|error| error.to_string())?
                         .ok_or_else(|| format!("Current chat does not exist: {currentId}"))?;
-                    if current.pluginExtensions == draft.pluginExtensions
-                        && current.workspaceId == draft.workspaceId
+                    if current.workspaceId == draft.workspaceId
                         && !self
                             .chatHistoryManager
                             .hasUserMessage(currentId.clone())
@@ -1468,15 +1473,18 @@ impl ChatHistoryDelegate {
                         let existingConfiguration = api
                             .resolveDisplay(ChatConfigurationRequest {
                                 chatId: Some(currentId.clone()),
-                                ..request
+                                ..request.clone()
                             })
                             .await?;
-                        self.publishChatConfiguration(&currentId, existingConfiguration);
-                        self.openChatRecord(
-                            currentId.clone(),
-                            self.selectionMode == ChatSelectionMode::FOLLOW_GLOBAL,
-                        )?;
-                        return Ok(currentId);
+                        if existingConfiguration.contextKey == configuration.contextKey {
+                            api.abortDraft(&draft.id).await?;
+                            self.publishChatConfiguration(&currentId, existingConfiguration);
+                            self.openChatRecord(
+                                currentId.clone(),
+                                self.selectionMode == ChatSelectionMode::FOLLOW_GLOBAL,
+                            )?;
+                            return Ok(currentId);
+                        }
                     }
                 }
             }
@@ -1490,10 +1498,15 @@ impl ChatHistoryDelegate {
             draft.currentWindowSize = source.currentWindowSize;
         } else {
             for initial in &configuration.initialMessages {
-                let mut opening = ChatMessage::new_with_markdown("ai".to_string(), initial.content.clone());
+                let mut opening =
+                    ChatMessage::new_with_markdown("ai".to_string(), initial.content.clone());
                 opening.roleName = initial.displayName.clone();
                 if let Some(snapshot) = &initial.messageExtension {
-                    opening.pluginExtensions.insert(configuration.extensionOwner.clone(), Value::Object(snapshot.clone()));
+                    let reference = api.storeSnapshot(snapshot.clone()).await?;
+                    opening.pluginExtensions.insert(
+                        configuration.extensionOwner.clone(),
+                        Value::Object(reference),
+                    );
                 }
                 draft.messages.push(opening);
             }
@@ -1513,6 +1526,15 @@ impl ChatHistoryDelegate {
         let committed = self
             .chatHistoryManager
             .commitChatDraft(draft, cloneSource)
+            .map_err(|error| error.to_string())?;
+        api.commitDraft(&committed.id).await?;
+        self.chatHistoryManager
+            .deletePluginExtension(
+                api.extensionOwner(),
+                &PluginExtensionTarget::Chat {
+                    chatId: committed.id.clone(),
+                },
+            )
             .map_err(|error| error.to_string())?;
         self.publishChatConfiguration(&committed.id, configuration);
         for message in initialMessages {
@@ -1902,9 +1924,13 @@ impl ChatHistoryDelegate {
         let (folderPath, mountedName) = match source {
             Some(source) => {
                 let host = operit_store::RuntimeStorageHost::defaultRuntimeStorageHost();
-                let mount = operit_tools::files::MountRegistry::MountRegistry::withStorage(host).register(
-                    &source.namespace, &source.backend, &source.root, &source.name,
-                )?;
+                let mount = operit_tools::files::MountRegistry::MountRegistry::withStorage(host)
+                    .register(
+                        &source.namespace,
+                        &source.backend,
+                        &source.root,
+                        &source.name,
+                    )?;
                 (mount.vfsPath(), Some(mount.name))
             }
             None => (folderPath, None),
@@ -2268,14 +2294,26 @@ impl ChatHistoryDelegate {
     }
 
     /// Persists one original user row, propagates storage errors, and returns its exact canonical committed identity.
-    pub(crate) fn commitUserMessage(&mut self, chatId: &str, message: ChatMessage) -> Result<ChatMessage, String> {
+    pub(crate) fn commitUserMessage(
+        &mut self,
+        chatId: &str,
+        message: ChatMessage,
+    ) -> Result<ChatMessage, String> {
         self.requireChatExists(chatId)?;
-        if message.sender != "user" || message.isVariantPreview || message.selectedVariantIndex != 0 {
-            return Err("User submission must create an ordinary base user-message record".to_string());
+        if message.sender != "user" || message.isVariantPreview || message.selectedVariantIndex != 0
+        {
+            return Err(
+                "User submission must create an ordinary base user-message record".to_string(),
+            );
         }
         let persisted = Self::persistentChatMessage(message);
-        self.chatHistoryManager.updateMessage(chatId.to_string(), persisted.clone()).map_err(|error| error.to_string())?;
-        let committed = self.chatHistoryManager.loadChatMessageVariant(chatId, persisted.timestamp, 0).map_err(|error| error.to_string())?;
+        self.chatHistoryManager
+            .updateMessage(chatId.to_string(), persisted.clone())
+            .map_err(|error| error.to_string())?;
+        let committed = self
+            .chatHistoryManager
+            .loadChatMessageVariant(chatId, persisted.timestamp, 0)
+            .map_err(|error| error.to_string())?;
         ToolPkgChatMessageHookBridge::dispatchMessagePersisted(chatId, &committed);
         self.publishChatMessage(chatId, committed.clone());
         Ok(committed)
@@ -2395,8 +2433,14 @@ impl ChatHistoryDelegate {
     }
 
     /// Restores native conversation folders independently of role-card plugins.
-    pub fn updateChatGroups(&mut self, chatIds: Vec<String>, groupName: Option<String>) -> Result<(), String> {
-        self.chatHistoryManager.updateChatGroups(chatIds, groupName).map_err(|error| error.to_string())
+    pub fn updateChatGroups(
+        &mut self,
+        chatIds: Vec<String>,
+        groupName: Option<String>,
+    ) -> Result<(), String> {
+        self.chatHistoryManager
+            .updateChatGroups(chatIds, groupName)
+            .map_err(|error| error.to_string())
     }
 
     /// Applies a neutral order to existing chats without interpreting plugin sidebar groups.

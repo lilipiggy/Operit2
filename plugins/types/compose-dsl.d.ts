@@ -3076,6 +3076,10 @@ export interface DragTargetProps extends ComposeCommonProps {
   enabled?: boolean;
   acceptedTypes?: string[];
   acceptedData?: ToolPkg.JsonValue[];
+  /**
+   * Rejects matching payloads independently of the accepted type and data filters.
+   */
+  excludedData?: ToolPkg.JsonValue[];
   hoverBackground?: ComposeColor;
   hoverBorderColor?: ComposeColor;
   shape?: ComposeShape;
@@ -4180,6 +4184,42 @@ export interface ComposeFilePickerResult {
 }
 
 /**
+ * UTF-8 content and metadata passed to the host file-save selector.
+ */
+export interface ComposeFileSaveOptions {
+  /**
+   * File name suggested in the save dialog, without directory components.
+   */
+  suggestedName: string;
+  /**
+   * Exact UTF-8 text to save after the user accepts the destination.
+   */
+  content: string;
+  /**
+   * Media type of the exported file.
+   */
+  mimeType: string;
+  /**
+   * File extensions accepted by the save dialog, without leading dots.
+   */
+  extensions: string[];
+}
+
+/**
+ * Outcome returned after the file is saved or the user cancels.
+ */
+export interface ComposeFileSaveResult {
+  /**
+   * Whether the user dismissed the selector without saving.
+   */
+  cancelled: boolean;
+  /**
+   * Destination reported by the host; null on cancellation.
+   */
+  path?: string | null;
+}
+
+/**
  * Discoverable navigation target exposed to a Compose DSL screen.
  */
 export interface ComposeRouteInfo {
@@ -4314,6 +4354,10 @@ export interface ComposeDslContext {
    * Opens the host file picker and resolves selected file metadata.
    */
   openFilePicker(options?: ComposeFilePickerOptions): Promise<ComposeFilePickerResult>;
+  /**
+   * Saves UTF-8 content to a user-selected destination through the host file selector.
+   */
+  saveFile(options: ComposeFileSaveOptions): Promise<ComposeFileSaveResult>;
   /**
    * Returns the registered runtime-module specification decoded as the requested type.
    */

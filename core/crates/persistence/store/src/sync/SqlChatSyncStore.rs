@@ -27,7 +27,7 @@ use operit_model::MessageVariantEntity::MessageVariantEntity;
 /// Sync domain used for SQL-backed chat history operations.
 pub const CHAT_SYNC_DOMAIN: &str = "chat";
 
-const CHAT_SYNC_OPERATION_SCHEMA_VERSION: i32 = 7;
+const CHAT_SYNC_OPERATION_SCHEMA_VERSION: i32 = 8;
 
 const DELETE_CHAT: &str = "chats";
 const DELETE_MESSAGE: &str = "messages";

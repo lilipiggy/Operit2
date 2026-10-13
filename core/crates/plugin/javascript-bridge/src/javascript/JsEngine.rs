@@ -2030,6 +2030,7 @@ impl JsEngineState {
             "__operitNativeImageProcessing",
             "__operitNativeComposeWebViewControllerCommandSuspend",
             "__operitNativeComposeFilePickerCommand",
+            "__operitNativeComposeFileSaveCommand",
             "__operitNativeIsPackageImported",
             "__operitNativeImportPackage",
             "__operitNativeRemovePackage",
@@ -2797,6 +2798,13 @@ fn executeHostOperation(name: &str, arguments: Vec<Value>) -> HostResult<Value> 
             requireHostObject(&payload)?;
             currentExecutionHost()
                 .and_then(|host| host.open_compose_file_picker(&payload))
+                .map_err(HostError::new)
+        }
+        "__operitNativeComposeFileSaveCommand" => {
+            let [payload] = exactHostJavaScriptJsonArguments(name, arguments)?;
+            requireHostObject(&payload)?;
+            currentExecutionHost()
+                .and_then(|host| host.save_compose_file(&payload))
                 .map_err(HostError::new)
         }
         "__operitNativeGetEnvForCall" => {

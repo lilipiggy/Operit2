@@ -156,7 +156,7 @@ test("domain interfaces are V2-only and dispatch against the active call version
     assert.equal(io.calls.length, 0);
     io.context.version = "2.0.0";
     const result = io.methods["Models.listSummaries"](); io.complete(io.calls[0], []);
-    assert.deepEqual(structuredClone(await result), []);
+    assert.deepEqual(structuredClone(await result), { models: [] });
     io.context.version = version;
     assert.throws(() => io.methods["Models.listSummaries"](), /manifest.api_version/);
   }
@@ -167,7 +167,7 @@ test("Theme and Tts listConfigs keep distinct native paths and complete records"
   const io = transport(), theme = io.methods["Theme.listConfigs"](), tts = io.methods["Tts.listConfigs"]();
   assert.deepEqual(io.calls.map(call => call.method), ["Theme.listConfigs", "Tts.listConfigs"]);
   io.complete(io.calls[1], [{ id: "speech", voice: "exact" }]); io.complete(io.calls[0], [{ id: "theme", snapshot: { color: "exact" } }]);
-  assert.deepEqual(structuredClone(await theme), [{ id: "theme", snapshot: { color: "exact" } }]);
-  assert.deepEqual(structuredClone(await tts), [{ id: "speech", voice: "exact" }]);
+  assert.deepEqual(structuredClone(await theme), { configs: [{ id: "theme", snapshot: { color: "exact" } }] });
+  assert.deepEqual(structuredClone(await tts), { configs: [{ id: "speech", voice: "exact" }] });
   assert.equal(io.pendingRequests(), 0);
 });

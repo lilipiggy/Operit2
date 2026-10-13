@@ -50,7 +50,7 @@ test("unbound TS menu shows its original row and opens a real selector without b
   assert.equal(response.actionResult.input.selected, null);
   const selector = mountRegisteredSelector(runtime, { requestId: "menu-bind", input: response.actionResult.input }); await selector.load();
   await selector.dispatch(keyedNode(selector.render().tree, "card:" + card.id).props.onClick);
-  assert.equal(runtime.records.get("selector-chat").extension.selection, "card:" + card.id);
+  assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id);
 });
 
 /** Ensures a group binding never expands the single original menu slot into extra group controls. */

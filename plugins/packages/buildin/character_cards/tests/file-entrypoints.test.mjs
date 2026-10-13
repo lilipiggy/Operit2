@@ -61,11 +61,11 @@ test("registered API command and Web IPC share actual file-backed character reco
 test("registered API command and Web IPC preserve a bad-file initialization failure without partial writes", async t => {
   const disk = await createDiskHarness(t), files = loadModule("src/storage/database.ts", disk.globals);
   await files.DatabaseCharacterRepository.open();
-  disk.storage.inspect(sql => sql.prepare("UPDATE records SET value=? WHERE collection='cards' AND key='default'").run("{broken"));
+  disk.storage.inspect(sql => sql.prepare('UPDATE cards SET "memoryBindingMode"=? WHERE "_key"=?').run("BROKEN", "default"));
   disk.clearCalls(); const plugin = openPlugin(disk); let original;
   await assert.rejects(plugin.api("character.list", {}),
     /** Captures the actual rejected initialization error from the real provider path. */
-    error => { original = error; return error.name === "SyntaxError"; },
+    error => { original = error; return error.message === "Invalid memory binding mode"; },
   );
   await assert.rejects(plugin.web({ action: "getCharacter", id: "default" }),
     /** Requires the same retained service initialization failure on the actual IPC handler. */
@@ -73,8 +73,8 @@ test("registered API command and Web IPC preserve a bad-file initialization fail
   );
   const command = await plugin.command("character", ["list"]);
   assert.equal(command.json.ok, false); assert.equal(command.json.error.code, "domain_operation_failed");
-  assert.equal(command.json.error.message, String(original));
-  assert.equal(disk.storage.inspect(sql => sql.prepare("SELECT value FROM records WHERE collection='cards' AND key='default'").get().value), "{broken");
+  assert.equal(command.json.error.message, original.message);
+  assert.equal(disk.storage.inspect(sql => sql.prepare('SELECT "memoryBindingMode" FROM cards WHERE "_key"=?').get("default").memoryBindingMode), "BROKEN");
   assert.equal(disk.calls.filter(
     /** Rejects any repair or new-install publication during bad-file provider calls. */
     call => call.method === "write" || call.method === "move" || call.method === "mkdir",
@@ -146,7 +146,7 @@ test("actual Web card save commits the complete staged tag change set once", asy
   const updated = await plugin.api("tag.create", { values: { name: "保留标签", description: "", promptContent: "旧提示", tagType: "TONE" } });
   const before = path.join(disk.directory, "character-memory", "state.json"); disk.clearCalls();
   const snapshot = await plugin.web({ action: "saveCharacter", create: false, card: { ...plain(card), description: "Web 更新", ttsConfigId: directoryInput.ttsConfigs[0].id, attachedTagIds: ["draft-created", updated.id] }, tagChanges: { created: [{ draftId: "draft-created", values: { name: "新标签", description: "新描述", promptContent: "新提示", tagType: "CUSTOM" } }], updated: [{ id: updated.id, name: updated.name, description: "修改描述", promptContent: "修改提示", tagType: updated.tagType }], deleted: [removed.id] } });
-  assert.equal(disk.calls.filter(call => call.method === "storage.commit").length, 1);
+  assert.equal(disk.calls.filter(call => call.method === "storage.transaction").length, 1);
   const state = JSON.parse(await disk.stateBytes().toString("utf8"));
   assert.deepEqual(state.cards, plain(snapshot.cards)); assert.deepEqual(state.tags, plain(snapshot.tags));
   assertCompleteSnapshot(snapshot, state);
@@ -188,8 +188,8 @@ test("IO-only file entrypoints reject undeclared SoftwareSettings instead of sup
     () => disk.globals.Tools.SoftwareSettings,
     { message: "Disk harness permits Files and Storage only: SoftwareSettings" },
   );
-  await assert.rejects(plugin.web({ action: "snapshot" }), { message: "Disk harness permits Files and Storage only: Models" });
-  await assert.rejects(plugin.api("snapshot", {}), { message: "Disk harness permits Files and Storage only: Models" });
+  await assert.rejects(plugin.web({ action: "snapshot" }), /Disk harness permits Files and Storage only: (Models|Tts|Catalog)/);
+  await assert.rejects(plugin.api("snapshot", {}), /Disk harness permits Files and Storage only: (Models|Tts|Catalog)/);
   assertNoMutations(disk); assert.deepEqual(await disk.stateBytes(), before);
 });
 
@@ -370,6 +370,6 @@ test("sidebar preparation supplies avatar paths without binary reads or opening 
   assert.ok(prepared.data.sections.some(section => section.kind === "card"));
   assert.equal(prepared.defaultAvatar, avatar);
   assert.equal(binaryReads, 0);
-  assert.equal(extensionReads.length, 1);
+  assert.equal(extensionReads.length, 0);
   assert.equal(prepared.data.sections.find(section => section.kind === "unbound").chats[0].id, "prepared-chat");
 });

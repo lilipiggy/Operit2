@@ -24,6 +24,29 @@ function fixture() {
   return { sandbox, registry, calls, run: code => vm.runInContext(code, sandbox) };
 }
 
+/** Exercises the actual generated full-list binding and preserves all supplied native summaries. */
+test('Chat.listAll explicitly requests complete records while listChats retains its limit', async () => {
+  const chats = Array.from({ length: 251 },
+    /** Supplies a distinct native summary for every persisted conversation in the fixture. */
+    (_, index) => ({ id: 'chat-' + index, title: 'Chat ' + index, messageCount: 0,
+      createdAt: '1700000000000', updatedAt: '1700000000000', isCurrent: false,
+      inputTokens: 0, outputTokens: 0 }),
+  );
+  for (const [expression, parameters, records] of [
+    ['Tools.Chat.listAll()', { list_all: 'true' }, chats],
+    ['Tools.Chat.listChats({limit:7})', { limit: 7 }, chats.slice(0, 7)],
+  ]) {
+    const f = fixture(), promise = f.run(expression);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].name, 'list_chats');
+    assert.deepEqual(structuredClone(f.calls[0].parameters), parameters);
+    const result = { totalCount: chats.length, currentChatId: null, chats: records };
+    f.registry.settle(f.calls[0].requestId, { success: true, data: result }, false);
+    assert.deepEqual(structuredClone(await promise), result);
+    assert.equal(f.sandbox.refs, 0);
+  }
+});
+
 /** Tests execution through toolCall, rather than merely finding its name in generated source. */
 test('all former Runtime operations invoke toolCall and the ordinary structured host once', async () => {
   const cases = [

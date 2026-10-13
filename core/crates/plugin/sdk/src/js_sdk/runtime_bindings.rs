@@ -82,7 +82,7 @@ pub const JS_TOOL_BINDINGS: &[JsToolBinding] = &[
     JsToolBinding { namespace: "Chat", method: "getMessages", target: BuiltinToolName::GetChatMessages, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "getMessagesRange", target: BuiltinToolName::GetChatMessagesRange, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "call", target: BuiltinToolName::CallChatModel, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
-    JsToolBinding { namespace: "Chat", method: "listAll", target: BuiltinToolName::ListChats, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
+    JsToolBinding { namespace: "Chat", method: "listAll", target: BuiltinToolName::ListChats, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[("list_all", "true")] },
     JsToolBinding { namespace: "Chat", method: "listChats", target: BuiltinToolName::ListChats, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "startService", target: BuiltinToolName::StartChatService, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },
     JsToolBinding { namespace: "Chat", method: "stopService", target: BuiltinToolName::StopChatService, strict_arguments: false, facade: JsToolFacade::Promise, fixed_parameters: &[] },

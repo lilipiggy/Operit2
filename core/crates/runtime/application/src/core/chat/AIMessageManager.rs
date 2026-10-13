@@ -184,15 +184,25 @@ pub fn logMessageTiming(stage: &str, startTimeMs: MessageTiming, details: Option
 }
 
 impl AIMessageManager {
-    /// Attaches a validated execution snapshot only to the newly generated message revision.
-    pub fn applyConfigurationSnapshot(
+    /// Persists a frozen plugin snapshot before attaching its generic reference to a new revision.
+    pub async fn applyConfigurationSnapshot(
         message: &mut ChatMessage,
         configuration: &ChatConfigurationResult,
+        handler: &operit_tools::tools::AIToolHandler::AIToolHandler,
     ) -> Result<(), String> {
         configuration.validate()?;
+        let api =
+            crate::services::ProviderRuntimeSupportService::ChatConfigurationApi::ready(handler)
+                .await?;
+        if api.extensionOwner() != configuration.extensionOwner {
+            return Err("Configuration snapshot owner changed".into());
+        }
+        let reference = api
+            .storeSnapshot(configuration.messageExtension.clone())
+            .await?;
         message.pluginExtensions.insert(
             configuration.extensionOwner.clone(),
-            serde_json::Value::Object(configuration.messageExtension.clone()),
+            serde_json::Value::Object(reference),
         );
         Ok(())
     }

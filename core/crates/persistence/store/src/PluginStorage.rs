@@ -157,6 +157,9 @@ fn validateStatement(
     query: bool,
     sync: bool,
 ) -> Result<(), SqliteStoreError> {
+    if query && statement.expected_affected_rows.is_some() {
+        return Err(failure("Affected-row preconditions require a mutation"));
+    }
     if statement.sql.len() > 1_000_000 || statement.params.len() > 32766 {
         return Err(failure("SQLite statement exceeds request limits"));
     }
@@ -730,6 +733,9 @@ fn executeStatements(
                 .map(sqlValue)
                 .collect::<Result<Vec<_>, _>>()?,
         )?;
+        if statement.expected_affected_rows.is_some_and(|expected| affected as u64 != expected) {
+            return Err(failure("SQLite statement affected-row precondition failed"));
+        }
         results.push(StorageSqlExecutionResult {
             affected_rows: affected as u64,
             last_insert_id: tx.lastInsertRowId()?.to_string(),

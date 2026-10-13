@@ -8,10 +8,10 @@ impl Operit1SnapshotImportManager {
         plan: &SnapshotFileImportPlan,
         archive: &OperitChatArchive,
     ) -> Result<(i32, i32), String> {
-        use crate::data::backup::CharacterPluginMigration::{
-            ownerMetadata, CharacterMigrationData, CharacterPluginWriter,
-        };
         use crate::data::backup::CharacterPluginLegacyData::SharedMemoryStore;
+        use crate::data::backup::CharacterPluginMigration::{
+            CharacterMigrationData, CharacterPluginWriter, ownerMetadata,
+        };
         let writer =
             CharacterPluginWriter::open(self.sqliteHost.clone(), self.storageHost.clone())?;
         let source = format!(
@@ -19,11 +19,17 @@ impl Operit1SnapshotImportManager {
             parsed.archive.manifest.packageName, parsed.archive.manifest.createdAt
         );
         let mut theme_preferences = operit_store::PreferencesDataStore::emptyPreferences();
-        let source_user_preferences = parsed.archive.datastorePreferences.get(ENTRY_USER_PREFERENCES)
+        let source_user_preferences = parsed
+            .archive
+            .datastorePreferences
+            .get(ENTRY_USER_PREFERENCES)
             .ok_or("Operit1 user preferences are missing for character themes")?;
         for (key, value) in source_user_preferences {
             let (key, value) = value.toTargetPreferenceEntry(key, plan)?;
-            theme_preferences.set(&operit_store::PreferencesDataStore::stringPreferencesKey(&key), value);
+            theme_preferences.set(
+                &operit_store::PreferencesDataStore::stringPreferencesKey(&key),
+                value,
+            );
         }
         let mut theme_targets = Vec::new();
         for (entry, list, collection) in [
@@ -40,13 +46,21 @@ impl Operit1SnapshotImportManager {
             writer.migrateThemes(&source, &theme_preferences, &theme_targets, false)?;
             return Ok((0, 0));
         }
-        let api_preferences = parsed.archive.datastorePreferences.get("payload/files/datastore/api_settings.preferences_pb");
+        let api_preferences = parsed
+            .archive
+            .datastorePreferences
+            .get("payload/files/datastore/api_settings.preferences_pb");
         let user_description_enabled = match api_preferences {
-            Some(preferences) => !optionalPreferenceBool(preferences, "disable_user_preference_description")?.unwrap_or(false),
+            Some(preferences) => {
+                !optionalPreferenceBool(preferences, "disable_user_preference_description")?
+                    .unwrap_or(false)
+            }
             None => true,
         };
         let auto_update_enabled = match api_preferences {
-            Some(preferences) => optionalPreferenceBool(preferences, "enable_memory_auto_update")?.unwrap_or(true),
+            Some(preferences) => {
+                optionalPreferenceBool(preferences, "enable_memory_auto_update")?.unwrap_or(true)
+            }
             None => true,
         };
         validateOperit1MemorySpaces(parsed)?;
@@ -62,7 +76,11 @@ impl Operit1SnapshotImportManager {
         };
         for card in &mut data.cards {
             if let Some(path) = &card.avatarUri {
-                if path.starts_with("runtime/") || path.starts_with("workspaces/") { card.avatarUri = Some(crate::data::backup::CharacterPluginMigration::publicResourcePath(path)?); }
+                if path.starts_with("runtime/") || path.starts_with("workspaces/") {
+                    card.avatarUri = Some(
+                        crate::data::backup::CharacterPluginMigration::publicResourcePath(path)?,
+                    );
+                }
             }
         }
         let profiles = buildOperit1MemorySpaces(parsed)?;
@@ -102,11 +120,15 @@ impl Operit1SnapshotImportManager {
                     .map_err(|error| error.to_string())?;
                 let (mut records, memories, links) = result?;
                 for (collection, _, envelope) in &mut records {
-                    if collection != "memories" { continue; }
+                    if collection != "memories" {
+                        continue;
+                    }
                     for field in ["documentPath", "chunkIndexFilePath"] {
                         if let Some(path) = envelope["record"][field].as_str() {
                             if path.starts_with("runtime/") || path.starts_with("workspaces/") {
-                                self.storageHost.readBytes(path).map_err(|error| error.to_string())?;
+                                self.storageHost
+                                    .readBytes(path)
+                                    .map_err(|error| error.to_string())?;
                                 envelope["record"][field] = serde_json::json!(crate::data::backup::CharacterPluginMigration::publicResourcePath(path)?);
                             }
                         }
@@ -157,14 +179,14 @@ impl Operit1SnapshotImportManager {
     }
 }
 
-/// Resolves the legacy archive's staged name bindings through the newly stored plugin records before Core import.
+/// Prepares plugin bindings and carries only draft references until Core imports each chat.
 fn resolveOperit1ArchiveBindings(
     archive: &mut OperitChatArchive,
     sqlite: Arc<dyn RuntimeSqliteHost>,
     storage: Arc<dyn RuntimeStorageHost>,
 ) -> Result<(), String> {
     use crate::data::backup::CharacterPluginMigration::{
-        resolveBinding, CharacterPluginWriter, LEGACY_BINDING_NAMESPACE, PLUGIN_ID,
+        CharacterPluginWriter, LEGACY_BINDING_NAMESPACE, PLUGIN_ID, resolveBinding,
     };
     let writer = CharacterPluginWriter::open(sqlite, storage)?;
     let cards = writer
@@ -182,10 +204,21 @@ fn resolveOperit1ArchiveBindings(
             .pluginExtensions
             .remove(LEGACY_BINDING_NAMESPACE)
             .ok_or("Operit1 archive is missing its staged character binding")?;
-        chat.pluginExtensions.insert(
-            PLUGIN_ID.to_string(),
+        writer.adoptRecord(
+            "chat_drafts",
+            &chat.id,
             resolveBinding(&cards, &groups, &old)?,
-        );
+        )?;
+        if chat
+            .pluginExtensions
+            .insert(
+                PLUGIN_ID.into(),
+                serde_json::json!({"recordId":chat.id,"schemaVersion":1}),
+            )
+            .is_some()
+        {
+            return Err("Operit1 archive already has a character namespace".into());
+        }
     }
     Ok(())
 }
@@ -201,8 +234,8 @@ fn readOperit1MemorySettings(
     ),
     String,
 > {
-    use crate::data::backup::CharacterPluginLegacyData::{MemoryScoreMode, MemorySearchConfig};
     use crate::data::backup::CharacterPluginLegacyData::MemorySettings;
+    use crate::data::backup::CharacterPluginLegacyData::{MemoryScoreMode, MemorySearchConfig};
     let mut settings =
         serde_json::to_value(MemorySettings::default()).map_err(|error| error.to_string())?;
     settings["profileAutoUpdateEnabled"] = serde_json::json!(profile.profileAutoUpdateEnabled);
@@ -240,26 +273,30 @@ fn readOperit1MemorySettings(
                 return Err("Duplicate Operit1 memory setting".to_string());
             }
             let value = match node.tag_name().name() {
-                "string" => serde_json::json!(node
-                    .children()
-                    .filter(|child| child.is_text())
-                    .map(|child| child.text().expect("text node"))
-                    .collect::<String>()),
-                "boolean" => serde_json::json!(node
-                    .attribute("value")
-                    .ok_or("Missing boolean setting")?
-                    .parse::<bool>()
-                    .map_err(|error| error.to_string())?),
-                "int" | "long" => serde_json::json!(node
-                    .attribute("value")
-                    .ok_or("Missing integer setting")?
-                    .parse::<i64>()
-                    .map_err(|error| error.to_string())?),
-                "float" => serde_json::json!(node
-                    .attribute("value")
-                    .ok_or("Missing float setting")?
-                    .parse::<f32>()
-                    .map_err(|error| error.to_string())?),
+                "string" => serde_json::json!(
+                    node.children()
+                        .filter(|child| child.is_text())
+                        .map(|child| child.text().expect("text node"))
+                        .collect::<String>()
+                ),
+                "boolean" => serde_json::json!(
+                    node.attribute("value")
+                        .ok_or("Missing boolean setting")?
+                        .parse::<bool>()
+                        .map_err(|error| error.to_string())?
+                ),
+                "int" | "long" => serde_json::json!(
+                    node.attribute("value")
+                        .ok_or("Missing integer setting")?
+                        .parse::<i64>()
+                        .map_err(|error| error.to_string())?
+                ),
+                "float" => serde_json::json!(
+                    node.attribute("value")
+                        .ok_or("Missing float setting")?
+                        .parse::<f32>()
+                        .map_err(|error| error.to_string())?
+                ),
                 _ => return Err("Unsupported Operit1 memory setting value".to_string()),
             };
             if cloud {

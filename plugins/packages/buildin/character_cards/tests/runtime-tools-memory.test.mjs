@@ -84,7 +84,7 @@ test("relationship CRUD preserves string identities, description and unspecified
 
 test("owner permissions and actual filesystem errors propagate without empty data or old tools", async t => {
   const environment = await environmentFor(t), shared = await environment.domain("memory.shared.create", { name: "Shared" });
-  const failure = new Error("original disk read failure"); environment.disk.failNext("storage.list", failure);
+  const failure = new Error("original disk read failure"); environment.disk.failNext("storage.query", failure);
   await assert.rejects(call(environment, "query_memory", { query: "*" }), error => error === failure);
   await assert.rejects(environment.tools.execute("create_memory", { target_owner_key: "shared:" + shared.id, title: "Denied", content: "Denied" }, { chatId: "real-chat", participantId: "default", callerName: null }), /Memory owner access denied/);
   await assert.rejects(call(environment, "create_memory", { title: "No owner", content: "content", target_owner_key: "character:removed" }), /does not identify exactly one record: removed/);
@@ -194,6 +194,6 @@ test("character list is a real plugin tool and propagates the main repository re
   assert.equal(result.totalCount, persisted.cards.length); assert.equal(result.cards[0].id, persisted.cards[0].id);
   assert.equal(result.cards[0].description, persisted.cards[0].description);
   await assert.rejects(tools.list_character_cards({ guessed_source: "old manager" }), /Unknown list_character_cards parameter/);
-  const failure = new Error("actual-list-file-rejection"); environment.disk.failNext("storage.list", failure);
+  const failure = new Error("actual-list-file-rejection"); environment.disk.failNext("storage.query", failure);
   await assert.rejects(tools.list_character_cards({}), error => error === failure);
 });

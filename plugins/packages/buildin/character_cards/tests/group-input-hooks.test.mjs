@@ -74,11 +74,15 @@ test("registered group input leaves unassociated, card, and native sequence inpu
   assert.equal(await runtime.submit({ eventName: "text_changed", eventPayload: {} }), null);
   assert.equal(await runtime.submit(event({ source: "Sequence" })), null);
   assert.equal(runtime.calls.length, 0); assert.equal(runtime.disk.calls.length, 0);
-  assert.equal(await runtime.submit(), null); assert.equal(runtime.disk.calls.length, 0);
-  runtime.records.get("selector-chat").extension = { version: 1, selection: "card:outside-group" };
-  assert.equal(await runtime.submit(), null); assert.equal(runtime.disk.calls.length, 0);
-  runtime.records.get("selector-chat").extension = { version: 99, selection: "group:invalid" };
-  await assert.rejects(runtime.submit(), /version/); assert.equal(runtime.disk.calls.length, 0);
+  assert.equal(await runtime.submit(), null);
+  await runtime.seedBinding("selector-chat", { version: 1, selection: "card:outside-group" });
+  runtime.disk.clearCalls();
+  assert.equal(await runtime.submit(), null);
+  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.transaction").length, 0);
+  await runtime.seedBinding("selector-chat", { version: 99, selection: "group:invalid" });
+  runtime.disk.clearCalls();
+  await assert.rejects(runtime.submit(), /version/);
+  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.transaction").length, 0);
 });
 
 /** Rejects missing runtime, contradictory attachments, empty input and failed namespace reads before any admission. */
@@ -87,7 +91,7 @@ test("registered group input validates the actual envelope and propagates namesp
   await assert.rejects(runtime.submit(event({ runtime: null })), /runtime slot/);
   await assert.rejects(runtime.submit(event({ attachmentCount: 1 })), /counts differ/);
   await assert.rejects(runtime.submit(event({ text: "" })), /actual text or attachments/);
-  runtime.failNext("readExtension", new Error("Exact namespace read failure"));
+  runtime.failNext("storage.query", new Error("Exact namespace read failure"));
   await assert.rejects(runtime.submit(), /Exact namespace read failure/);
   assert.equal(await runtime.groupExecution({ action: "current", chatId: "selector-chat" }), null);
   await assert.rejects(runtime.groupExecution({ action: "current", chatId: "selector-chat", submissionId: "extra" }), /unexpected/);
@@ -99,7 +103,7 @@ test("registered group input sends complete input once and ordered turns use rea
   const runtime = await environment(t), { first, second } = await bindGroup(runtime), calls = [], snapshots = new Map();
   const readExtension = runtime.tools.Chat.readExtension;
   /** Supplies exactly the controlled message snapshot written by the acknowledged native ABI call. */
-  runtime.tools.Chat.readExtension = async target => target.kind === "chat" ? readExtension(target) : snapshots.get(target.messageTimestamp);
+  runtime.tools.Chat.readExtension = async target => target.kind === "chat" ? readExtension(target) : { extension: snapshots.get(target.messageTimestamp) };
   /** Supplies one explicit planner response whose participant IDs come from genuine persisted records. */
   runtime.tools.Chat.call = async request => { calls.push({ planner: plain(request) }); return { text: JSON.stringify({ rounds: [[{ id: second.id, speak: true }, { id: first.id, speak: true }]] }) }; };
   /** Models only the acknowledged native send boundary and obtains its snapshot through the real registered configuration provider. */
@@ -107,9 +111,9 @@ test("registered group input sends complete input once and ordered turns use rea
     calls.push({ send: plain(request) });
     const participantId = request.kind === "submit" ? request.turn.participantId : request.participantId;
     const configuration = await runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: request.chatId,
-      chatExtension: runtime.records.get(request.chatId).extension, messageExtension: null, participantId, promptFunctionType: "CHAT",
+      chatExtension: null, messageExtension: null, participantId, promptFunctionType: "CHAT",
       defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
-    const timestamp = 20 + snapshots.size; snapshots.set(timestamp, plain(configuration.messageExtension));
+    const timestamp = 20 + snapshots.size; snapshots.set(timestamp, await runtime.api("chat.configuration.snapshot.store", configuration.messageExtension));
     return receipt(request, "completed", { messageTimestamp: timestamp, variantIndex: 0 });
   };
   const attachments = [{ filePath: "vfs://actual-input.txt", nodeId: "input-node", fileName: "actual-input.txt", mimeType: "text/plain", fileSize: 7, content: "payload" }];
@@ -127,7 +131,9 @@ test("registered group input sends complete input once and ordered turns use rea
   assert.equal(sends.length, 2); assert.deepEqual(sends[0].input, { text: "Actual group input", attachments, replyToMessageTimestamp: 9 });
   assert.equal(sends[0].turn.participantId, second.id); assert.equal(sends[0].notifyReply, false);
   assert.equal(sends[1].kind, "continue"); assert.equal(sends[1].participantId, first.id); assert.equal(sends[1].userMessageTimestamp, 10); assert.equal(sends[1].notifyReply, true);
-  assert.equal(snapshots.get(20).profile.id, second.id); assert.equal(snapshots.get(21).profile.id, first.id); assert.deepEqual(runtime.failures, []);
+  assert.equal((await runtime.api("chat.configuration.snapshot.read", snapshots.get(20))).profile.id, second.id);
+  assert.equal((await runtime.api("chat.configuration.snapshot.read", snapshots.get(21))).profile.id, first.id);
+  assert.deepEqual(runtime.failures, []);
 });
 
 /** Cancels during real planner suspension, keeps duplicate input intact and resumes only by an explicit UI action. */
@@ -168,7 +174,7 @@ test("registered group cancellation captures a live send and explicit resume nev
   const runtime = await environment(t), { first } = await bindGroup(runtime), pending = barrier(), started = barrier(), sends = [], cancels = [], snapshots = new Map();
   const readExtension = runtime.tools.Chat.readExtension;
   /** Reads only the actual controlled acknowledged message snapshots. */
-  runtime.tools.Chat.readExtension = async target => target.kind === "chat" ? readExtension(target) : snapshots.get(target.messageTimestamp);
+  runtime.tools.Chat.readExtension = async target => target.kind === "chat" ? readExtension(target) : { extension: snapshots.get(target.messageTimestamp) };
   /** Plans one exact persisted participant with no automatic alternate plan. */
   runtime.tools.Chat.call = async () => ({ text: JSON.stringify({ rounds: [[{ id: first.id, speak: true }]] }) });
   /** Holds the first native receipt and creates a genuine plugin snapshot for the explicit continuation. */
@@ -176,9 +182,10 @@ test("registered group cancellation captures a live send and explicit resume nev
     sends.push(plain(request));
     if (sends.length === 1) { started.resolve(); return pending.promise; }
     const config = await runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: request.chatId,
-      chatExtension: runtime.records.get(request.chatId).extension, messageExtension: null, participantId: request.participantId, promptFunctionType: "CHAT",
+      chatExtension: null, messageExtension: null, participantId: request.participantId, promptFunctionType: "CHAT",
       defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
-    snapshots.set(30, plain(config.messageExtension)); return receipt(request, "completed", { messageTimestamp: 30, variantIndex: 0 });
+    snapshots.set(30, await runtime.api("chat.configuration.snapshot.store", config.messageExtension));
+    return receipt(request, "completed", { messageTimestamp: 30, variantIndex: 0 });
   };
   /** Acknowledges only the authenticated owner/chat cancellation while its real transport attempt is live. */
   runtime.tools.Chat.cancel = async chatId => { cancels.push(chatId); pending.resolve(receipt(sends[0], "cancelled")); return { chatId, cancelRequested: true }; };

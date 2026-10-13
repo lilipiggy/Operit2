@@ -1,7 +1,7 @@
 import type { SnapshotRecord } from "./api";
 import { record } from "./domain";
 import { decodeSelection, encodeSelection, requireUiCaller } from "./ui-contributions";
-import { decodeChatMarker } from "./chat-markers";
+import { bindingsForChats } from "./chat-storage";
 import { requireChatSelection } from "./chat-bindings";
 import { getService } from "./service-runtime";
 
@@ -242,14 +242,8 @@ export async function readSidebarCatalog(value: CurrentSidebar): Promise<Sidebar
 }
 /** Reads authoritative extensions with bounded overlap, independently of the role directory query. */
 async function readSidebarSelections(chats: readonly SidebarChatSummary[]): Promise<SidebarChatSelection[]> {
-  const selections: SidebarChatSelection[] = [];
-  for (let offset = 0; offset < chats.length; offset += 8) {
-    selections.push(...await Promise.all(chats.slice(offset, offset + 8).map(async chat => {
-      const extension = (await Tools.Chat.readExtension({ kind: "chat", chatId: chat.id })).extension;
-      return { chatId: chat.id, selection: extension === null ? null : decodeChatMarker(extension).selection };
-    })));
-  }
-  return selections;
+  const bindings = await bindingsForChats(chats.map(chat => chat.id));
+  return chats.map(chat => ({ chatId: chat.id, selection: bindings.has(chat.id) ? bindings.get(chat.id)! : null }));
 }
 /** Registers the one actual sidebar catalog handler without reading native chats or opening the file repository. */
 export function registerSidebarChannel(): void {

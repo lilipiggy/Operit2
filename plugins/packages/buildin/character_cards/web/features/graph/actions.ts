@@ -1,10 +1,11 @@
 import type { EditorContext } from "../../bridge/context";
 import { dataValue } from "../../shared/dom";
+import { animateGraphCamera } from "./camera";
 import { graphData, graphViewport, selectedMemory } from "../graph/data";
 import { fitMemoryGraph, graphEntry, memoryGraphBounds, zoomMemoryGraph } from "../graph/layout";
 /** Binds graph actions operations to one editor context. */
 export function createGraphActionsFeature(context: EditorContext) {
-  const { topDialog, pushDialog, request, renderDialogs, updateGraphSurface } = context;
+  const { topDialog, pushDialog, request, renderDialogs, updateGraphSurface, dialogsRoot } = context;
 
 
   /** Opens a graph with data strictly scoped to the selected card's current binding. */
@@ -43,7 +44,8 @@ export function createGraphActionsFeature(context: EditorContext) {
         graph.selected = null; graph.selectedEdge = edge.id; updateGraphSurface(graph); return;
       }
 
-      case "select-memory": {
+      case "select-memory":
+      case "locate-memory": {
         const graph = topDialog("graph"); graph.selected = dataValue(element, "id"); graph.selectedEdge = null;
         if (graph.linkMode) {
           if (graph.linkSource === null) graph.linkSource = graph.selected;
@@ -57,10 +59,16 @@ export function createGraphActionsFeature(context: EditorContext) {
             pushDialog({ type: "link", ownerKey: graph.ownerKey, items: graphData(graph).items, draft: { sourceTitle: source.title, targetTitle: target.title, linkType: "related", weight: 1, description: "" } }); return;
           }
         }
-        const position = graphEntry(graph.positions, graph.selected), viewport = graphViewport(graph);
-        const scale = Math.max(1, graph.camera.scale);
-        graph.camera = { scale, x: viewport.width / 2 - position.x * scale, y: viewport.height / 2 - position.y * scale };
-        updateGraphSurface(graph); return;
+        updateGraphSurface(graph);
+        if (action === "locate-memory") {
+          const position = graphEntry(graph.positions, graph.selected), viewport = graphViewport(graph);
+          const scale = Math.max(1, graph.camera.scale);
+          animateGraphCamera(graph, { scale, x: viewport.width / 2 - position.x * scale, y: viewport.height / 2 - position.y * scale }, dialogsRoot,
+            /** Refreshes scale-dependent labels after navigation has settled. */
+            () => updateGraphSurface(graph),
+          );
+        }
+        return;
       }
 
       case "zoom-in":
@@ -72,7 +80,7 @@ export function createGraphActionsFeature(context: EditorContext) {
 
       case "export-graph": {
         const graph = topDialog("graph"), backup = await request({ action: "exportMemory", ownerKey: graph.ownerKey });
-        pushDialog({ type: "export", path: "", content: backup.content, typeName: "memory" }); return;
+        pushDialog({ type: "export", name: "memory-backup.json", content: backup.content, typeName: "memory" }); return;
       }
       case "import-graph": {
         const graph = topDialog("graph");
@@ -81,5 +89,5 @@ export function createGraphActionsFeature(context: EditorContext) {
       default: throw new Error(`Unknown graph/actions action: ${action}`);
     }
   }
-  return { names: ["owner-graph", "refresh-graph", "search-graph", "clear-search", "select-edge", "select-memory", "zoom-in", "zoom-out", "fit-graph", "export-graph", "import-graph"], handleAction, openGraph };
+  return { names: ["owner-graph", "refresh-graph", "search-graph", "clear-search", "select-edge", "select-memory", "locate-memory", "zoom-in", "zoom-out", "fit-graph", "export-graph", "import-graph"], handleAction, openGraph };
 }

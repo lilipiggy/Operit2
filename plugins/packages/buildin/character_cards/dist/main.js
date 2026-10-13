@@ -71,7 +71,12 @@ __export(main_exports, {
   chatConfigurationBindingDeleteApi: () => chatConfigurationBindingDeleteApi,
   chatConfigurationBindingReadApi: () => chatConfigurationBindingReadApi,
   chatConfigurationBindingWriteApi: () => chatConfigurationBindingWriteApi,
+  chatConfigurationDraftAbortApi: () => chatConfigurationDraftAbortApi,
+  chatConfigurationDraftCommitApi: () => chatConfigurationDraftCommitApi,
+  chatConfigurationDraftResolveApi: () => chatConfigurationDraftResolveApi,
   chatConfigurationResolveApi: () => chatConfigurationResolveApi,
+  chatConfigurationSnapshotReadApi: () => chatConfigurationSnapshotReadApi,
+  chatConfigurationSnapshotStoreApi: () => chatConfigurationSnapshotStoreApi,
   chatContextActionsApi: () => chatContextActionsApi,
   chatListSectionsApi: () => chatListSectionsApi,
   chatSidebarPrepareApi: () => chatSidebarPrepareApi,
@@ -248,7 +253,7 @@ function assertConversationGroup(value) {
   if (name !== value.name) throw new Error("Conversation group names must be stored in their trimmed form");
   assertBoolean(value.pinned, "conversation group pinned");
   assertStrings(value.chatIds, "conversation group chats");
-  for (const field of ["displayOrder", "createdAt", "updatedAt"]) assertInteger(value[field], field, 0);
+  for (const field2 of ["displayOrder", "createdAt", "updatedAt"]) assertInteger(value[field2], field2, 0);
   const chats = /* @__PURE__ */ new Set();
   for (const chatId of value.chatIds) {
     requireId(chatId, "conversation group chat id");
@@ -286,12 +291,12 @@ function assertConversationGroups(value) {
 function assertToolAccess(value) {
   assertObject(value, "\u5DE5\u5177\u8BBF\u95EE\u914D\u7F6E");
   assertBoolean(value.enabled, "\u5DE5\u5177\u8BBF\u95EE\u5F00\u5173");
-  for (const field of ["allowedBuiltinTools", "allowedPackages", "allowedSkills", "allowedMcpServers"]) assertStrings(value[field], field);
+  for (const field2 of ["allowedBuiltinTools", "allowedPackages", "allowedSkills", "allowedMcpServers"]) assertStrings(value[field2], field2);
 }
 function assertCard(value) {
   assertObject(value, "\u89D2\u8272\u5361");
-  for (const field of ["id", "name", "description", "characterSetting", "openingStatement", "otherContentChat", "otherContentVoice", "advancedCustomPrompt", "marks", "chatModelBindingMode", "memoryBindingMode"]) assertString(value[field], field);
-  for (const field of ["avatarUri", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"]) assertNullableString(value[field], field);
+  for (const field2 of ["id", "name", "description", "characterSetting", "openingStatement", "otherContentChat", "otherContentVoice", "advancedCustomPrompt", "marks", "chatModelBindingMode", "memoryBindingMode"]) assertString(value[field2], field2);
+  for (const field2 of ["avatarUri", "chatModelId", "ttsConfigId", "themeConfigId", "sharedMemoryId"]) assertNullableString(value[field2], field2);
   if (value.themeConfigId !== null) requireId(value.themeConfigId, "\u89D2\u8272\u4E3B\u9898\u914D\u7F6E");
   assertStrings(value.attachedTagIds, "\u89D2\u8272\u6807\u7B7E");
   assertBoolean(value.isDefault, "\u9ED8\u8BA4\u89D2\u8272\u6807\u8BC6");
@@ -308,7 +313,7 @@ function assertCard(value) {
 }
 function assertGroupValues(value) {
   assertObject(value, "\u89D2\u8272\u7FA4\u7EC4");
-  for (const field of ["id", "name", "description"]) assertString(value[field], field);
+  for (const field2 of ["id", "name", "description"]) assertString(value[field2], field2);
   assertNullableString(value.themeConfigId, "group.themeConfigId");
   if (value.themeConfigId !== null) requireId(value.themeConfigId, "\u7FA4\u7EC4\u4E3B\u9898\u914D\u7F6E");
   if (!Array.isArray(value.members)) throw new Error("\u7FA4\u7EC4\u6210\u5458\u5FC5\u987B\u662F\u6570\u7EC4");
@@ -328,7 +333,7 @@ function assertGroup(value) {
 }
 function assertTagValues(value) {
   assertObject(value, "\u6807\u7B7E");
-  for (const field of ["name", "description", "promptContent"]) assertString(value[field], field);
+  for (const field2 of ["name", "description", "promptContent"]) assertString(value[field2], field2);
   if (value.tagType !== "TONE" && value.tagType !== "CHARACTER" && value.tagType !== "FUNCTION" && value.tagType !== "CUSTOM") throw new Error("\u6807\u7B7E\u7C7B\u578B\u65E0\u6548");
 }
 function assertTag(value) {
@@ -341,7 +346,7 @@ function assertTag(value) {
 }
 function assertMemoryValues(value) {
   assertObject(value, "\u8BB0\u5FC6");
-  for (const field of ["title", "content", "contentType", "source"]) assertString(value[field], field);
+  for (const field2 of ["title", "content", "contentType", "source"]) assertString(value[field2], field2);
   assertNumber(value.credibility, "\u53EF\u4FE1\u5EA6", 0, 1);
   assertNumber(value.importance, "\u91CD\u8981\u6027", 0, 1);
   assertNullableString(value.folderPath, "\u8BB0\u5FC6\u6587\u4EF6\u5939");
@@ -351,12 +356,12 @@ function assertMemory(value) {
   assertObject(value, "\u8BB0\u5FC6\u8BB0\u5F55");
   requireDecimal(value.id, "\u8BB0\u5FC6\u6570\u636E\u5E93\u6807\u8BC6", true);
   requireId(value.uuid, "\u8BB0\u5FC6 UUID");
-  for (const field of ["title", "content", "contentType", "source"]) assertString(value[field], field);
+  for (const field2 of ["title", "content", "contentType", "source"]) assertString(value[field2], field2);
   assertNumber(value.credibility, "\u53EF\u4FE1\u5EA6", 0, 1);
   assertNumber(value.importance, "\u91CD\u8981\u6027", 0, 1);
-  for (const field of ["documentPath", "chunkIndexFilePath", "folderPath"]) assertNullableString(value[field], field);
+  for (const field2 of ["documentPath", "chunkIndexFilePath", "folderPath"]) assertNullableString(value[field2], field2);
   assertBoolean(value.isDocumentNode, "\u6587\u6863\u8282\u70B9\u6807\u8BC6");
-  for (const field of ["createdAt", "updatedAt", "lastAccessedAt"]) assertInteger(value[field], field, 0);
+  for (const field2 of ["createdAt", "updatedAt", "lastAccessedAt"]) assertInteger(value[field2], field2, 0);
   if (!Array.isArray(value.tags) || !Array.isArray(value.properties)) throw new Error("\u8BB0\u5FC6\u6807\u7B7E\u548C\u5C5E\u6027\u5FC5\u987B\u662F\u6570\u7EC4");
   for (const tag of value.tags) {
     assertObject(tag, "\u8BB0\u5FC6\u6807\u7B7E");
@@ -409,7 +414,7 @@ function assertSearchOptions(value) {
   assertString(value.query, "\u641C\u7D22\u6587\u672C");
   assertNullableString(value.folderPath, "\u641C\u7D22\u6587\u4EF6\u5939");
   assertNumber(value.relevanceThreshold, "\u641C\u7D22\u9608\u503C", 0, Number.MAX_VALUE);
-  for (const field of ["createdAtStartMs", "createdAtEndMs"]) if (value[field] !== null) assertInteger(value[field], field, 0);
+  for (const field2 of ["createdAtStartMs", "createdAtEndMs"]) if (value[field2] !== null) assertInteger(value[field2], field2, 0);
   if (typeof value.createdAtStartMs === "number" && typeof value.createdAtEndMs === "number" && value.createdAtStartMs > value.createdAtEndMs) throw new Error("\u641C\u7D22\u8D77\u59CB\u65F6\u95F4\u4E0D\u80FD\u665A\u4E8E\u7ED3\u675F\u65F6\u95F4");
 }
 function assertMemorySettings(value) {
@@ -417,13 +422,13 @@ function assertMemorySettings(value) {
   assertInteger(value.autoSaveIntervalMinutes, "\u81EA\u52A8\u4FDD\u5B58\u95F4\u9694", 1);
   if (value.autoSaveIntervalMinutes > 30) throw new Error("\u81EA\u52A8\u4FDD\u5B58\u95F4\u9694\u5FC5\u987B\u5728 1 \u5230 30 \u5206\u949F\u4E4B\u95F4");
   assertInteger(value.nextAutoSaveRunAtMs, "\u4E0B\u6B21\u81EA\u52A8\u4FDD\u5B58\u65F6\u95F4", 0);
-  for (const field of ["memoryExtractionCustomRules", "cloudEmbeddingEndpoint", "cloudEmbeddingApiKey", "cloudEmbeddingModel"]) assertString(value[field], field);
-  for (const field of ["profileAutoUpdateEnabled", "profileAutoUpdateLocked", "cloudEmbeddingEnabled"]) assertBoolean(value[field], field);
+  for (const field2 of ["memoryExtractionCustomRules", "cloudEmbeddingEndpoint", "cloudEmbeddingApiKey", "cloudEmbeddingModel"]) assertString(value[field2], field2);
+  for (const field2 of ["profileAutoUpdateEnabled", "profileAutoUpdateLocked", "cloudEmbeddingEnabled"]) assertBoolean(value[field2], field2);
 }
 function assertSearchConfig(value) {
   assertObject(value, "\u8BB0\u5FC6\u641C\u7D22\u8BBE\u7F6E");
   if (value.scoreMode !== "BALANCED" && value.scoreMode !== "KEYWORD_FIRST" && value.scoreMode !== "SEMANTIC_FIRST") throw new Error("\u8BB0\u5FC6\u8BC4\u5206\u6A21\u5F0F\u65E0\u6548");
-  for (const field of ["keywordWeight", "tagWeight", "vectorWeight", "edgeWeight"]) assertNumber(value[field], field, 0, Number.MAX_VALUE);
+  for (const field2 of ["keywordWeight", "tagWeight", "vectorWeight", "edgeWeight"]) assertNumber(value[field2], field2, 0, Number.MAX_VALUE);
 }
 function normalizeNames(values) {
   const result2 = [];
@@ -1062,61 +1067,1515 @@ function resolveChatExecution(request, service) {
 // src/memory-jobs/prompt-template.ts
 var extractionTemplate = '\u4F60\u8981\u4ECE\u5BF9\u8BDD\u4E2D\u6784\u5EFA\u957F\u671F\u8BB0\u5FC6\u56FE\u8C31\u3002\r\n\r\n$duplicatesPromptPart\r\n$existingMemoriesPrompt\r\n$existingFoldersPrompt\r\n\r\n\u3010\u5199\u5165\u524D\u5148\u8FC7\u7B5B\u3011\r\n- \u53EA\u8BB0\u5F55"\u7528\u6237\u7279\u5F02\u4E14\u53EF\u590D\u7528"\u7684\u4FE1\u606F\uFF1A\u7A33\u5B9A\u504F\u597D\u3001\u7EA6\u675F\u3001\u5DF2\u786E\u8BA4\u51B3\u7B56\u3001\u53CD\u590D\u9519\u8BEF\u3001\u9879\u76EE\u4E8B\u5B9E\u3001\u957F\u671F\u4E16\u754C\u89C2\u4E2D\u7684\u7A33\u5B9A\u8BBE\u5B9A\u3002\r\n- \u4E0D\u8BB0\u5F55\u5E38\u8BC6/\u516C\u5F00\u5B9A\u4E49\uFF08\u5982"TS\u662F\u4EC0\u4E48""Node\u662F\u4EC0\u4E48""\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u3002\r\n- \u4E0D\u8BB0\u5F55\u672A\u6765\u63A8\u6D4B\u9879\uFF1A\u4E0B\u4E00\u6B65\u5EFA\u8BAE\u3001TODO\u3001\u6682\u5B9A\u8BA1\u5212\u3002\r\n- \u82E5\u6CA1\u6709\u957F\u671F\u4EF7\u503C\u4FE1\u53F7\uFF0C\u76F4\u63A5\u8FD4\u56DE `{}`\u3002\r\n\r\n\u3010\u62BD\u53D6\u7B56\u7565\u3011\r\n- \u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\u53EA\u662F\u68C0\u7D22\u7EBF\u7D22\uFF0C\u4E0D\u662F\u4E8B\u5B9E\u8BC1\u636E\uFF1B\u53EA\u6709\u5BF9\u8BDD\u660E\u786E\u8BC1\u660E\u4E3B\u4F53\u548C\u4E8B\u5B9E\u76F8\u540C\u65F6\u624D\u53EF `update`\u3001`merge` \u6216\u8FDE\u8FB9\uFF0C\u5426\u5219\u5FFD\u7565\u8BE5\u5019\u9009\u3002\r\n- \u4F18\u5148 `update` / `merge`\uFF0C\u5176\u6B21\u624D\u662F `new`\u3002\r\n- `new` \u4EC5\u5728\u786E\u5B9E\u65B0\u589E\u6982\u5FF5\u65F6\u4F7F\u7528\uFF08\u6700\u591A 5 \u6761\uFF09\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u573A\u666F\u4E2D\uFF0C\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u70B9\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u53EF\u4EE5\u5165\u5E93\u3002\r\n- \u82E5\u6838\u5FC3\u662F"\u66F4\u65B0\u65E7\u6982\u5FF5"\uFF0C`main` \u5FC5\u987B\u4E3A `null`\uFF0C\u53EA\u7528 `update`\u3002\r\n- \u5982\u679C\u53EA\u662F\u5BF9\u5DF2\u6709\u8BB0\u5FC6\u7684\u6539\u5199\uFF08\u540C\u4E3B\u4F53 + \u540C\u52A8\u4F5C + \u540C\u7ED3\u679C\uFF09\uFF0C\u6309\u91CD\u590D\u5904\u7406\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981\u518D `new`\u3002\r\n- \u5982\u679C `main` \u4E0E\u5DF2\u6709\u8BB0\u5FC6\u5728\u8BED\u4E49\u4E0A\u662F\u540C\u4E00\u4E8B\u4EF6\uFF0C`main` \u8BBE\u4E3A `null`\uFF0C\u6539\u7528 `update` \u6216 `merge`\u3002\r\n- \u5982\u679C\u5F53\u524D\u8F6E\u7684\u5927\u90E8\u5206\u4E8B\u5B9E\u5DF2\u88AB\u5DF2\u6709\u8BB0\u5FC6\u8986\u76D6\uFF0C\u4E0D\u8981\u518D\u521B\u5EFA\u5E73\u884C `new`\uFF0C\u4F18\u5148\u7ED9\u51FA\u4E00\u6B21 `update` \u6216\u4E00\u6B21 `merge`\u3002\r\n- \u5728\u6709\u660E\u786E\u91CD\u590D\u8BC1\u636E\u65F6\u7EE7\u7EED `new` \u89C6\u4E3A\u4E0D\u5408\u683C\u8F93\u51FA\u3002\r\n- \u63D0\u4F9B\u7ED9\u4F60\u7684\u5DF2\u6709\u8BB0\u5FC6\u6837\u672C\u662F\u53EF\u64CD\u4F5C\u5BF9\u8C61\uFF1A\u5373\u4F7F\u672C\u8F6E\u6CA1\u6709 `new`\uFF0C\u4E5F\u53EF\u4EE5\u76F4\u63A5\u5BF9\u8FD9\u4E9B\u5DF2\u6709\u8BB0\u5FC6\u505A `update`\u3001`merge`\u3001`links`\u3002\r\n\r\n\u3010\u8BED\u6C14\u7B56\u7565\u3011\r\n- \u8BED\u6C14\u53EF\u6839\u636E\u573A\u666F\u53D8\u5316\uFF08\u6280\u672F\u3001\u65E5\u5E38\u804A\u5929\u3001\u5C0F\u8BF4\u521B\u4F5C\uFF09\uFF0C\u4F46\u53EA\u80FD\u6539\u53D8\u8868\u8FBE\u65B9\u5F0F\uFF0C\u4E0D\u80FD\u6539\u53D8\u5165\u5E93\u6807\u51C6\u3002\r\n- \u7ED3\u6784\u548C\u4E8B\u5B9E\u5FC5\u987B\u7A33\u5B9A\uFF1A\u8BED\u6C14\u53D8\u5316\u4E0D\u7B49\u4E8E\u653E\u5BBD\u7B5B\u9009\u3002\r\n- \u4E0D\u80FD\u56E0\u4E3A\u8BED\u6C14\u81EA\u7136\u5316\u5C31\u8BB0\u5F55\u5E38\u8BC6\u6216\u672A\u6765\u8BA1\u5212\u3002\r\n- \u6807\u9898\u4FDD\u6301\u7B80\u6D01\u5E76\u805A\u7126\u4E8B\u4EF6\uFF0C\u5185\u5BB9\u5728\u53EF\u8BFB\u7684\u524D\u63D0\u4E0B\u8D34\u5408\u573A\u666F\u8BED\u6C14\u3002\r\n\r\n\u3010\u6807\u9898\u4E0E\u5185\u5BB9\u5199\u6CD5\u3011\r\n- `main` \u6807\u9898\u4F18\u5148\u5199\u4E8B\u4EF6\uFF0C\u4E0D\u5199\u5B9A\u4E49\u3002\r\n- \u63A8\u8350\u6807\u9898\u6A21\u677F\uFF1A\r\n  - \u4E8B\u4EF6\uFF1A`[\u9886\u57DF] \u4E8B\u4EF6\uFF1A\u52A8\u4F5C + \u7ED3\u679C`\r\n  - \u4E16\u754C\u89C2\u5B9E\u4F53\uFF1A`\u5B9E\u4F53\uFF1A\u540D\u79F0\uFF08\u8EAB\u4EFD/\u7C7B\u578B\uFF09`\r\n- \u4E0D\u63A8\u8350\u6807\u9898\uFF1A`X\u662F\u4EC0\u4E48`\u3001`X\u7684\u5B9A\u4E49`\u3001\u767E\u79D1\u5F0F\u6CDB\u6807\u9898\u3002\r\n- \u5185\u5BB9\u53EA\u5199"\u5DF2\u53D1\u751F\u4E8B\u5B9E + \u5F53\u524D\u5DF2\u786E\u8BA4\u72B6\u6001"\u3002\r\n- \u5185\u5BB9\u7981\u6B62\u5199\u672A\u6765\u52A8\u4F5C\u3001TODO\u3001\u63A8\u6D4B\u6027\u8BA1\u5212\u3002\r\n$memoryExtractionCustomRulesInstruction\r\n\r\n\u3010\u8FDE\u63A5\u5173\u7CFB\u89C4\u5219\u3011\r\n- \u53EA\u6709\u5F53\u5BF9\u8BDD\u91CC\u6709\u660E\u786E\u8BC1\u636E\u65F6\u624D\u5EFA\u8FB9\u3002\r\n- \u63A8\u8350\u5173\u7CFB\u7C7B\u578B\uFF1A\r\n  - \u4E8B\u4EF6\u6D41\u7A0B\uFF1A`FOLLOWS`\u3001`CORRECTS`\u3001`UPDATES`\r\n  - \u53C2\u4E0E\u4E0E\u4E0A\u4E0B\u6587\uFF1A`INVOLVES`\u3001`HAPPENS_AT`\r\n  - \u4E16\u754C\u89C2\u7ED3\u6784\uFF1A`PART_OF`\u3001`ALLIED_WITH`\u3001`OPPOSES`\r\n- \u4E0D\u80FD\u4EC5\u51ED"\u540C\u6BB5\u63D0\u5230\u8FC7"\u5C31\u8FDE\u8FB9\u3002\r\n- \u62FF\u4E0D\u51C6\u5C31\u4E0D\u8FDE\u3002\r\n- \u5EFA\u8FB9\u8303\u56F4\u4E0D\u5E94\u53EA\u9650\u4E8E\u672C\u8F6E\u65B0\u8F93\u51FA\uFF1B\u5982\u679C"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u4E0E\u672C\u8F6E\u4E8B\u4EF6/\u5B9E\u4F53\u5173\u7CFB\u660E\u786E\uFF0C\u4E5F\u5E94\u4E3B\u52A8\u5EFA\u8FB9\u3002\r\n- \u8F93\u51FA\u524D\u8BF7\u5728\u5168\u91CF\u5BF9\u8C61\u4E0A\u505A\u4E24\u4E24\u5173\u7CFB\u68C0\u67E5\uFF1A`main`\u3001`new`\u3001`update` \u76EE\u6807\u3001\u4EE5\u53CA\u63D0\u4F9B\u7684\u5DF2\u6709\u8BB0\u5FC6\uFF1B\u51E1\u6709\u660E\u786E\u8BC1\u636E\u90FD\u5E94\u5EFA\u8FB9\u3002\r\n\r\n\u3010\u793A\u4F8B\uFF08\u5FC5\u987B\u9075\u5FAA\uFF09\u3011\r\n- \u4EC5\u5728\u95EE\u7B54\u5E38\u8BC6\uFF08\u5982"\u78C1\u504F\u89D2\u662F\u4EC0\u4E48"\uFF09\u4E14\u65E0\u7528\u6237\u7279\u5F02\u4FE1\u53F7\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA TS/Node \u7B49\u516C\u5F00\u5B9A\u4E49\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u95F2\u804A\u4F46\u6709\u5B9E\u9645\u4EA4\u6D41\u5185\u5BB9\uFF1A\u538B\u7F29\u6210\u4E00\u6761\u4E8B\u4EF6\u578B `main` \u8BB0\u5F55\uFF0C\u4E0D\u62C6\u6280\u672F\u7EC6\u8282\u3002\r\n- \u53EA\u6709\u7A7A\u6CDB\u5BD2\u6684\uFF08\u5982\u4EC5"\u4F60\u597D/\u5728\u5417"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u672C\u8F6E\u51FA\u73B0"\u7528\u6237\u72AF\u9519\u5E76\u88AB\u7EA0\u6B63"\uFF1A\u4F5C\u4E3A\u4E8B\u4EF6\u5199\u5165 `main`\u3002\r\n- \u957F\u671F\u5C0F\u8BF4/\u4E16\u754C\u89C2\u8BA8\u8BBA\uFF1A\u53CD\u590D\u51FA\u73B0\u4E14\u5F71\u54CD\u8FDE\u7EED\u6027\u7684\u89D2\u8272\u3001\u5730\u540D\u3001\u7EC4\u7EC7\u3001\u89C4\u5219\u3001\u65F6\u95F4\u7EBF\u5E94\u5165\u5E93\uFF0C\u6309\u9700\u4F7F\u7528 `new`/`links`\u3002\r\n- \u4EC5\u89E3\u91CA\u533B\u7597\u5B9A\u4E49\uFF08\u5982"\u6D41\u611F\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4EC5\u89E3\u91CA\u91D1\u878D\u5B9A\u4E49\uFF08\u5982"ETF\u662F\u4EC0\u4E48"\uFF09\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u9879\u76EE\u672C\u8F6E\u6709\u660E\u786E\u8FDB\u5C55\uFF08\u4FEE\u590D\u5B8C\u6210/\u6458\u8981\u5B8C\u6210/\u4EFB\u52A1\u7EC8\u6B62\uFF09\uFF1A\u5199\u4E00\u6761\u4E8B\u4EF6\u578B `main`\u3002\r\n- \u53CD\u590D\u89E3\u91CA\u4F46\u6CA1\u6709\u65B0\u8FDB\u5C55/\u65B0\u51B3\u7B56\uFF1A\u8FD4\u56DE `{}`\u3002\r\n- \u4E16\u754C\u89C2\u8BBE\u5B9A\u53D1\u751F\u53D8\u5316\uFF08\u5173\u7CFB/\u5F52\u5C5E\u53D8\u66F4\uFF09\uFF1A\u4F18\u5148 `update`\uFF0C\u5E76\u5728\u8BC1\u636E\u660E\u786E\u65F6\u8FDE `UPDATES` / `PART_OF`\u3002\r\n- \u672C\u8F6E\u53EA\u662F\u91CD\u8FF0\u5DF2\u5B58\u5728\u4E8B\u4EF6\uFF1A\u4F18\u5148 `update`/`merge`\uFF0C\u4E0D\u8981 `new`\u3002\r\n- \u4E8B\u4EF6\u91CC\u660E\u786E\u51FA\u73B0\u53C2\u4E0E\u8005/\u5DE5\u5177\u5305\u4E14\u5173\u7CFB\u6E05\u6670\uFF1A\u8865\u5145 `INVOLVES` \u94FE\u63A5\u3002\r\n- \u672C\u8F6E\u786E\u8BA4\u4E86"\u5DF2\u6709\u6837\u672C\u8BB0\u5FC6"\u548C\u5176\u4ED6\u8BB0\u5FC6\u7684\u660E\u786E\u5173\u7CFB\uFF1A\u5373\u4F7F\u6CA1\u6709 `new`\uFF0C\u4E5F\u5E94\u5728 `links` \u4E2D\u4F53\u73B0\u3002\r\n\r\n\u3010\u8F93\u51FA\u683C\u5F0F\uFF08\u4E25\u683CJSON\uFF09\u3011\r\n- \u9664\u8FD4\u56DE `{}` \u5916\uFF0C\u5FC5\u987B\u5305\u542B `main`\u3001`new`\u3001`update`\u3001`merge`\u3001`links`$profileOptionalKey\uFF1B\u6570\u7EC4\u4E2D\u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u5177\u540D\u5BF9\u8C61\uFF0C\u7981\u6B62\u4F4D\u7F6E\u6570\u7EC4\u3002\r\n- `main`\uFF1A`null` \u6216 `{"title":"...","content":"...","tags":["..."],"folder_path":"..."}`\u3002\r\n- `new`\uFF1A`[{"title":"...","content":"...","tags":["..."],"folder_path":"...","alias_for":null}, ...]`\u3002\r\n- `update`\uFF1A`[{"title":"...","content":"\u65B0\u5B8C\u6574\u5185\u5BB9","reason":"...","credibility":null,"importance":null}, ...]`\u3002\r\n- `merge`\uFF1A`[{"source_titles":["A","B"],"title":"...","content":"...","tags":["..."],"folder_path":"...","reason":"..."}, ...]`\u3002\r\n- `links`\uFF1A`[{"source":"...","target":"...","type":"\u5927\u5199\u4E0B\u5212\u7EBF\u5173\u7CFB","description":"...","weight":0.0}, ...]`\u3002\r\n- \u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u3001\u6743\u91CD\u5FC5\u987B\u662F 0.0 \u5230 1.0 \u7684 JSON \u6570\u5B57\uFF1B\u53EF\u4FE1\u5EA6\u3001\u91CD\u8981\u6027\u548C `alias_for` \u53EF\u7528 JSON `null`\u3002\r\n$profileMarkdownSchemaLine\r\n\r\n$profileUpdateInstruction\r\n\r\n\u53EA\u8FD4\u56DE\u5408\u6CD5 JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u5185\u5BB9\u3002\r\n';
 
-// src/chat-extensions.ts
-function readChatExtensionBinding(chatId) {
+// src/storage/schema.json
+var collections = {
+  cards: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      characterSetting: {
+        kind: "text"
+      },
+      openingStatement: {
+        kind: "text"
+      },
+      otherContentChat: {
+        kind: "text"
+      },
+      otherContentVoice: {
+        kind: "text"
+      },
+      avatarUri: {
+        kind: "text",
+        nullable: true
+      },
+      attachedTagIds: {
+        kind: "array",
+        item: {
+          kind: "text"
+        }
+      },
+      advancedCustomPrompt: {
+        kind: "text"
+      },
+      marks: {
+        kind: "text"
+      },
+      chatModelBindingMode: {
+        kind: "text"
+      },
+      chatModelId: {
+        kind: "text",
+        nullable: true
+      },
+      ttsConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      themeConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      memoryBindingMode: {
+        kind: "text"
+      },
+      sharedMemoryId: {
+        kind: "text",
+        nullable: true
+      },
+      sharedMemoryMounts: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            sharedMemoryId: {
+              kind: "text"
+            },
+            readable: {
+              kind: "boolean"
+            },
+            writable: {
+              kind: "boolean"
+            }
+          }
+        }
+      },
+      toolAccessConfig: {
+        kind: "object",
+        fields: {
+          enabled: {
+            kind: "boolean"
+          },
+          allowedBuiltinTools: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedPackages: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedSkills: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedMcpServers: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          }
+        }
+      },
+      isDefault: {
+        kind: "boolean"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  groups: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      members: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            characterCardId: {
+              kind: "text"
+            },
+            orderIndex: {
+              kind: "integer"
+            }
+          }
+        }
+      },
+      themeConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  tags: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      promptContent: {
+        kind: "text"
+      },
+      tagType: {
+        kind: "text"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  stores: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  conversationGroups: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      ownerSelection: {
+        kind: "text",
+        nullable: true
+      },
+      name: {
+        kind: "text"
+      },
+      chatIds: {
+        kind: "array",
+        item: {
+          kind: "text"
+        }
+      },
+      displayOrder: {
+        kind: "integer"
+      },
+      pinned: {
+        kind: "boolean"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  owners: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      settings: {
+        kind: "object",
+        fields: {
+          autoSaveIntervalMinutes: {
+            kind: "integer"
+          },
+          nextAutoSaveRunAtMs: {
+            kind: "integer"
+          },
+          memoryExtractionCustomRules: {
+            kind: "text"
+          },
+          profileAutoUpdateEnabled: {
+            kind: "boolean"
+          },
+          profileAutoUpdateLocked: {
+            kind: "boolean"
+          },
+          cloudEmbeddingEnabled: {
+            kind: "boolean"
+          },
+          cloudEmbeddingEndpoint: {
+            kind: "text"
+          },
+          cloudEmbeddingApiKey: {
+            kind: "text"
+          },
+          cloudEmbeddingModel: {
+            kind: "text"
+          }
+        }
+      },
+      searchConfig: {
+        kind: "object",
+        fields: {
+          scoreMode: {
+            kind: "text"
+          },
+          keywordWeight: {
+            kind: "number"
+          },
+          tagWeight: {
+            kind: "number"
+          },
+          vectorWeight: {
+            kind: "number"
+          },
+          edgeWeight: {
+            kind: "number"
+          }
+        }
+      },
+      userDocumentPath: {
+        kind: "text"
+      },
+      rebuildProgress: {
+        kind: "object",
+        fields: {
+          status: {
+            kind: "text"
+          },
+          totalChats: {
+            kind: "integer"
+          },
+          completedChats: {
+            kind: "integer"
+          },
+          totalWindows: {
+            kind: "integer"
+          },
+          completedWindows: {
+            kind: "integer"
+          },
+          totalSourceMessages: {
+            kind: "integer"
+          },
+          processedSourceMessages: {
+            kind: "integer"
+          },
+          failedWindows: {
+            kind: "integer"
+          },
+          currentChatTitle: {
+            kind: "text"
+          },
+          lastError: {
+            kind: "text"
+          }
+        }
+      },
+      rebuildTask: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          windows: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                chatId: {
+                  kind: "text"
+                },
+                chatTitle: {
+                  kind: "text"
+                },
+                messages: {
+                  kind: "array",
+                  item: {
+                    kind: "object",
+                    fields: {
+                      sender: {
+                        kind: "text"
+                      },
+                      content: {
+                        kind: "text"
+                      },
+                      timestamp: {
+                        kind: "integer"
+                      },
+                      variantIndex: {
+                        kind: "integer"
+                      },
+                      variantCount: {
+                        kind: "integer"
+                      },
+                      provider: {
+                        kind: "text"
+                      },
+                      modelName: {
+                        kind: "text"
+                      }
+                    }
+                  }
+                },
+                sourceMessageCount: {
+                  kind: "integer"
+                }
+              }
+            }
+          },
+          nextWindow: {
+            kind: "integer"
+          }
+        },
+        nullable: true
+      }
+    }
+  },
+  memories: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          uuid: {
+            kind: "text"
+          },
+          title: {
+            kind: "text"
+          },
+          content: {
+            kind: "text"
+          },
+          contentType: {
+            kind: "text"
+          },
+          source: {
+            kind: "text"
+          },
+          credibility: {
+            kind: "number"
+          },
+          importance: {
+            kind: "number"
+          },
+          documentPath: {
+            kind: "text",
+            nullable: true
+          },
+          isDocumentNode: {
+            kind: "boolean"
+          },
+          chunkIndexFilePath: {
+            kind: "text",
+            nullable: true
+          },
+          folderPath: {
+            kind: "text",
+            nullable: true
+          },
+          createdAt: {
+            kind: "integer"
+          },
+          updatedAt: {
+            kind: "integer"
+          },
+          lastAccessedAt: {
+            kind: "integer"
+          },
+          tags: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                id: {
+                  kind: "text"
+                },
+                name: {
+                  kind: "text"
+                }
+              }
+            }
+          },
+          properties: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                id: {
+                  kind: "text"
+                },
+                key: {
+                  kind: "text"
+                },
+                value: {
+                  kind: "text"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  links: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          sourceMemoryId: {
+            kind: "text"
+          },
+          targetMemoryId: {
+            kind: "text"
+          },
+          type_: {
+            kind: "text"
+          },
+          weight: {
+            kind: "number"
+          },
+          description: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  chunks: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          memoryUuid: {
+            kind: "text"
+          },
+          chunkIndex: {
+            kind: "integer"
+          },
+          content: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  candidates: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          chatId: {
+            kind: "text"
+          },
+          triggerMessageTimestamp: {
+            kind: "integer"
+          },
+          triggerVariantIndex: {
+            kind: "integer"
+          },
+          createdAt: {
+            kind: "integer"
+          },
+          updatedAt: {
+            kind: "integer"
+          },
+          status: {
+            kind: "text"
+          },
+          attemptCount: {
+            kind: "integer"
+          },
+          lastError: {
+            kind: "text"
+          },
+          sourceType: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  embeddings: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          endpoint: {
+            kind: "text"
+          },
+          model: {
+            kind: "text"
+          },
+          text: {
+            kind: "text"
+          },
+          vector: {
+            kind: "vector"
+          },
+          updatedAt: {
+            kind: "integer"
+          }
+        }
+      }
+    }
+  },
+  meta: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      nextId: {
+        kind: "text"
+      },
+      active: {
+        kind: "object",
+        nullable: true,
+        fields: {
+          CharacterCard: {
+            kind: "object",
+            optional: true,
+            fields: {
+              id: {
+                kind: "text"
+              }
+            }
+          },
+          CharacterGroup: {
+            kind: "object",
+            optional: true,
+            fields: {
+              id: {
+                kind: "text"
+              }
+            }
+          }
+        }
+      },
+      memoryPreferences: {
+        kind: "object",
+        fields: {
+          userDescriptionEnabled: {
+            kind: "boolean"
+          },
+          autoUpdateEnabled: {
+            kind: "boolean"
+          }
+        },
+        optional: true
+      },
+      migrationStatus: {
+        kind: "text",
+        optional: true
+      },
+      migrationSource: {
+        kind: "text",
+        optional: true
+      }
+    }
+  },
+  chat_bindings: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      }
+    }
+  },
+  chat_drafts: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      }
+    }
+  },
+  message_snapshots: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      },
+      promptFunctionType: {
+        kind: "text"
+      },
+      primaryOwnerKey: {
+        kind: "text"
+      },
+      profile: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          name: {
+            kind: "text"
+          },
+          avatarUri: {
+            kind: "text",
+            nullable: true
+          },
+          introPrompt: {
+            kind: "text"
+          },
+          userPreferencesText: {
+            kind: "text"
+          },
+          openingStatement: {
+            kind: "text"
+          },
+          modelBinding: {
+            kind: "object",
+            fields: {
+              providerId: {
+                kind: "text"
+              },
+              modelId: {
+                kind: "text"
+              }
+            }
+          },
+          ttsConfigId: {
+            kind: "text"
+          },
+          toolAccess: {
+            kind: "object",
+            fields: {
+              enabled: {
+                kind: "boolean"
+              },
+              allowedBuiltinTools: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedPackages: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedSkills: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedMcpServers: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              }
+            }
+          },
+          resources: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                key: {
+                  kind: "text"
+                },
+                readable: {
+                  kind: "boolean"
+                },
+                writable: {
+                  kind: "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      participants: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            id: {
+              kind: "text"
+            },
+            name: {
+              kind: "text"
+            },
+            avatarUri: {
+              kind: "text",
+              nullable: true
+            },
+            introPrompt: {
+              kind: "text"
+            },
+            userPreferencesText: {
+              kind: "text"
+            },
+            openingStatement: {
+              kind: "text"
+            },
+            modelBinding: {
+              kind: "object",
+              fields: {
+                providerId: {
+                  kind: "text"
+                },
+                modelId: {
+                  kind: "text"
+                }
+              }
+            },
+            ttsConfigId: {
+              kind: "text"
+            },
+            toolAccess: {
+              kind: "object",
+              fields: {
+                enabled: {
+                  kind: "boolean"
+                },
+                allowedBuiltinTools: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedPackages: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedSkills: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedMcpServers: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                }
+              }
+            },
+            resources: {
+              kind: "array",
+              item: {
+                kind: "object",
+                fields: {
+                  key: {
+                    kind: "text"
+                  },
+                  readable: {
+                    kind: "boolean"
+                  },
+                  writable: {
+                    kind: "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
+// src/storage/relational.ts
+var schemas = collections;
+function quote(name) {
+  if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(name))
+    throw new Error("Invalid relational identifier: " + name);
+  return '"' + name + '"';
+}
+function field(path) {
+  return path === "" ? "_value" : path;
+}
+function layout(name, node, child = false) {
+  const columns = [
+    { name: "_key", affinity: "text", nullable: false },
+    { name: "_revision", affinity: "text", nullable: false }
+  ];
+  if (child)
+    columns.push(
+      { name: "_root", affinity: "text", nullable: false },
+      { name: "_parent", affinity: "text", nullable: false },
+      { name: "_position", affinity: "integer", nullable: false },
+      { name: "_map_key", affinity: "text", nullable: true }
+    );
+  const children = [];
+  function visit(schema, path, absent) {
+    if (schema.optional || schema.nullable)
+      columns.push({
+        name: field(path) + "__state",
+        affinity: "integer",
+        nullable: absent
+      });
+    const nullable2 = absent || schema.optional === true || schema.nullable === true;
+    if (schema.kind === "object") {
+      for (const [key, value] of Object.entries(schema.fields).sort(
+        ([left], [right]) => left < right ? -1 : left > right ? 1 : 0
+      ))
+        visit(value, path === "" ? key : path + "__" + key, nullable2);
+    } else if (schema.kind === "array" || schema.kind === "map") {
+      columns.push({
+        name: field(path) + "__count",
+        affinity: "integer",
+        nullable: nullable2
+      });
+      children.push(layout(name + "_" + field(path), schema.item, true));
+    } else
+      columns.push({
+        name: field(path),
+        affinity: schema.kind === "text" ? "text" : schema.kind === "vector" ? "blob" : schema.kind === "boolean" || schema.kind === "integer" ? "integer" : "real",
+        nullable: nullable2
+      });
+  }
+  visit(node, "", false);
+  return { name, node, table: { name, primaryKey: "_key", columns }, children };
+}
+var layouts = Object.fromEntries(
+  Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
+);
+function tables(root) {
+  return [root, ...root.children.flatMap(tables)];
+}
+function childKey(parent, index) {
+  return parent.length + ":" + parent + ":" + index;
+}
+function vector(value) {
+  if (!Array.isArray(value))
+    throw new Error("Embedding vector must be an array");
+  const bytes = new Uint8Array(value.length * 8), view = new DataView(bytes.buffer);
+  value.forEach((item, index) => {
+    if (typeof item !== "number" || !Number.isFinite(item))
+      throw new Error("Invalid embedding component");
+    view.setFloat64(index * 8, item, true);
+  });
+  return bytes;
+}
+function encode(collection, key, value, revision) {
+  const root = layouts[collection];
+  if (root === void 0)
+    throw new Error("Unknown relational collection: " + collection);
+  const rows = new Map(tables(root).map((table) => [table.name, []]));
+  function record2(current, identity3, input, extra) {
+    const row = { _key: identity3, _revision: revision, ...extra };
+    function visit(node, path, item, absent = false) {
+      const column = field(path);
+      if (node.optional || node.nullable)
+        row[column + "__state"] = item === void 0 ? 0 : item === null ? 1 : 2;
+      if (item === void 0 && !node.optional && !absent)
+        throw new Error(collection + "/" + key + " missing " + path);
+      if (item === null && !node.nullable && !absent)
+        throw new Error(collection + "/" + key + " null " + path);
+      const empty2 = absent || item === void 0 || item === null;
+      if (node.kind === "object") {
+        if (!empty2 && (typeof item !== "object" || Array.isArray(item)))
+          throw new Error("Expected object: " + path);
+        if (!empty2) {
+          for (const name of Object.keys(item))
+            if (!Object.prototype.hasOwnProperty.call(node.fields, name))
+              throw new Error("Undeclared stored field: " + path + "." + name);
+        }
+        for (const [name, schema] of Object.entries(node.fields))
+          visit(
+            schema,
+            path === "" ? name : path + "__" + name,
+            empty2 ? void 0 : item[name],
+            empty2
+          );
+      } else if (node.kind === "array" || node.kind === "map") {
+        if (empty2) {
+          row[column + "__count"] = null;
+          return;
+        }
+        if (node.kind === "array" && !Array.isArray(item))
+          throw new Error("Expected array: " + path);
+        if (node.kind === "map" && (typeof item !== "object" || Array.isArray(item)))
+          throw new Error("Expected map: " + path);
+        const child = current.children.find(
+          (table) => table.name === current.name + "_" + column
+        );
+        const items = node.kind === "array" ? item.map(
+          (entry, index) => [null, entry]
+        ) : Object.entries(item);
+        row[column + "__count"] = items.length;
+        items.forEach(
+          ([mapKey, entry], index) => record2(child, childKey(identity3, index), entry, {
+            _root: key,
+            _parent: identity3,
+            _position: index,
+            _map_key: mapKey
+          })
+        );
+      } else if (empty2) row[column] = null;
+      else if (node.kind === "vector") row[column] = vector(item);
+      else if (node.kind === "boolean") {
+        if (typeof item !== "boolean")
+          throw new Error("Expected boolean: " + path);
+        row[column] = item ? 1 : 0;
+      } else if (node.kind === "text") {
+        if (typeof item !== "string") throw new Error("Expected text: " + path);
+        row[column] = item;
+      } else {
+        if (typeof item !== "number" || !Number.isFinite(item))
+          throw new Error("Expected finite number: " + path);
+        if (node.kind === "integer" && !Number.isSafeInteger(item))
+          throw new Error("Expected safe integer: " + path);
+        row[column] = item;
+      }
+    }
+    visit(current.node, "", input);
+    rows.get(current.name).push(row);
+  }
+  record2(root, key, value, {});
+  return rows;
+}
+function indexRelations(root, rows) {
+  const index = /* @__PURE__ */ new Map();
+  for (const table of tables(root)) {
+    for (const child of table.children) {
+      const parents = new Map(
+        rows.get(table.name).map((row) => [row._key, []])
+      );
+      for (const row of rows.get(child.name)) {
+        const siblings = parents.get(row._parent);
+        if (siblings === void 0)
+          throw new Error("Orphan relation: " + child.name);
+        siblings.push(row);
+      }
+      for (const siblings of parents.values())
+        siblings.sort(
+          (left, right) => Number(left._position) - Number(right._position)
+        );
+      index.set(child.name, parents);
+    }
+  }
+  return index;
+}
+function decodeLayout(root, row, rows = /* @__PURE__ */ new Map()) {
+  function record2(current, stored) {
+    function visit(node, path) {
+      const column = field(path);
+      if (node.optional || node.nullable) {
+        const state = Number(stored[column + "__state"]);
+        if (state === 0 && node.optional) return void 0;
+        if (state === 1 && node.nullable) return null;
+        if (state !== 2) throw new Error("Invalid field presence: " + path);
+      }
+      if (node.kind === "object") {
+        const value2 = {};
+        for (const [key, schema] of Object.entries(node.fields)) {
+          const item = visit(schema, path === "" ? key : path + "__" + key);
+          if (item !== void 0) value2[key] = item;
+        }
+        return value2;
+      }
+      if (node.kind === "array" || node.kind === "map") {
+        const child = current.children.find(
+          (table) => table.name === current.name + "_" + column
+        );
+        const children = rows.get(child.name).get(stored._key);
+        if (children.length !== Number(stored[column + "__count"]))
+          throw new Error("Incomplete relation: " + child.name);
+        children.forEach((item, index) => {
+          if (Number(item._position) !== index || item._key !== childKey(String(stored._key), index) || item._revision !== stored._revision)
+            throw new Error("Incomplete ordered relation: " + child.name);
+        });
+        if (node.kind === "array")
+          return children.map((item) => record2(child, item));
+        const result2 = {};
+        for (const item of children) {
+          if (typeof item._map_key !== "string" || Object.prototype.hasOwnProperty.call(result2, item._map_key))
+            throw new Error("Invalid map relation");
+          Object.defineProperty(result2, item._map_key, {
+            value: record2(child, item),
+            enumerable: true
+          });
+        }
+        return result2;
+      }
+      const value = stored[column];
+      if (node.kind === "vector") {
+        if (!(value instanceof Uint8Array) && Object.prototype.toString.call(value) !== "[object Uint8Array]")
+          throw new Error("Invalid embedding bytes");
+        const bytes = value;
+        if (bytes.byteLength % 8 !== 0)
+          throw new Error("Invalid embedding length");
+        const view = new DataView(
+          bytes.buffer,
+          bytes.byteOffset,
+          bytes.byteLength
+        );
+        return Array.from(
+          { length: bytes.byteLength / 8 },
+          (_, index) => view.getFloat64(index * 8, true)
+        );
+      }
+      if (node.kind === "boolean") {
+        if (value !== 0 && value !== 1 && value !== 0n && value !== 1n)
+          throw new Error("Invalid stored boolean");
+        return Number(value) === 1;
+      }
+      if (node.kind === "text") {
+        if (typeof value !== "string")
+          throw new Error("Invalid stored text: " + path);
+        return value;
+      }
+      if (typeof value !== "number" && typeof value !== "bigint")
+        throw new Error("Invalid stored number: " + path);
+      const number3 = Number(value);
+      if (!Number.isFinite(number3) || node.kind === "integer" && !Number.isSafeInteger(number3))
+        throw new Error("Invalid stored number: " + path);
+      return number3;
+    }
+    return visit(current.node, "");
+  }
+  return record2(root, row);
+}
+function decodeScalarProjection(collection, fieldName, row) {
+  const root = layouts[collection].node;
+  if (root.kind !== "object")
+    throw new Error("Projection requires an object collection");
+  const node = root.fields[fieldName];
+  if (node.kind !== "object")
+    throw new Error("Projection requires an object field");
+  const projected = {};
+  for (const [name2, schema] of Object.entries(node.fields)) {
+    if (schema.kind !== "text" && schema.kind !== "number" && schema.kind !== "integer" && schema.kind !== "boolean") {
+      throw new Error("Projection requires scalar fields");
+    }
+    projected[name2] = row[fieldName + "__" + name2];
+  }
+  const name = collection + "_" + fieldName + "_projection";
+  return decodeLayout(
+    { name, node, table: layouts[collection].table, children: [] },
+    projected
+  );
+}
+var RelationalDatabase = class _RelationalDatabase {
+  /** Retains the generic host SQL handle. */
+  constructor(sql) {
+    this.sql = sql;
+    this.sequence = 0;
+    this.executionId = Array.from(
+      { length: 4 },
+      () => Math.floor(Math.random() * 4294967296).toString(16).padStart(8, "0")
+    ).join("");
+  }
+  /** Opens the sole runtime database and declares its exact typed schema. */
+  static open() {
+    return __async(this, null, function* () {
+      const directory = ToolPkg.getSpaceDataDir();
+      if (typeof directory !== "string" || directory.trim() === "")
+        throw new Error("Plugin data directory is unavailable");
+      const sql = yield Tools.Storage.sqlite.open({
+        path: directory + "/characters-relational.sqlite"
+      });
+      for (const root of Object.values(layouts))
+        for (const table of tables(root)) yield sql.defineTable(table.table);
+      for (const root of Object.values(layouts))
+        for (const child of tables(root).slice(1))
+          yield sql.execute(
+            "CREATE INDEX IF NOT EXISTS " + quote(child.name + "_root_idx") + " ON " + quote(child.name) + ' ("_root", "_parent", "_position")'
+          );
+      yield sql.execute(
+        'CREATE INDEX IF NOT EXISTS "chat_binding_selection_idx" ON "chat_bindings" ("selection")'
+      );
+      return new _RelationalDatabase(sql);
+    });
+  }
+  /** Reads a collection as typed records with all child rows from the same guarded operation snapshot. */
+  read(collection, key) {
+    return __async(this, null, function* () {
+      const root = layouts[collection];
+      if (root === void 0)
+        throw new Error("Unknown relational collection: " + collection);
+      const rows = /* @__PURE__ */ new Map();
+      for (const table of tables(root))
+        rows.set(
+          table.name,
+          yield this.sql.query(
+            "SELECT * FROM " + quote(table.name) + (key === void 0 ? "" : " WHERE " + quote(table === root ? "_key" : "_root") + " = ?") + ' ORDER BY "_key"',
+            key === void 0 ? [] : [key]
+          )
+        );
+      const relations = indexRelations(root, rows);
+      return rows.get(collection).map((row) => {
+        if (typeof row._key !== "string" || typeof row._revision !== "string")
+          throw new Error("Invalid stored identity");
+        return {
+          key: row._key,
+          version: row._revision,
+          value: decodeLayout(root, row, relations)
+        };
+      });
+    });
+  }
+  /** Reads one exact root identity and its declared child relations. */
+  get(collection, key) {
+    return __async(this, null, function* () {
+      const rows = yield this.read(collection, key);
+      return rows.length === 0 ? null : rows[0];
+    });
+  }
+  /** Writes guarded roots and their relations atomically through the host journal. */
+  commit(mutations) {
+    return __async(this, null, function* () {
+      const version = this.executionId + ":" + ++this.sequence;
+      const statements = [];
+      for (const mutation of mutations) {
+        const root = layouts[mutation.collection];
+        if (root === void 0)
+          throw new Error(
+            "Unknown relational collection: " + mutation.collection
+          );
+        const { key, expectedVersion } = mutation;
+        if (mutation.op === "delete") {
+          statements.push({
+            sql: "DELETE FROM " + quote(root.name) + ' WHERE "_key" = ? AND "_revision" = ?',
+            params: [key, expectedVersion],
+            expectedAffectedRows: 1
+          });
+        } else {
+          const encoded = encode(root.name, key, mutation.value, version);
+          const row = encoded.get(root.name)[0];
+          statements.push(rootWrite(root.name, row, expectedVersion));
+          if (expectedVersion !== null)
+            statements.push(...deleteRelations(root, key));
+          for (const table of tables(root).slice(1)) {
+            for (const child of encoded.get(table.name))
+              statements.push(insertRow(table.name, child));
+          }
+        }
+        if (mutation.op === "delete")
+          statements.push(...deleteRelations(root, key));
+      }
+      if (statements.length === 0 || statements.length > 1e3) {
+        throw new Error(
+          "Relational operation exceeds the host transaction statement limit"
+        );
+      }
+      yield this.sql.transaction(statements);
+      return { version };
+    });
+  }
+};
+function insertRow(table, row) {
+  const columns = Object.keys(row);
+  return {
+    sql: "INSERT INTO " + quote(table) + " (" + columns.map(quote).join(", ") + ") VALUES (" + columns.map(() => "?").join(", ") + ")",
+    params: columns.map((column) => row[column]),
+    expectedAffectedRows: 1
+  };
+}
+function rootWrite(table, row, expectedVersion) {
+  if (expectedVersion === null) return insertRow(table, row);
+  const columns = Object.keys(row).filter((column) => column !== "_key");
+  return {
+    sql: "UPDATE " + quote(table) + " SET " + columns.map((column) => quote(column) + " = ?").join(", ") + ' WHERE "_key" = ? AND "_revision" = ?',
+    params: [
+      ...columns.map((column) => row[column]),
+      row._key,
+      expectedVersion
+    ],
+    expectedAffectedRows: 1
+  };
+}
+function deleteRelations(root, key) {
+  return tables(root).slice(1).reverse().map((child) => ({
+    sql: "DELETE FROM " + quote(child.name) + ' WHERE "_root" = ?',
+    params: [key]
+  }));
+}
+
+// src/chat-storage.ts
+var database = null;
+function chatDatabase() {
+  if (database === null) database = RelationalDatabase.open();
+  return database;
+}
+function findChatBinding(chatId) {
   return __async(this, null, function* () {
     requireId(chatId, "chat id");
-    const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId })).extension;
-    if (extension === null) throw new Error("Chat has no character selection in this plugin's namespace: " + chatId);
-    const marker = decodeChatMarker(extension);
-    return { chatId, selection: marker.selection };
+    const row = yield (yield chatDatabase()).get("chat_bindings", chatId);
+    return row === null ? null : { chatId, selection: decodeChatMarker(row.value).selection };
   });
 }
-function readMessageExtensionMarker(chatId, messageTimestamp, variantIndex) {
+function readChatBinding(chatId) {
+  return __async(this, null, function* () {
+    const binding = yield findChatBinding(chatId);
+    if (binding === null)
+      throw new Error("Chat has no stored character binding: " + chatId);
+    return binding;
+  });
+}
+function snapshotReference(value) {
+  const reference = markerObject(value, "plugin snapshot reference");
+  if (Object.keys(reference).length !== 2 || reference.schemaVersion !== 1)
+    throw new Error("Invalid plugin snapshot reference");
+  return {
+    recordId: requireId(reference.recordId, "snapshot record id"),
+    schemaVersion: 1
+  };
+}
+function readStoredSnapshot(value) {
+  return __async(this, null, function* () {
+    const reference = snapshotReference(value), row = yield (yield chatDatabase()).get("message_snapshots", reference.recordId);
+    if (row === null)
+      throw new Error("Plugin snapshot is unavailable: " + reference.recordId);
+    return decodeMessageMarker(row.value);
+  });
+}
+function storeSnapshot(value) {
+  return __async(this, null, function* () {
+    const marker = decodeMessageMarker(value), recordId = "snapshot:" + Array.from(
+      { length: 4 },
+      () => Math.floor(Math.random() * 4294967296).toString(16).padStart(8, "0")
+    ).join("");
+    yield (yield chatDatabase()).commit([
+      {
+        op: "put",
+        collection: "message_snapshots",
+        key: recordId,
+        value: markerObject(marker, "message snapshot"),
+        expectedVersion: null
+      }
+    ]);
+    return { recordId, schemaVersion: 1 };
+  });
+}
+function readMessageSnapshot(chatId, messageTimestamp, variantIndex) {
   return __async(this, null, function* () {
     requireId(chatId, "chat id");
     assertInteger(messageTimestamp, "message timestamp", 0);
     assertInteger(variantIndex, "message variant index", 0);
-    if (variantIndex > 2147483647) throw new Error("Message variant index exceeds the host's i32 range");
-    const extension = (yield Tools.Chat.readExtension({ kind: "message", chatId, messageTimestamp, variantIndex })).extension;
-    if (extension === null) throw new Error("Message revision has no saved character identity in this plugin's namespace: " + chatId + "/" + messageTimestamp + "/" + variantIndex);
-    return decodeMessageMarker(extension);
+    if (variantIndex > 2147483647)
+      throw new Error("Message variant index exceeds the host's i32 range");
+    const reference = (yield Tools.Chat.readExtension({
+      kind: "message",
+      chatId,
+      messageTimestamp,
+      variantIndex
+    })).extension;
+    if (reference === null)
+      throw new Error(
+        "Message revision has no saved configuration reference: " + chatId + "/" + messageTimestamp + "/" + variantIndex
+      );
+    return readStoredSnapshot(snapshotReference(reference));
   });
 }
-function listChatExtensionBindings() {
+function listChatBindings() {
   return __async(this, null, function* () {
-    const result2 = yield Tools.Chat.listAll();
-    assertInteger(result2.totalCount, "all chat count", 0);
-    if (!Array.isArray(result2.chats) || result2.chats.length !== result2.totalCount) throw new Error("Chat.listAll did not return its complete declared records");
-    const bindings = [], ids = /* @__PURE__ */ new Set();
-    for (const chat of result2.chats) {
-      const chatId = requireId(chat.id, "host chat id");
-      if (ids.has(chatId)) throw new Error("Duplicate host chat identity: " + chatId);
-      ids.add(chatId);
-      const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId })).extension;
-      if (extension === null) continue;
-      const marker = decodeChatMarker(extension);
-      bindings.push({ chatId, selection: marker.selection });
-    }
-    return bindings;
+    const rows = yield (yield chatDatabase()).sql.query(
+      'SELECT "_key", "selection" FROM "chat_bindings" ORDER BY "_key"'
+    );
+    return rows.map((row) => ({
+      chatId: requireId(row._key, "stored chat id"),
+      selection: decodeChatMarker({ version: 1, selection: row.selection }).selection
+    }));
   });
 }
-function writeChatExtensionBinding(binding) {
+function bindingsForChats(chatIds) {
+  return __async(this, null, function* () {
+    const result2 = /* @__PURE__ */ new Map(), sql = (yield chatDatabase()).sql;
+    for (let offset = 0; offset < chatIds.length; offset += 500) {
+      const ids = chatIds.slice(offset, offset + 500);
+      ids.forEach((id2) => requireId(id2, "chat id"));
+      const rows = yield sql.query(
+        'SELECT "_key", "selection" FROM "chat_bindings" WHERE "_key" IN (' + ids.map(() => "?").join(",") + ")",
+        [...ids]
+      );
+      for (const row of rows)
+        result2.set(
+          String(row._key),
+          decodeChatMarker({ version: 1, selection: row.selection }).selection
+        );
+    }
+    return result2;
+  });
+}
+function chatsForMemoryOwner(ownerKey) {
+  return __async(this, null, function* () {
+    requireId(ownerKey, "memory owner");
+    const rows = yield (yield chatDatabase()).sql.query(
+      `
+    SELECT DISTINCT b."_key" AS chatId FROM "chat_bindings" b
+    JOIN "cards" c ON b."selection" = 'card:' || c."id"
+      OR EXISTS (SELECT 1 FROM "groups_members" m WHERE b."selection" = 'group:' || m."_root" AND m."characterCardId" = c."id")
+    WHERE (c."memoryBindingMode" = 'CHARACTER' AND 'character:' || c."id" = ?)
+      OR (c."memoryBindingMode" = 'SHARED' AND 'shared:' || c."sharedMemoryId" = ?)
+      OR EXISTS (SELECT 1 FROM "cards_sharedMemoryMounts" mount WHERE mount."_root" = c."_key" AND mount."writable" = 1 AND 'shared:' || mount."sharedMemoryId" = ?)
+    ORDER BY chatId`,
+      [ownerKey, ownerKey, ownerKey]
+    );
+    return rows.map((row) => requireId(row.chatId, "selected chat id"));
+  });
+}
+function writeChatBinding(binding) {
   return __async(this, null, function* () {
     requireId(binding.chatId, "chat id");
-    const target = { kind: "chat", chatId: binding.chatId };
-    const existing = (yield Tools.Chat.readExtension(target)).extension, value = encodeChatMarker(binding.selection, existing === null ? null : markerObject(existing, "existing chat extension"));
-    const stored = (yield Tools.Chat.writeExtension(target, value)).extension, marker = decodeChatMarker(stored);
-    if (marker.selection !== binding.selection) throw new Error("Stored chat extension selection differs from the submitted value");
-    return { chatId: binding.chatId, selection: marker.selection };
+    decodeChatMarker({ version: 1, selection: binding.selection });
+    const sql = yield chatDatabase(), existing = yield sql.get("chat_bindings", binding.chatId);
+    yield sql.commit([
+      {
+        op: "put",
+        collection: "chat_bindings",
+        key: binding.chatId,
+        value: { version: 1, selection: binding.selection },
+        expectedVersion: existing === null ? null : existing.version
+      }
+    ]);
+    return binding;
   });
 }
-function deleteChatExtensionBinding(chatId) {
+function prepareChatBinding(binding) {
+  return __async(this, null, function* () {
+    requireId(binding.chatId, "draft id");
+    decodeChatMarker({ version: 1, selection: binding.selection });
+    yield (yield chatDatabase()).commit([
+      {
+        op: "put",
+        collection: "chat_drafts",
+        key: binding.chatId,
+        value: { version: 1, selection: binding.selection },
+        expectedVersion: null
+      }
+    ]);
+  });
+}
+function readDraftBinding(chatId) {
+  return __async(this, null, function* () {
+    const row = yield (yield chatDatabase()).get("chat_drafts", requireId(chatId, "draft id"));
+    if (row === null)
+      throw new Error("Chat draft binding is unavailable: " + chatId);
+    return { chatId, selection: decodeChatMarker(row.value).selection };
+  });
+}
+function commitDraftBinding(chatId) {
+  return __async(this, null, function* () {
+    const database2 = yield chatDatabase(), draft = yield database2.get("chat_drafts", requireId(chatId, "draft id"));
+    if (draft === null)
+      throw new Error("Chat draft binding is unavailable: " + chatId);
+    yield database2.commit([
+      {
+        op: "put",
+        collection: "chat_bindings",
+        key: chatId,
+        value: draft.value,
+        expectedVersion: null
+      },
+      {
+        op: "delete",
+        collection: "chat_drafts",
+        key: chatId,
+        expectedVersion: draft.version
+      }
+    ]);
+  });
+}
+function abortDraftBinding(chatId) {
+  return __async(this, null, function* () {
+    const database2 = yield chatDatabase(), draft = yield database2.get("chat_drafts", requireId(chatId, "draft id"));
+    if (draft === null)
+      throw new Error("Chat draft binding is unavailable: " + chatId);
+    yield database2.commit([
+      {
+        op: "delete",
+        collection: "chat_drafts",
+        key: chatId,
+        expectedVersion: draft.version
+      }
+    ]);
+  });
+}
+function deleteChatBinding(chatId) {
   return __async(this, null, function* () {
     requireId(chatId, "chat id");
-    const deleted = (yield Tools.Chat.deleteExtension({ kind: "chat", chatId })).deleted;
-    assertBoolean(deleted, "chat extension deleted");
-    return { chatId, deleted };
+    const sql = yield chatDatabase(), existing = yield sql.get("chat_bindings", chatId);
+    if (existing === null) return { chatId, deleted: false };
+    yield sql.commit([
+      {
+        op: "delete",
+        collection: "chat_bindings",
+        key: chatId,
+        expectedVersion: existing.version
+      }
+    ]);
+    return { chatId, deleted: true };
   });
 }
 
@@ -1188,7 +2647,7 @@ function requireMessageOwner(chatId, message, ownerKey, repository) {
   return __async(this, null, function* () {
     assertMemoryChatMessage(message);
     yield repository.readMemorySpace(ownerKey);
-    const marker = yield readMessageExtensionMarker(chatId, message.timestamp, message.variantIndex);
+    const marker = yield readMessageSnapshot(chatId, message.timestamp, message.variantIndex);
     if (!marker.profile.resources.some(
       /** Checks only this saved participant's explicit writable resource grants. */
       (resource) => resource.key === ownerKey && resource.writable
@@ -1202,7 +2661,7 @@ function requireMessagesOwner(chatId, messages, ownerKey, repository) {
     let permitted = false;
     for (const message of messages) {
       if (message.sender !== "ai" && message.sender !== "assistant") continue;
-      const marker = yield readMessageExtensionMarker(chatId, message.timestamp, message.variantIndex);
+      const marker = yield readMessageSnapshot(chatId, message.timestamp, message.variantIndex);
       if (marker.profile.resources.some(
         /** Requires an actual saved writable grant without deriving identity from a display name. */
         (resource) => resource.key === ownerKey && resource.writable
@@ -1213,17 +2672,19 @@ function requireMessagesOwner(chatId, messages, ownerKey, repository) {
 }
 function listMemoryChats(ownerKey, repository) {
   return __async(this, null, function* () {
-    yield repository.readMemorySpace(ownerKey);
-    const bindings = yield repository.listChatBindings(), selected = /* @__PURE__ */ new Set();
-    for (const binding of bindings) {
-      const cards = yield chatParticipants(binding.chatId, repository);
-      for (const card of cards) {
-        if ((yield primaryOwner(card, repository)) === ownerKey) selected.add(binding.chatId);
-        for (const mount2 of card.sharedMemoryMounts) if (mount2.writable && "shared:" + mount2.sharedMemoryId === ownerKey) selected.add(binding.chatId);
+    yield repository.readMemorySettings(ownerKey);
+    const selected = yield chatsForMemoryOwner(ownerKey);
+    const chats = [];
+    for (let offset = 0; offset < selected.length; offset += 200) {
+      const ids = selected.slice(offset, offset + 200), result2 = yield Tools.Chat.listChats({ chat_ids: ids, limit: 200 });
+      if (result2.totalCount !== ids.length || result2.chats.length !== ids.length) throw new Error("Stored bindings reference missing Core conversations");
+      const remaining = new Set(ids);
+      for (const chat of result2.chats) {
+        assertChat(chat);
+        if (!remaining.delete(chat.id)) throw new Error("Chat batch returned an unrelated or duplicate identity");
+        chats.push(chat);
       }
     }
-    const chats = [];
-    for (const id2 of selected) chats.push(yield requireChat(id2));
     return chats.sort(
       /** Keeps the host directory's updated-at descending presentation without limiting the bound records. */
       (left, right) => {
@@ -1726,7 +3187,7 @@ function enqueueCandidate(input, repository) {
     if (message.content.trim() === "") throw new Error("Memory candidate source is blank");
     const owners = /* @__PURE__ */ new Set();
     if (input.sourceType === "reply_finalized_auto") {
-      const marker = yield readMessageExtensionMarker(input.chatId, message.timestamp, message.variantIndex);
+      const marker = yield readMessageSnapshot(input.chatId, message.timestamp, message.variantIndex);
       const ownerKey = input.ownerKey === null ? marker.primaryOwnerKey : input.ownerKey;
       if (!marker.profile.resources.some(
         /** Authorizes only the exact submitted resource through the already-read historical snapshot. */
@@ -2160,8 +3621,8 @@ function assertCharacterState(value) {
     actualOwners.add(ownerKey);
     assertMemorySpace(owner2);
     if (owner2.rebuildTask !== null && BigInt(owner2.rebuildTask.id) >= nextId) throw new Error("nextId does not exceed the rebuild task identity");
-    for (const field of ["memories", "links", "chunks", "candidates"]) {
-      for (const record2 of owner2[field]) if (BigInt(record2.id) >= nextId) throw new Error("nextId does not exceed stored identity: " + record2.id);
+    for (const field2 of ["memories", "links", "chunks", "candidates"]) {
+      for (const record2 of owner2[field2]) if (BigInt(record2.id) >= nextId) throw new Error("nextId does not exceed stored identity: " + record2.id);
     }
   }
   if (actualOwners.size !== expectedOwners.size) throw new Error("Character state is missing an owner memory space");
@@ -2211,8 +3672,8 @@ function assertMemorySpace(value) {
     assertObject(candidate, "candidate");
     requireDecimal(candidate.id, "candidate id", true);
     requireId(candidate.chatId, "candidate chat id");
-    for (const field of ["triggerMessageTimestamp", "triggerVariantIndex", "createdAt", "updatedAt", "attemptCount"]) assertInteger(candidate[field], field, 0);
-    for (const field of ["status", "lastError", "sourceType"]) assertString(candidate[field], field);
+    for (const field2 of ["triggerMessageTimestamp", "triggerVariantIndex", "createdAt", "updatedAt", "attemptCount"]) assertInteger(candidate[field2], field2, 0);
+    for (const field2 of ["status", "lastError", "sourceType"]) assertString(candidate[field2], field2);
     if (candidate.status !== "pending" && candidate.status !== "processing" && candidate.status !== "failed") throw new Error("Invalid candidate status");
     if (candidate.sourceType !== "reply_finalized_auto" && candidate.sourceType !== "selected_user_message") throw new Error("Invalid candidate source type");
     if (typeof candidate.triggerVariantIndex !== "number" || candidate.triggerVariantIndex > 2147483647) throw new Error("Candidate message variant exceeds the host range");
@@ -2225,8 +3686,8 @@ function assertMemorySpace(value) {
   assertString(value.userDocumentPath, "USER.md path");
   if (value.userDocumentPath !== userDocumentPath(requireId(value.ownerKey, "owner key"))) throw new Error("Invalid owner USER.md path");
   assertObject(value.rebuildProgress, "rebuild progress");
-  for (const field of ["status", "currentChatTitle", "lastError"]) assertString(value.rebuildProgress[field], field);
-  for (const field of ["totalChats", "completedChats", "totalWindows", "completedWindows", "totalSourceMessages", "processedSourceMessages", "failedWindows"]) assertInteger(value.rebuildProgress[field], field, 0);
+  for (const field2 of ["status", "currentChatTitle", "lastError"]) assertString(value.rebuildProgress[field2], field2);
+  for (const field2 of ["totalChats", "completedChats", "totalWindows", "completedWindows", "totalSourceMessages", "processedSourceMessages", "failedWindows"]) assertInteger(value.rebuildProgress[field2], field2, 0);
   if (!["idle", "preparing", "running", "completed", "failed", "cancelled"].some(
     /** Accepts only the declared durable task lifecycle states. */
     (status2) => value.rebuildProgress !== null && typeof value.rebuildProgress === "object" && "status" in value.rebuildProgress && value.rebuildProgress.status === status2
@@ -2352,7 +3813,7 @@ function decodeTavernData(value) {
     character_book: null,
     ...value
   };
-  for (const field of ["name", "description", "personality", "first_mes", "avatar", "mes_example", "scenario", "creator_notes", "system_prompt", "post_history_instructions", "creator", "character_version"]) assertString(data[field], `data.${field}`);
+  for (const field2 of ["name", "description", "personality", "first_mes", "avatar", "mes_example", "scenario", "creator_notes", "system_prompt", "post_history_instructions", "creator", "character_version"]) assertString(data[field2], `data.${field2}`);
   assertStrings(data.alternate_greetings, "\u5907\u7528\u5F00\u573A\u767D");
   assertStrings(data.tags, "\u9152\u9986\u6807\u7B7E");
   if (data.extensions !== null) assertObject(data.extensions, "\u9152\u9986\u6269\u5C55");
@@ -3319,17 +4780,36 @@ function registerSelectionSettingsAccess() {
 function createCharacterCardsService(owner2, configurations = independentConfigurations) {
   const jobs = new MemoryJobRunner(owner2), application = createSelectionApplication(configurations);
   function dispatchRequest(request) {
-    if (request.action === "listThemeChoices") return readThemeChoices(configurations);
-    if (!isSelectionRequest(request)) return owner2.run(
-      /** Executes ordinary editor operations against this same serialized snapshot. */
-      (repository) => dispatch(request, repository)
-    );
+    if (request.action === "listThemeChoices")
+      return readThemeChoices(configurations);
+    switch (request.action) {
+      case "listMemoryChats":
+        return listMemoryChats(request.ownerKey, owner2);
+      case "readGlobalMemoryPreferences":
+        return owner2.readGlobalMemoryPreferences();
+      case "readMemorySettings":
+        return owner2.readMemorySettings(request.ownerKey);
+      case "readMemorySearchConfig":
+        return owner2.readMemorySearchConfig(request.ownerKey);
+      case "readUser":
+        return owner2.readUser(request.ownerKey);
+    }
+    if (!isSelectionRequest(request))
+      return owner2.run(
+        /** Executes ordinary editor operations against this same serialized snapshot. */
+        (repository) => dispatch(request, repository)
+      );
     return application.commit(
       /** Publishes the actual selection once; independent preference writes are not included in this file publication. */
       (validate) => owner2.run(
         /** Prevalidates the chosen complete record inside the same immutable snapshot used by its actual mutation. */
         (repository) => __async(null, null, function* () {
-          const references = yield validate(yield readSelectionReferences(repository, editorSelection(request)));
+          const references = yield validate(
+            yield readSelectionReferences(
+              repository,
+              editorSelection(request)
+            )
+          );
           return { references, value: yield dispatch(request, repository) };
         })
       )
@@ -3338,32 +4818,61 @@ function createCharacterCardsService(owner2, configurations = independentConfigu
   return {
     /** Runs the private job scheduler without constructing another store or business service. */
     runMemoryJobs: () => jobs.tick(),
-    readGlobalMemoryPreferences: () => owner2.run((repository) => repository.readGlobalMemoryPreferences()),
+    /** Reads only the metadata flags needed by prompt composition. */
+    readGlobalMemoryPreferences: () => owner2.readGlobalMemoryPreferences(),
     /** Preserves action-specific results through the shared service dispatcher. */
     dispatch: dispatchRequest,
     /** Reads one consistent domain snapshot through the same operation queue. */
     snapshot: () => owner2.run(snapshot),
     /** Preserves the same repository queue and integrity checks as full snapshots. */
-    sidebarDirectory: () => owner2.run((repository) => __async(null, null, function* () {
-      const [cards, groups] = yield Promise.all([repository.listCharacters(), repository.listGroups()]);
-      records(cards, assertCard, "\u89D2\u8272\u5361\u5217\u8868");
-      records(groups, assertGroup, "\u89D2\u8272\u7EC4\u5217\u8868");
-      return { cards, groups };
-    })),
+    sidebarDirectory: () => owner2.readSidebarDirectory(),
     /** Keeps every real selection alias and sidebar binding on the same awaited application sequence. */
     dispatchDomain(operation, input) {
-      if (!isSelectionOperation(operation)) return owner2.run(
-        /** Runs non-selection APIs without touching independent current configurations. */
-        (repository) => dispatchDomain(operation, input, repository)
-      );
+      switch (operation) {
+        case "memory.chat.list":
+          return listMemoryChats(
+            parseDomainPayload("memory.chat.list", input).ownerKey,
+            owner2
+          );
+        case "memory.settings.read":
+          return owner2.readMemorySettings(
+            parseDomainPayload("memory.settings.read", input).ownerKey
+          );
+        case "memory.searchConfig.read":
+          return owner2.readMemorySearchConfig(
+            parseDomainPayload("memory.searchConfig.read", input).ownerKey
+          );
+        case "memory.user.read":
+          return owner2.readUser(
+            parseDomainPayload("memory.user.read", input).ownerKey
+          );
+        case "memory.user.path": {
+          const { ownerKey } = parseDomainPayload("memory.user.path", input);
+          return owner2.readUserPath(ownerKey).then((path) => ({ ownerKey, path }));
+        }
+      }
+      if (!isSelectionOperation(operation))
+        return owner2.run(
+          /** Runs non-selection APIs without touching independent current configurations. */
+          (repository) => dispatchDomain(operation, input, repository)
+        );
       return application.commit(
         /** Returns a confirmed owner write before applying any independent preferences. */
         (validate) => owner2.run(
           /** Validates the actual domain request and all record references before writing the selected actor. */
           (repository) => __async(null, null, function* () {
-            const selection = yield domainSelection(operation, input, repository);
-            const references = yield validate(yield readSelectionReferences(repository, selection));
-            return { references, value: yield dispatchDomain(operation, input, repository) };
+            const selection = yield domainSelection(
+              operation,
+              input,
+              repository
+            );
+            const references = yield validate(
+              yield readSelectionReferences(repository, selection)
+            );
+            return {
+              references,
+              value: yield dispatchDomain(operation, input, repository)
+            };
           })
         )
       );
@@ -3385,22 +4894,33 @@ function assertStore(value) {
 function assertActive(value) {
   assertObject(value, "\u5F53\u524D\u63D0\u793A\u8BCD");
   const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup") throw new Error("\u5F53\u524D\u63D0\u793A\u8BCD\u7C7B\u578B\u65E0\u6548");
+  if (keys.length !== 1 || keys[0] !== "CharacterCard" && keys[0] !== "CharacterGroup")
+    throw new Error("\u5F53\u524D\u63D0\u793A\u8BCD\u7C7B\u578B\u65E0\u6548");
   const selection = value[keys[0]];
   assertObject(selection, "\u5F53\u524D\u63D0\u793A\u8BCD\u9009\u62E9");
   requireId(selection.id, "\u5F53\u524D\u63D0\u793A\u8BCD\u6807\u8BC6");
 }
 function snapshot(host) {
   return __async(this, null, function* () {
-    const [cards, groups, stores, tags, active, models, ttsConfigs, toolCatalog, memoryPreferences] = yield Promise.all([
+    const [
+      cards,
+      groups,
+      stores,
+      tags,
+      active,
+      models,
+      ttsConfigs,
+      toolCatalog,
+      memoryPreferences
+    ] = yield Promise.all([
       host.listCharacters(),
       host.listGroups(),
       host.listStores(),
       host.listTags(),
       host.readActive(),
-      host.listModels(),
-      host.listTtsConfigs(),
-      host.readToolCatalog(),
+      Promise.resolve().then(() => host.listModels()),
+      Promise.resolve().then(() => host.listTtsConfigs()),
+      Promise.resolve().then(() => host.readToolCatalog()),
       host.readGlobalMemoryPreferences()
     ]);
     records(cards, assertCard, "\u89D2\u8272\u5361\u5217\u8868");
@@ -3408,10 +4928,28 @@ function snapshot(host) {
     records(stores, assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868");
     records(tags, assertTag, "\u6807\u7B7E\u5217\u8868");
     assertActive(active);
-    if (!Array.isArray(models) || !Array.isArray(ttsConfigs)) throw new Error("\u6A21\u578B\u6216 TTS \u76EE\u5F55\u8FD4\u56DE\u683C\u5F0F\u4E0D\u6B63\u786E");
+    if (!Array.isArray(models) || !Array.isArray(ttsConfigs))
+      throw new Error("\u6A21\u578B\u6216 TTS \u76EE\u5F55\u8FD4\u56DE\u683C\u5F0F\u4E0D\u6B63\u786E");
     assertObject(toolCatalog, "\u5DE5\u5177\u6765\u6E90\u76EE\u5F55");
-    for (const field of ["builtinTools", "packages", "skills", "mcpServers"]) if (!Array.isArray(toolCatalog[field])) throw new Error(`\u5DE5\u5177\u6765\u6E90\u76EE\u5F55\u7F3A\u5C11 ${field}`);
-    return { cards, groups, stores, tags, active, models, ttsConfigs, toolCatalog, memoryPreferences };
+    for (const field2 of [
+      "builtinTools",
+      "packages",
+      "skills",
+      "mcpServers"
+    ])
+      if (!Array.isArray(toolCatalog[field2]))
+        throw new Error(`\u5DE5\u5177\u6765\u6E90\u76EE\u5F55\u7F3A\u5C11 ${field2}`);
+    return {
+      cards,
+      groups,
+      stores,
+      tags,
+      active,
+      models,
+      ttsConfigs,
+      toolCatalog,
+      memoryPreferences
+    };
   });
 }
 function findRecord(values, id2, label) {
@@ -3427,7 +4965,8 @@ function findRecord(values, id2, label) {
 function prepareTagChanges(attachedIds, changes2, tags) {
   assertStrings(attachedIds, "\u89D2\u8272\u6807\u7B7E");
   assertObject(changes2, "\u6807\u7B7E\u4FEE\u6539");
-  if (!Array.isArray(changes2.created) || !Array.isArray(changes2.updated)) throw new Error("\u6807\u7B7E\u4FEE\u6539\u683C\u5F0F\u65E0\u6548");
+  if (!Array.isArray(changes2.created) || !Array.isArray(changes2.updated))
+    throw new Error("\u6807\u7B7E\u4FEE\u6539\u683C\u5F0F\u65E0\u6548");
   assertStrings(changes2.deleted, "\u5220\u9664\u6807\u7B7E\u6807\u8BC6");
   const created = [];
   const updated = [];
@@ -3444,7 +4983,8 @@ function prepareTagChanges(attachedIds, changes2, tags) {
     assertObject(draft, "\u65B0\u6807\u7B7E");
     const draftId = requireId(draft.draftId, "\u65B0\u6807\u7B7E\u8349\u7A3F\u6807\u8BC6");
     if (draftIds.has(draftId)) throw new Error("\u6807\u7B7E\u8349\u7A3F\u6807\u8BC6\u91CD\u590D");
-    for (const tag of tags) if (tag.id === draftId) throw new Error("\u6807\u7B7E\u8349\u7A3F\u6807\u8BC6\u4E0E\u5DF2\u6709\u6807\u7B7E\u51B2\u7A81");
+    for (const tag of tags)
+      if (tag.id === draftId) throw new Error("\u6807\u7B7E\u8349\u7A3F\u6807\u8BC6\u4E0E\u5DF2\u6709\u6807\u7B7E\u51B2\u7A81");
     assertTagValues(draft.values);
     const values = normalizedTagValues(draft.values);
     draftIds.add(draftId);
@@ -3453,7 +4993,8 @@ function prepareTagChanges(attachedIds, changes2, tags) {
   for (const edit of changes2.updated) {
     assertTagValues(edit);
     const id2 = requireId(edit.id, "\u4FEE\u6539\u6807\u7B7E\u6807\u8BC6");
-    if (changedIds.has(id2) || deleted.has(id2)) throw new Error("\u540C\u4E00\u6807\u7B7E\u5B58\u5728\u51B2\u7A81\u4FEE\u6539");
+    if (changedIds.has(id2) || deleted.has(id2))
+      throw new Error("\u540C\u4E00\u6807\u7B7E\u5B58\u5728\u51B2\u7A81\u4FEE\u6539");
     const original = findRecord(tags, id2, "\u6807\u7B7E");
     changedIds.add(id2);
     updated.push({ ...original, ...normalizedTagValues(edit) });
@@ -3465,12 +5006,18 @@ function prepareTagChanges(attachedIds, changes2, tags) {
     for (const update2 of updated) if (update2.id === tag.id) current = update2;
     projected.push({ id: tag.id, name: current.name.trim() });
   }
-  for (const draft of created) projected.push({ id: draft.draftId, name: draft.values.name });
-  for (const draft of created) for (const tag of projected) if (tag.id !== draft.draftId && tag.name === draft.values.name) throw new Error(`\u6807\u7B7E\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${draft.values.name}`);
+  for (const draft of created)
+    projected.push({ id: draft.draftId, name: draft.values.name });
+  for (const draft of created)
+    for (const tag of projected)
+      if (tag.id !== draft.draftId && tag.name === draft.values.name)
+        throw new Error(`\u6807\u7B7E\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${draft.values.name}`);
   for (const update2 of updated) {
     const original = findRecord(tags, update2.id, "\u6807\u7B7E");
     if (original.name.trim() === update2.name) continue;
-    for (const tag of projected) if (tag.id !== update2.id && tag.name === update2.name) throw new Error(`\u6807\u7B7E\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${update2.name}`);
+    for (const tag of projected)
+      if (tag.id !== update2.id && tag.name === update2.name)
+        throw new Error(`\u6807\u7B7E\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${update2.name}`);
   }
   const attached = [];
   const attachedSet = /* @__PURE__ */ new Set();
@@ -3485,7 +5032,12 @@ function prepareTagChanges(attachedIds, changes2, tags) {
   return { created, updated, deleted: [...deleted], attachedIds: attached };
 }
 function normalizedTagValues(values) {
-  return { name: requireName(values.name, "\u6807\u7B7E\u540D\u79F0"), description: values.description.trim(), promptContent: values.promptContent, tagType: values.tagType };
+  return {
+    name: requireName(values.name, "\u6807\u7B7E\u540D\u79F0"),
+    description: values.description.trim(),
+    promptContent: values.promptContent,
+    tagType: values.tagType
+  };
 }
 function commitTagChanges(plan, host) {
   return __async(this, null, function* () {
@@ -3504,7 +5056,8 @@ function commitTagChanges(plan, host) {
     for (const id2 of plan.attachedIds) {
       if (resolved.has(id2)) {
         const canonicalId = resolved.get(id2);
-        if (canonicalId === void 0) throw new Error("\u65B0\u6807\u7B7E\u6CA1\u6709\u8FD4\u56DE canonical \u6807\u8BC6");
+        if (canonicalId === void 0)
+          throw new Error("\u65B0\u6807\u7B7E\u6CA1\u6709\u8FD4\u56DE canonical \u6807\u8BC6");
         ids.push(canonicalId);
       } else ids.push(id2);
     }
@@ -3512,20 +5065,29 @@ function commitTagChanges(plan, host) {
   });
 }
 function normalizedCharacter(card) {
-  if (card.chatModelBindingMode !== "FOLLOW_GLOBAL" && card.chatModelBindingMode !== "FIXED_MODEL") throw new Error("\u804A\u5929\u6A21\u578B\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
-  if (card.memoryBindingMode !== "CHARACTER" && card.memoryBindingMode !== "SHARED") throw new Error("\u8BB0\u5FC6\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
-  if (card.chatModelBindingMode === "FIXED_MODEL") requireId(card.chatModelId, "\u56FA\u5B9A\u804A\u5929\u6A21\u578B");
-  if (card.memoryBindingMode === "SHARED") requireId(card.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
+  if (card.chatModelBindingMode !== "FOLLOW_GLOBAL" && card.chatModelBindingMode !== "FIXED_MODEL")
+    throw new Error("\u804A\u5929\u6A21\u578B\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
+  if (card.memoryBindingMode !== "CHARACTER" && card.memoryBindingMode !== "SHARED")
+    throw new Error("\u8BB0\u5FC6\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
+  if (card.chatModelBindingMode === "FIXED_MODEL")
+    requireId(card.chatModelId, "\u56FA\u5B9A\u804A\u5929\u6A21\u578B");
+  if (card.memoryBindingMode === "SHARED")
+    requireId(card.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
   if (card.ttsConfigId !== null) requireId(card.ttsConfigId, "TTS \u914D\u7F6E");
   if (card.themeConfigId !== null) requireId(card.themeConfigId, "\u4E3B\u9898\u914D\u7F6E");
   const policy = card.toolAccessConfig;
-  if (policy.enabled && (policy.allowedPackages.length !== 0 || policy.allowedSkills.length !== 0 || policy.allowedMcpServers.length !== 0) && !new Set(normalizeNames(policy.allowedBuiltinTools)).has("use_package")) throw new Error("\u9009\u62E9\u5916\u90E8\u5DE5\u5177\u6765\u6E90\u65F6\u5FC5\u987B\u5141\u8BB8 use_package");
+  if (policy.enabled && (policy.allowedPackages.length !== 0 || policy.allowedSkills.length !== 0 || policy.allowedMcpServers.length !== 0) && !new Set(normalizeNames(policy.allowedBuiltinTools)).has("use_package"))
+    throw new Error("\u9009\u62E9\u5916\u90E8\u5DE5\u5177\u6765\u6E90\u65F6\u5FC5\u987B\u5141\u8BB8 use_package");
   const mounts = [];
   const mountIds = /* @__PURE__ */ new Set();
   for (const mount2 of card.sharedMemoryMounts) {
     if (mountIds.has(mount2.sharedMemoryId)) throw new Error("\u5171\u4EAB\u8BB0\u5FC6\u6302\u8F7D\u91CD\u590D");
     mountIds.add(mount2.sharedMemoryId);
-    mounts.push({ sharedMemoryId: mount2.sharedMemoryId, readable: mount2.readable, writable: mount2.writable });
+    mounts.push({
+      sharedMemoryId: mount2.sharedMemoryId,
+      readable: mount2.readable,
+      writable: mount2.writable
+    });
   }
   return {
     ...card,
@@ -3535,10 +5097,14 @@ function normalizedCharacter(card) {
     sharedMemoryMounts: mounts,
     toolAccessConfig: {
       enabled: card.toolAccessConfig.enabled,
-      allowedBuiltinTools: normalizeNames(card.toolAccessConfig.allowedBuiltinTools),
+      allowedBuiltinTools: normalizeNames(
+        card.toolAccessConfig.allowedBuiltinTools
+      ),
       allowedPackages: normalizeNames(card.toolAccessConfig.allowedPackages),
       allowedSkills: normalizeNames(card.toolAccessConfig.allowedSkills),
-      allowedMcpServers: normalizeNames(card.toolAccessConfig.allowedMcpServers)
+      allowedMcpServers: normalizeNames(
+        card.toolAccessConfig.allowedMcpServers
+      )
     }
   };
 }
@@ -3554,16 +5120,29 @@ function saveCharacter(card, create, tagChanges, host) {
       const id2 = requireId(value.id, "\u89D2\u8272\u5361\u6807\u8BC6");
       const original = yield host.getCharacter(id2);
       assertCard(original);
-      value = { ...value, id: original.id, isDefault: original.isDefault, createdAt: original.createdAt };
+      value = {
+        ...value,
+        id: original.id,
+        isDefault: original.isDefault,
+        createdAt: original.createdAt
+      };
     }
-    const [tags, stores, cards] = yield Promise.all([host.listTags(), host.listStores(), host.listCharacters()]);
+    const [tags, stores, cards] = yield Promise.all([
+      host.listTags(),
+      host.listStores(),
+      host.listCharacters()
+    ]);
     records(cards, assertCard, "\u89D2\u8272\u5361\u5217\u8868");
     let retainedName = false;
     if (!create) {
-      for (const existing of cards) if (existing.id === value.id && existing.name.trim() === value.name) retainedName = true;
+      for (const existing of cards)
+        if (existing.id === value.id && existing.name.trim() === value.name)
+          retainedName = true;
     }
     if (!retainedName) {
-      for (const existing of cards) if (existing.id !== value.id && existing.name.trim() === value.name) throw new Error(`\u89D2\u8272\u5361\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${value.name}`);
+      for (const existing of cards)
+        if (existing.id !== value.id && existing.name.trim() === value.name)
+          throw new Error(`\u89D2\u8272\u5361\u540D\u79F0\u5DF2\u5B58\u5728\uFF1A${value.name}`);
     }
     if (value.ttsConfigId !== null) {
       const configs = yield host.listTtsConfigs();
@@ -3572,8 +5151,14 @@ function saveCharacter(card, create, tagChanges, host) {
     records(tags, assertTag, "\u6807\u7B7E\u5217\u8868");
     records(stores, assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868");
     const plan = prepareTagChanges(value.attachedTagIds, tagChanges, tags);
-    if (value.memoryBindingMode === "SHARED") findRecord(stores, requireId(value.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u6807\u8BC6"), "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
-    for (const mount2 of value.sharedMemoryMounts) findRecord(stores, mount2.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
+    if (value.memoryBindingMode === "SHARED")
+      findRecord(
+        stores,
+        requireId(value.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u6807\u8BC6"),
+        "\u5171\u4EAB\u8BB0\u5FC6\u5E93"
+      );
+    for (const mount2 of value.sharedMemoryMounts)
+      findRecord(stores, mount2.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
     value = { ...value, attachedTagIds: yield commitTagChanges(plan, host) };
     const saved = create ? yield host.createCharacter(value) : yield host.updateCharacter(value);
     assertCard(saved);
@@ -3590,14 +5175,32 @@ function saveGroup(group, create, host) {
     const members2 = [];
     for (const member2 of group.members) {
       findRecord(cards, member2.characterCardId, "\u7FA4\u7EC4\u89D2\u8272");
-      members2.push({ characterCardId: member2.characterCardId, orderIndex: member2.orderIndex });
+      members2.push({
+        characterCardId: member2.characterCardId,
+        orderIndex: member2.orderIndex
+      });
     }
     let value;
-    if (create) value = { id: "", name, description: group.description.trim(), members: members2, themeConfigId: group.themeConfigId, createdAt: 0, updatedAt: 0 };
+    if (create)
+      value = {
+        id: "",
+        name,
+        description: group.description.trim(),
+        members: members2,
+        themeConfigId: group.themeConfigId,
+        createdAt: 0,
+        updatedAt: 0
+      };
     else {
       const original = yield host.getGroup(requireId(group.id, "\u7FA4\u7EC4\u6807\u8BC6"));
       assertGroup(original);
-      value = { ...original, name, description: group.description.trim(), members: members2, themeConfigId: group.themeConfigId };
+      value = {
+        ...original,
+        name,
+        description: group.description.trim(),
+        members: members2,
+        themeConfigId: group.themeConfigId
+      };
     }
     const saved = create ? yield host.createGroup(value) : yield host.updateGroup(value);
     assertGroup(saved);
@@ -3629,7 +5232,11 @@ function saveStore(store, create, host) {
     if (create) saved = yield host.createStore(name);
     else {
       const id2 = requireId(store.id, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u6807\u8BC6");
-      findRecord(records(yield host.listStores(), assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868"), id2, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
+      findRecord(
+        records(yield host.listStores(), assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868"),
+        id2,
+        "\u5171\u4EAB\u8BB0\u5FC6\u5E93"
+      );
       saved = yield host.renameStore(id2, name);
     }
     assertStore(saved);
@@ -3651,7 +5258,8 @@ function activate(type, id2, host) {
 function parseOwner(ownerKey) {
   assertString(ownerKey, "\u8BB0\u5FC6\u5E93\u6807\u8BC6");
   const parts = ownerKey.split(":");
-  if (parts.length !== 2 || !/^[^:\s]+$/.test(parts[1])) throw new Error("\u8BB0\u5FC6\u5E93\u6807\u8BC6\u683C\u5F0F\u65E0\u6548");
+  if (parts.length !== 2 || !/^[^:\s]+$/.test(parts[1]))
+    throw new Error("\u8BB0\u5FC6\u5E93\u6807\u8BC6\u683C\u5F0F\u65E0\u6548");
   if (parts[0] === "character") return { kind: "CHARACTER", id: parts[1] };
   if (parts[0] === "shared") return { kind: "SHARED", id: parts[1] };
   throw new Error("\u8BB0\u5FC6\u5E93\u547D\u540D\u7A7A\u95F4\u65E0\u6548");
@@ -3659,18 +5267,26 @@ function parseOwner(ownerKey) {
 function menuMemoryOwner(chatId, host) {
   return __async(this, null, function* () {
     requireId(chatId, "memory menu chat id");
-    const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId })).extension;
-    const selection = extension === null ? null : parseChatSelection(decodeChatMarker(extension).selection);
+    const binding = yield findChatBinding(chatId);
+    const selection = binding === null ? null : parseChatSelection(binding.selection);
     if (selection?.kind === "card") return resolveMemoryOwner(selection.id, host);
     const active = yield host.readActive();
-    return resolveMemoryOwner("CharacterCard" in active ? active.CharacterCard.id : "default", host);
+    return resolveMemoryOwner(
+      "CharacterCard" in active ? active.CharacterCard.id : "default",
+      host
+    );
   });
 }
 function requireOwner(ownerKey, host) {
   return __async(this, null, function* () {
     const owner2 = parseOwner(ownerKey);
     if (owner2.kind === "CHARACTER") assertCard(yield host.getCharacter(owner2.id));
-    else findRecord(records(yield host.listStores(), assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868"), owner2.id, "\u5171\u4EAB\u8BB0\u5FC6\u5E93");
+    else
+      findRecord(
+        records(yield host.listStores(), assertStore, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5217\u8868"),
+        owner2.id,
+        "\u5171\u4EAB\u8BB0\u5FC6\u5E93"
+      );
     return owner2;
   });
 }
@@ -3680,7 +5296,8 @@ function resolveMemoryOwner(characterId, host) {
     assertCard(card);
     let ownerKey;
     if (card.memoryBindingMode === "CHARACTER") ownerKey = `character:${card.id}`;
-    else if (card.memoryBindingMode === "SHARED") ownerKey = `shared:${requireId(card.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u7ED1\u5B9A")}`;
+    else if (card.memoryBindingMode === "SHARED")
+      ownerKey = `shared:${requireId(card.sharedMemoryId, "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u7ED1\u5B9A")}`;
     else throw new Error("\u8BB0\u5FC6\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548");
     yield requireOwner(ownerKey, host);
     return ownerKey;
@@ -3695,7 +5312,10 @@ function listMemories(ownerKey, host) {
 function graph(ownerKey, host) {
   return __async(this, null, function* () {
     yield requireOwner(ownerKey, host);
-    const [value, items] = yield Promise.all([host.readMemoryGraph(ownerKey), host.listMemories(ownerKey)]);
+    const [value, items] = yield Promise.all([
+      host.readMemoryGraph(ownerKey),
+      host.listMemories(ownerKey)
+    ]);
     assertGraph(value);
     records(items, assertMemory, "\u8BB0\u5FC6\u5217\u8868");
     return { graph: value, items };
@@ -3706,7 +5326,8 @@ function memoryByTitle2(items, title) {
   let found;
   for (const item of items) {
     if (item.title !== name) continue;
-    if (found !== void 0) throw new Error(`\u8BB0\u5FC6\u6807\u9898\u4E0D\u552F\u4E00\uFF0C\u8BF7\u4F7F\u7528\u6570\u636E\u5E93\u6807\u8BC6\u7F16\u8F91\uFF1A${name}`);
+    if (found !== void 0)
+      throw new Error(`\u8BB0\u5FC6\u6807\u9898\u4E0D\u552F\u4E00\uFF0C\u8BF7\u4F7F\u7528\u6570\u636E\u5E93\u6807\u8BC6\u7F16\u8F91\uFF1A${name}`);
     found = item;
   }
   if (found === void 0) throw new Error(`\u8BB0\u5FC6\u4E0D\u5B58\u5728\uFF1A${name}`);
@@ -3725,7 +5346,14 @@ function saveMemory(ownerKey, values, id2, host) {
   return __async(this, null, function* () {
     assertMemoryValues(values);
     yield requireOwner(ownerKey, host);
-    const normalized = { ...values, title: requireName(values.title, "\u8BB0\u5FC6\u6807\u9898"), contentType: values.contentType.trim(), source: values.source.trim(), folderPath: normalizeFolderPath(values.folderPath), tags: normalizeNames(values.tags) };
+    const normalized = {
+      ...values,
+      title: requireName(values.title, "\u8BB0\u5FC6\u6807\u9898"),
+      contentType: values.contentType.trim(),
+      source: values.source.trim(),
+      folderPath: normalizeFolderPath(values.folderPath),
+      tags: normalizeNames(values.tags)
+    };
     let saved;
     if (id2 === null) saved = yield host.createMemory(ownerKey, normalized);
     else {
@@ -3740,7 +5368,14 @@ function searchMemories(options, host) {
   return __async(this, null, function* () {
     assertSearchOptions(options);
     yield requireOwner(options.ownerKey, host);
-    return records(yield host.searchMemories({ ...options, folderPath: normalizeFolderPath(options.folderPath) }), assertMemory, "\u8BB0\u5FC6\u641C\u7D22");
+    return records(
+      yield host.searchMemories({
+        ...options,
+        folderPath: normalizeFolderPath(options.folderPath)
+      }),
+      assertMemory,
+      "\u8BB0\u5FC6\u641C\u7D22"
+    );
   });
 }
 function combinePrompts(characterId, additionalTagIds, promptFunctionType, host) {
@@ -3748,7 +5383,8 @@ function combinePrompts(characterId, additionalTagIds, promptFunctionType, host)
     const card = yield host.getCharacter(requireId(characterId, "\u89D2\u8272\u5361\u6807\u8BC6"));
     assertCard(card);
     assertStrings(additionalTagIds, "\u9644\u52A0\u6807\u7B7E");
-    if (promptFunctionType !== "CHAT" && promptFunctionType !== "VOICE") throw new Error("\u63D0\u793A\u8BCD\u529F\u80FD\u7C7B\u578B\u65E0\u6548");
+    if (promptFunctionType !== "CHAT" && promptFunctionType !== "VOICE")
+      throw new Error("\u63D0\u793A\u8BCD\u529F\u80FD\u7C7B\u578B\u65E0\u6548");
     const tags = records(yield host.listTags(), assertTag, "\u6807\u7B7E\u5217\u8868");
     const parts = [];
     const setting = card.characterSetting.trim();
@@ -3794,15 +5430,34 @@ function dispatch(request, host) {
       case "readGlobalMemoryPreferences":
         return host.readGlobalMemoryPreferences();
       case "readChatMemoryAutoSaveStatus":
-        return host.readMemoryAutoSaveStatus(yield menuMemoryOwner(request.chatId, host));
+        return host.readMemoryAutoSaveStatus(
+          yield menuMemoryOwner(request.chatId, host)
+        );
       case "updateCurrentChatMemory":
-        return executeDomain("memory.chat.update", { ownerKey: yield menuMemoryOwner(request.chatId, host), chatId: request.chatId }, host);
+        return executeDomain(
+          "memory.chat.update",
+          {
+            ownerKey: yield menuMemoryOwner(request.chatId, host),
+            chatId: request.chatId
+          },
+          host
+        );
       case "writeGlobalMemoryPreference":
         return host.writeGlobalMemoryPreference(request.key, request.value);
       case "searchMemoryDebug": {
         yield requireOwner(request.ownerKey, host);
         assertSearchConfig(request.config);
-        return host.searchMemoryDebug({ ownerKey: request.ownerKey, query: request.query, folderPath: null, relevanceThreshold: request.relevanceThreshold, createdAtStartMs: null, createdAtEndMs: null }, request.config);
+        return host.searchMemoryDebug(
+          {
+            ownerKey: request.ownerKey,
+            query: request.query,
+            folderPath: null,
+            relevanceThreshold: request.relevanceThreshold,
+            createdAtStartMs: null,
+            createdAtEndMs: null
+          },
+          request.config
+        );
       }
       case "readMemoryLink":
         yield requireOwner(request.ownerKey, host);
@@ -3817,7 +5472,12 @@ function dispatch(request, host) {
         return card;
       }
       case "saveCharacter":
-        yield saveCharacter(request.card, request.create, request.tagChanges, host);
+        yield saveCharacter(
+          request.card,
+          request.create,
+          request.tagChanges,
+          host
+        );
         return snapshot(host);
       case "deleteCharacter": {
         const id2 = requireId(request.id, "\u89D2\u8272\u5361\u6807\u8BC6");
@@ -3836,11 +5496,23 @@ function dispatch(request, host) {
         return active;
       }
       case "readChatBinding":
-        return executeDomain("chat.configuration.binding.read", { chatId: request.chatId }, host);
+        return executeDomain(
+          "chat.configuration.binding.read",
+          { chatId: request.chatId },
+          host
+        );
       case "writeChatBinding":
-        return executeDomain("chat.configuration.binding.write", { chatId: request.chatId, selection: request.selection }, host);
+        return executeDomain(
+          "chat.configuration.binding.write",
+          { chatId: request.chatId, selection: request.selection },
+          host
+        );
       case "deleteChatBinding":
-        return executeDomain("chat.configuration.binding.delete", { chatId: request.chatId }, host);
+        return executeDomain(
+          "chat.configuration.binding.delete",
+          { chatId: request.chatId },
+          host
+        );
       case "listGroups":
         return records(yield host.listGroups(), assertGroup, "\u89D2\u8272\u7EC4\u5217\u8868");
       case "getGroup": {
@@ -3882,7 +5554,8 @@ function dispatch(request, host) {
         const user = yield host.readUser(request.ownerKey);
         assertObject(user, "\u7528\u6237\u8D44\u6599");
         assertString(user.content, "\u7528\u6237\u8D44\u6599\u5185\u5BB9");
-        if (user.ownerKey !== request.ownerKey) throw new Error("\u7528\u6237\u8D44\u6599 owner \u4E0E\u8BF7\u6C42\u4E0D\u4E00\u81F4");
+        if (user.ownerKey !== request.ownerKey)
+          throw new Error("\u7528\u6237\u8D44\u6599 owner \u4E0E\u8BF7\u6C42\u4E0D\u4E00\u81F4");
         return user;
       }
       case "writeUser":
@@ -3895,19 +5568,44 @@ function dispatch(request, host) {
       case "listMemories":
         return listMemories(request.ownerKey, host);
       case "searchMemory":
-        return searchMemories({ ownerKey: request.ownerKey, query: request.query, folderPath: null, relevanceThreshold: 0, createdAtStartMs: null, createdAtEndMs: null }, host);
+        return searchMemories(
+          {
+            ownerKey: request.ownerKey,
+            query: request.query,
+            folderPath: null,
+            relevanceThreshold: 0,
+            createdAtStartMs: null,
+            createdAtEndMs: null
+          },
+          host
+        );
       case "searchMemories":
         return searchMemories(request.options, host);
       case "saveMemory": {
         assertString(request.tags, "\u8BB0\u5FC6\u6807\u7B7E");
         assertString(request.folderPath, "\u8BB0\u5FC6\u6587\u4EF6\u5939");
-        const values = { title: request.title, content: request.content, contentType: request.contentType, source: request.source, credibility: request.credibility, importance: request.importance, folderPath: request.folderPath, tags: normalizeNames(request.tags.split(",")) };
-        const id2 = request.originalTitle === null ? null : memoryByTitle2(yield listMemories(request.ownerKey, host), request.originalTitle).id;
+        const values = {
+          title: request.title,
+          content: request.content,
+          contentType: request.contentType,
+          source: request.source,
+          credibility: request.credibility,
+          importance: request.importance,
+          folderPath: request.folderPath,
+          tags: normalizeNames(request.tags.split(","))
+        };
+        const id2 = request.originalTitle === null ? null : memoryByTitle2(
+          yield listMemories(request.ownerKey, host),
+          request.originalTitle
+        ).id;
         yield saveMemory(request.ownerKey, values, id2, host);
         return graph(request.ownerKey, host);
       }
       case "deleteMemory": {
-        const memory = memoryByTitle2(yield listMemories(request.ownerKey, host), request.title);
+        const memory = memoryByTitle2(
+          yield listMemories(request.ownerKey, host),
+          request.title
+        );
         yield host.deleteMemory(request.ownerKey, memory.id);
         return graph(request.ownerKey, host);
       }
@@ -3918,7 +5616,13 @@ function dispatch(request, host) {
         const items = yield listMemories(request.ownerKey, host);
         const source = memoryByTitle2(items, request.sourceTitle), target = memoryByTitle2(items, request.targetTitle);
         if (source.id === target.id) throw new Error("\u4E0D\u80FD\u521B\u5EFA\u8BB0\u5FC6\u81EA\u8EAB\u5173\u7CFB");
-        yield host.createLink(request.ownerKey, { sourceMemoryId: source.id, targetMemoryId: target.id, type_, weight: request.weight, description: request.description });
+        yield host.createLink(request.ownerKey, {
+          sourceMemoryId: source.id,
+          targetMemoryId: target.id,
+          type_,
+          weight: request.weight,
+          description: request.description
+        });
         return graph(request.ownerKey, host);
       }
       case "deleteLink":
@@ -3931,7 +5635,11 @@ function dispatch(request, host) {
         requireDecimal(request.linkId, "\u8BB0\u5FC6\u5173\u7CFB\u6807\u8BC6", true);
         assertNumber(request.weight, "\u5173\u7CFB\u5F3A\u5EA6", 0, 1);
         assertString(request.description, "\u5173\u7CFB\u63CF\u8FF0");
-        yield host.updateLink(request.ownerKey, request.linkId, { type_: requireName(request.linkType, "\u5173\u7CFB\u7C7B\u578B"), weight: request.weight, description: request.description });
+        yield host.updateLink(request.ownerKey, request.linkId, {
+          type_: requireName(request.linkType, "\u5173\u7CFB\u7C7B\u578B"),
+          weight: request.weight,
+          description: request.description
+        });
         return graph(request.ownerKey, host);
       }
       case "readMemorySettings": {
@@ -3955,12 +5663,23 @@ function dispatch(request, host) {
         assertSearchConfig(request.config);
         yield requireOwner(request.ownerKey, host);
         const current = yield host.readMemorySettings(request.ownerKey);
-        yield host.writeMemorySettings(request.ownerKey, { ...request.settings, nextAutoSaveRunAtMs: current.nextAutoSaveRunAtMs });
+        yield host.writeMemorySettings(request.ownerKey, {
+          ...request.settings,
+          nextAutoSaveRunAtMs: current.nextAutoSaveRunAtMs
+        });
         yield host.writeMemorySearchConfig(request.ownerKey, request.config);
-        return { settings: yield host.readMemorySettings(request.ownerKey), config: yield host.readMemorySearchConfig(request.ownerKey) };
+        return {
+          settings: yield host.readMemorySettings(request.ownerKey),
+          config: yield host.readMemorySearchConfig(request.ownerKey)
+        };
       }
       case "combinePrompts":
-        return combinePrompts(request.characterId, request.additionalTagIds, request.promptFunctionType, host);
+        return combinePrompts(
+          request.characterId,
+          request.additionalTagIds,
+          request.promptFunctionType,
+          host
+        );
       case "importCharacter": {
         const tags = records(yield host.listTags(), assertTag, "\u6807\u7B7E\u5217\u8868");
         const plan = decodeCharacterImport(request.content, request.format, tags);
@@ -3988,27 +5707,63 @@ function dispatch(request, host) {
         yield requireOwner(request.ownerKey, host);
         return host.readMemoryAutoSaveStatus(request.ownerKey);
       case "listMemoryChats":
-        return executeDomain("memory.chat.list", { ownerKey: request.ownerKey }, host);
+        return executeDomain(
+          "memory.chat.list",
+          { ownerKey: request.ownerKey },
+          host
+        );
       case "updateChatMemory":
-        return executeDomain("memory.chat.update", { ownerKey: request.ownerKey, chatId: request.chatId }, host);
+        return executeDomain(
+          "memory.chat.update",
+          { ownerKey: request.ownerKey, chatId: request.chatId },
+          host
+        );
       case "autoCategorizeMemory":
-        return executeDomain("memory.categorize", { ownerKey: request.ownerKey }, host);
+        return executeDomain(
+          "memory.categorize",
+          { ownerKey: request.ownerKey },
+          host
+        );
       case "startMemoryRebuild":
-        return executeDomain("memory.rebuild.start", { ownerKey: request.ownerKey, rebuild: request.rebuild }, host);
+        return executeDomain(
+          "memory.rebuild.start",
+          { ownerKey: request.ownerKey, rebuild: request.rebuild },
+          host
+        );
       case "readMemoryRebuildProgress":
-        return executeDomain("memory.rebuild.progress", { ownerKey: request.ownerKey }, host);
+        return executeDomain(
+          "memory.rebuild.progress",
+          { ownerKey: request.ownerKey },
+          host
+        );
       case "cancelMemoryRebuild":
-        return executeDomain("memory.rebuild.cancel", { ownerKey: request.ownerKey }, host);
+        return executeDomain(
+          "memory.rebuild.cancel",
+          { ownerKey: request.ownerKey },
+          host
+        );
       case "rebuildMemoryEmbeddings":
-        return executeDomain("memory.embeddings.rebuild", { ownerKey: request.ownerKey }, host);
+        return executeDomain(
+          "memory.embeddings.rebuild",
+          { ownerKey: request.ownerKey },
+          host
+        );
       case "exportMemory":
         yield requireOwner(request.ownerKey, host);
-        return { ownerKey: request.ownerKey, content: yield exportMemoryBackup(request.ownerKey, host) };
+        return {
+          ownerKey: request.ownerKey,
+          content: yield exportMemoryBackup(request.ownerKey, host)
+        };
       case "importMemory": {
         yield requireOwner(request.ownerKey, host);
-        if (request.strategy !== "SKIP" && request.strategy !== "UPDATE" && request.strategy !== "CREATE_NEW") throw new Error("\u8BB0\u5FC6\u5BFC\u5165\u7B56\u7565\u65E0\u6548");
+        if (request.strategy !== "SKIP" && request.strategy !== "UPDATE" && request.strategy !== "CREATE_NEW")
+          throw new Error("\u8BB0\u5FC6\u5BFC\u5165\u7B56\u7565\u65E0\u6548");
         const document = decodeMemoryBackup(request.content);
-        const result2 = yield host.importMemorySpace(request.ownerKey, document.space, request.strategy);
+        const result2 = yield host.importMemorySpace(
+          request.ownerKey,
+          document.space,
+          request.strategy
+        );
         yield host.writeUser(request.ownerKey, document.userMarkdown);
         return { ownerKey: request.ownerKey, result: result2 };
       }
@@ -4024,57 +5779,151 @@ function dispatchDomain(operation, input, host) {
 }
 
 // src/storage/records.ts
-var collections = ["cards", "groups", "tags", "stores", "conversationGroups", "owners", "memories", "links", "chunks", "candidates", "embeddings"];
-var ownerCollections = ["memories", "links", "chunks", "candidates", "embeddings"];
+var collections2 = [
+  "cards",
+  "groups",
+  "tags",
+  "stores",
+  "conversationGroups",
+  "owners",
+  "memories",
+  "links",
+  "chunks",
+  "candidates",
+  "embeddings"
+];
+var ownerCollections = [
+  "memories",
+  "links",
+  "chunks",
+  "candidates",
+  "embeddings"
+];
 function clone(value) {
   if (Array.isArray(value)) return value.map(clone);
-  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, clone(item)])
+    );
   return value;
 }
 function equal(left, right) {
   if (left === right) return true;
-  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return false;
   const keys = Object.keys(left), other = Object.keys(right);
-  return Array.isArray(left) === Array.isArray(right) && keys.length === other.length && keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && equal(left[key], right[key]));
+  return Array.isArray(left) === Array.isArray(right) && keys.length === other.length && keys.every(
+    (key) => Object.prototype.hasOwnProperty.call(right, key) && equal(
+      left[key],
+      right[key]
+    )
+  );
 }
 function recordKey(collection, value, index) {
-  const record2 = value;
-  if (collection !== "embeddings") return record2.id;
-  return String(index).padStart(20, "0");
+  if (collection === "embeddings") return String(index).padStart(20, "0");
+  assertObject(value, "stored record");
+  return requireId(value.id, "stored record id");
+}
+function storedValue(record2) {
+  return record2;
 }
 function records2(state) {
   const result2 = [];
-  for (const collection of ["cards", "groups", "tags", "stores", "conversationGroups"]) {
-    for (const record2 of state[collection]) result2.push({ collection, key: record2.id, value: record2, version: null });
+  for (const collection of [
+    "cards",
+    "groups",
+    "tags",
+    "stores",
+    "conversationGroups"
+  ]) {
+    for (const record2 of state[collection])
+      result2.push({
+        collection,
+        key: record2.id,
+        value: storedValue(record2),
+        version: null
+      });
   }
   for (const owner2 of state.owners) {
     const { memories, links, chunks, candidates, embeddings, ...metadata } = owner2;
-    result2.push({ collection: "owners", key: owner2.ownerKey, value: metadata, version: null });
-    for (const collection of ownerCollections) for (const [index, record2] of owner2[collection].entries()) result2.push({ collection, key: owner2.ownerKey + "/" + recordKey(collection, record2, index), value: { ownerKey: owner2.ownerKey, record: record2 }, version: null });
+    result2.push({
+      collection: "owners",
+      key: owner2.ownerKey,
+      value: storedValue(metadata),
+      version: null
+    });
+    for (const collection of ownerCollections)
+      for (const [index, record2] of owner2[collection].entries())
+        result2.push({
+          collection,
+          key: owner2.ownerKey + "/" + recordKey(collection, storedValue(record2), index),
+          value: storedValue({ ownerKey: owner2.ownerKey, record: record2 }),
+          version: null
+        });
   }
   return result2;
 }
 function stateFromRecords(metadata, rows) {
-  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error("Invalid character database metadata");
-  if (metadata.migrationStatus === "writing") throw new Error("Character migration has not completed");
-  const state = { version: metadata.version, nextId: metadata.nextId, active: metadata.active, memoryPreferences: metadata.memoryPreferences === void 0 ? { userDescriptionEnabled: true, autoUpdateEnabled: true } : metadata.memoryPreferences, cards: [], groups: [], tags: [], stores: [], conversationGroups: [], owners: [] };
+  assertObject(metadata, "character database metadata");
+  if (metadata.migrationStatus === "writing")
+    throw new Error("Character migration has not completed");
+  const state = {
+    version: metadata.version,
+    nextId: metadata.nextId,
+    active: metadata.active,
+    memoryPreferences: metadata.memoryPreferences,
+    cards: [],
+    groups: [],
+    tags: [],
+    stores: [],
+    conversationGroups: [],
+    owners: []
+  };
   const owners = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    if (row.collection === "owners") {
-      const owner2 = { ...row.value, memories: [], links: [], chunks: [], candidates: [], embeddings: [] };
-      if (owner2.ownerKey !== row.key || owners.has(row.key)) throw new Error("Invalid memory owner record: " + row.key);
-      owners.set(row.key, owner2);
-      state.owners.push(owner2);
-    } else if (!ownerCollections.some((collection) => collection === row.collection)) {
-      state[row.collection].push(row.value);
+    switch (row.collection) {
+      case "owners": {
+        assertObject(row.value, "memory owner metadata");
+        const owner2 = {
+          ...row.value,
+          memories: [],
+          links: [],
+          chunks: [],
+          candidates: [],
+          embeddings: []
+        };
+        if (owner2.ownerKey !== row.key || owners.has(row.key))
+          throw new Error("Invalid memory owner record: " + row.key);
+        owners.set(row.key, owner2);
+        state.owners.push(owner2);
+        break;
+      }
+      case "cards":
+      case "groups":
+      case "tags":
+      case "stores":
+      case "conversationGroups":
+        state[row.collection].push(row.value);
+        break;
     }
   }
   for (const row of rows) {
-    if (!ownerCollections.some((collection) => collection === row.collection)) continue;
-    const envelope = row.value, owner2 = owners.get(envelope.ownerKey);
-    if (owner2 === void 0 || row.key !== envelope.ownerKey + "/" + recordKey(row.collection, envelope.record, owner2[row.collection].length)) throw new Error("Invalid owner-scoped record: " + row.key);
-    owner2[row.collection].push(envelope.record);
+    if (!ownerCollections.some((collection) => collection === row.collection))
+      continue;
+    assertObject(row.value, "owner-scoped record");
+    const ownerKey = requireId(row.value.ownerKey, "record owner key");
+    const owner2 = owners.get(ownerKey);
+    if (owner2 === void 0)
+      throw new Error("Missing record owner: " + ownerKey);
+    const entries = owner2[row.collection];
+    if (!Array.isArray(entries))
+      throw new Error("Invalid owner collection: " + row.collection);
+    if (row.key !== ownerKey + "/" + recordKey(row.collection, row.value.record, entries.length)) {
+      throw new Error("Invalid owner-scoped record: " + row.key);
+    }
+    entries.push(row.value.record);
   }
+  assertCharacterState(state);
   return state;
 }
 
@@ -4174,8 +6023,8 @@ function searchMemorySpaceDebug(space, options, config) {
       const queryVector = yield embeddingFor(space, options.query);
       for (const document of index) {
         const memory = document.memory;
-        const vector = yield embeddingFor(space, memory.isDocumentNode ? memory.title : memory.content);
-        let similarity = Math.max(0, cosineSimilarity(queryVector, vector));
+        const vector2 = yield embeddingFor(space, memory.isDocumentNode ? memory.title : memory.content);
+        let similarity = Math.max(0, cosineSimilarity(queryVector, vector2));
         if (memory.isDocumentNode) {
           for (const chunk of space.chunks) if (chunk.memoryUuid === memory.uuid) similarity = Math.max(similarity, cosineSimilarity(queryVector, yield embeddingFor(space, chunk.content)));
         }
@@ -4219,14 +6068,14 @@ function searchMemorySpaceDebug(space, options, config) {
       }
       const denominator = keywordWeight + tagWeight + vectorWeight + edgeWeight;
       if (denominator === 0) throw new Error("Memory search has no enabled scoring weights");
-      let vector = 0;
+      let vector2 = 0;
       if (vectorWeight > 0) {
         const value = semantic.get(document.memory.id);
         if (value === void 0) throw new Error("Semantic search index is inconsistent");
-        vector = value;
+        vector2 = value;
       }
-      const score3 = (keyword * keywordWeight + tagValue * tagWeight + vector * vectorWeight + edge * edgeWeight) / denominator;
-      scores.push({ memory: document.memory, score: score3, keywordScore: keyword * keywordWeight / denominator, tagScore: tagValue * tagWeight / denominator, vectorScore: vector * vectorWeight / denominator, edgeScore: edge * edgeWeight / denominator, passedThreshold: score3 > 0 && score3 >= options.relevanceThreshold });
+      const score3 = (keyword * keywordWeight + tagValue * tagWeight + vector2 * vectorWeight + edge * edgeWeight) / denominator;
+      scores.push({ memory: document.memory, score: score3, keywordScore: keyword * keywordWeight / denominator, tagScore: tagValue * tagWeight / denominator, vectorScore: vector2 * vectorWeight / denominator, edgeScore: edge * edgeWeight / denominator, passedThreshold: score3 > 0 && score3 >= options.relevanceThreshold });
     }
     scores.sort(
       /** Orders actual ranked hits with a stable lossless identity tie breaker. */
@@ -4638,13 +6487,13 @@ var RepositorySession = class {
   /** Enumerates only real host records and their authenticated plugin extension markers. */
   listChatBindings() {
     return __async(this, null, function* () {
-      return listChatExtensionBindings();
+      return listChatBindings();
     });
   }
   /** Reads the sole record-extension source and validates its actual stored domain reference. */
   readChatBinding(chatId) {
     return __async(this, null, function* () {
-      const binding = yield readChatExtensionBinding(chatId);
+      const binding = yield readChatBinding(chatId);
       requireChatSelection(binding.selection, this.state.cards, this.state.groups);
       return binding;
     });
@@ -4653,13 +6502,13 @@ var RepositorySession = class {
   writeChatBinding(binding) {
     return __async(this, null, function* () {
       requireChatSelection(binding.selection, this.state.cards, this.state.groups);
-      return writeChatExtensionBinding(binding);
+      return writeChatBinding(binding);
     });
   }
   /** Deletes only the authenticated record namespace without touching manual membership or file state. */
   deleteChatBinding(chatId) {
     return __async(this, null, function* () {
-      return deleteChatExtensionBinding(chatId);
+      return deleteChatBinding(chatId);
     });
   }
   /** Reads the actual owner USER.md file or the edit staged within this same operation. */
@@ -5103,8 +6952,8 @@ function completed(result2) {
 }
 var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   /** Retains the host database handle and the explicit external directory readers. */
-  constructor(database, directory, directories) {
-    this.database = database;
+  constructor(database2, directory, directories) {
+    this.database = database2;
     this.directory = directory;
     this.directories = directories;
     this.busy = false;
@@ -5115,19 +6964,32 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   static open(directories = null) {
     return __async(this, null, function* () {
       const directory = ToolPkg.getSpaceDataDir();
-      if (typeof directory !== "string" || directory.trim() === "") throw new Error("Plugin data directory is unavailable");
-      const database = yield Tools.Storage.objects.open({ path: directory + "/characters.sqlite" });
-      const repository = new _DatabaseCharacterRepository(database, directory, directories);
-      const metadata = yield database.collection("meta").get("state");
+      if (typeof directory !== "string" || directory.trim() === "")
+        throw new Error("Plugin data directory is unavailable");
+      const database2 = yield RelationalDatabase.open();
+      const repository = new _DatabaseCharacterRepository(
+        database2,
+        directory,
+        directories
+      );
+      const metadata = yield database2.get("meta", "state");
       if (metadata === null) {
         const rows = yield repository.readRecords();
-        if (rows.length !== 0) throw new Error("Character database has records without metadata");
+        if (rows.length !== 0)
+          throw new Error("Character database has records without metadata");
         const state = createInitialState(Date.now());
         assertCharacterState(state);
-        const documents = state.owners.map((owner2) => ({ ownerKey: owner2.ownerKey, path: directory + "/" + owner2.userDocumentPath, content: "", newDocument: true }));
+        const documents = state.owners.map((owner2) => ({
+          ownerKey: owner2.ownerKey,
+          path: directory + "/" + owner2.userDocumentPath,
+          content: "",
+          newDocument: true
+        }));
         yield repository.publish(state, [], documents, [], null, {});
       } else {
-        assertCharacterState(stateFromRecords(metadata.value, yield repository.readRecords()));
+        assertCharacterState(
+          stateFromRecords(metadata.value, yield repository.readRecords())
+        );
       }
       return repository;
     });
@@ -5135,17 +6997,14 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   /** Overlaps the fixed collection reads while preserving each collection's ordered pagination. */
   readRecords() {
     return __async(this, null, function* () {
-      const results = yield Promise.allSettled(collections.map((collection) => __async(this, null, function* () {
-        const rows2 = [];
-        let after = null;
-        for (; ; ) {
-          const page = yield this.database.collection(collection).list(after, 1e3);
-          for (const entry of page) rows2.push({ collection, ...entry });
-          if (page.length < 1e3) break;
-          after = page[page.length - 1].key;
-        }
-        return rows2;
-      })));
+      const results = yield Promise.allSettled(
+        collections2.map((collection) => __async(this, null, function* () {
+          const rows2 = [];
+          for (const entry of yield this.database.read(collection))
+            rows2.push({ collection, ...entry });
+          return rows2;
+        }))
+      );
       const rows = [];
       for (const result2 of results) {
         if (result2.status === "rejected") throw result2.reason;
@@ -5160,26 +7019,186 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
       yield this.acquire();
       try {
         if (this.publicationFailure !== null) throw this.publicationFailure.error;
-        const metadata = yield this.database.collection("meta").get("state");
-        if (metadata === null) throw new Error("Character database metadata disappeared");
-        const rows = yield this.readRecords(), checked = yield this.database.collection("meta").get("state");
-        if (checked === null || checked.version !== metadata.version) throw new Error("Character records changed during the read; operation was not started");
+        const metadata = yield this.database.get("meta", "state");
+        if (metadata === null)
+          throw new Error("Character database metadata disappeared");
+        const rows = yield this.readRecords(), checked = yield this.database.get("meta", "state");
+        if (checked === null || checked.version !== metadata.version)
+          throw new Error(
+            "Character records changed during the read; operation was not started"
+          );
+        assertObject(metadata.value, "character metadata");
         const before = stateFromRecords(metadata.value, rows);
-        assertCharacterState(before);
-        const state = clone(before), session = new RepositorySession(state, this.directory, this.directories);
+        const state = clone(before), session = new RepositorySession(
+          state,
+          this.directory,
+          this.directories
+        );
         const result2 = yield action(session);
         assertCharacterState(state);
         const documents = session.documentWrites();
-        const removed = before.owners.filter((owner2) => !state.owners.some((retained2) => retained2.ownerKey === owner2.ownerKey)).map((owner2) => this.directory + "/" + owner2.userDocumentPath.slice(0, owner2.userDocumentPath.lastIndexOf("/")));
-        if (!equal(before, state) || documents.length !== 0 || metadata.value.memoryPreferences === void 0) {
+        const removed = before.owners.filter(
+          (owner2) => !state.owners.some(
+            (retained2) => retained2.ownerKey === owner2.ownerKey
+          )
+        ).map(
+          (owner2) => this.directory + "/" + owner2.userDocumentPath.slice(
+            0,
+            owner2.userDocumentPath.lastIndexOf("/")
+          )
+        );
+        if (!equal(before, state) || documents.length !== 0) {
           try {
-            yield this.publish(state, rows, documents, removed, metadata.version, metadata.value);
+            yield this.publish(
+              state,
+              rows,
+              documents,
+              removed,
+              metadata.version,
+              metadata.value
+            );
           } catch (error) {
             this.publicationFailure = { error };
             throw error;
           }
         }
         return result2;
+      } finally {
+        this.release();
+      }
+    });
+  }
+  /** Reads only complete role presentation records under the shared operation queue. */
+  readSidebarDirectory() {
+    return __async(this, null, function* () {
+      yield this.acquire();
+      try {
+        if (this.publicationFailure !== null) throw this.publicationFailure.error;
+        const metadata = yield this.database.get("meta", "state");
+        if (metadata === null)
+          throw new Error("Character database metadata disappeared");
+        assertObject(metadata.value, "character metadata");
+        if (metadata.value.migrationStatus === "writing")
+          throw new Error("Character migration has not completed");
+        const result2 = yield Promise.allSettled([
+          this.database.read("cards"),
+          this.database.read("groups")
+        ]);
+        const cards = [], groups = [];
+        for (const read of result2)
+          if (read.status === "rejected") throw read.reason;
+        if (result2[0].status === "fulfilled") {
+          for (const row of result2[0].value) {
+            assertCard(row.value);
+            cards.push(row.value);
+          }
+        }
+        if (result2[1].status === "fulfilled") {
+          for (const row of result2[1].value) {
+            assertGroup(row.value);
+            groups.push(row.value);
+          }
+        }
+        const ids = new Set(cards.map((card) => card.id));
+        for (const group of groups)
+          for (const member2 of group.members) {
+            if (!ids.has(member2.characterCardId))
+              throw new Error("Missing group member: " + member2.characterCardId);
+          }
+        const checked = yield this.database.get("meta", "state");
+        if (checked === null || checked.version !== metadata.version)
+          throw new Error("Character directory changed during the read");
+        return { cards, groups };
+      } finally {
+        this.release();
+      }
+    });
+  }
+  /** Reads memory settings without loading bodies, vectors or job relations. */
+  readMemorySettings(ownerKey) {
+    return this.readOwnerMetadata(ownerKey, (row) => {
+      const settings2 = decodeScalarProjection("owners", "settings", row);
+      assertMemorySettings(settings2);
+      return settings2;
+    });
+  }
+  /** Reads only the selected owner's search weights and mode. */
+  readMemorySearchConfig(ownerKey) {
+    return this.readOwnerMetadata(ownerKey, (row) => {
+      const config = decodeScalarProjection("owners", "searchConfig", row);
+      assertSearchConfig(config);
+      return config;
+    });
+  }
+  /** Reads global behavior flags directly from metadata without loading any owner records. */
+  readGlobalMemoryPreferences() {
+    return __async(this, null, function* () {
+      yield this.acquire();
+      try {
+        if (this.publicationFailure !== null) throw this.publicationFailure.error;
+        const entry = yield this.database.get("meta", "state");
+        if (entry === null)
+          throw new Error("Character database metadata disappeared");
+        assertObject(entry.value, "character metadata");
+        if (entry.value.migrationStatus === "writing")
+          throw new Error("Character migration has not completed");
+        const flags = entry.value.memoryPreferences;
+        assertObject(flags, "global memory preferences");
+        assertBoolean(flags.userDescriptionEnabled, "user description enabled");
+        assertBoolean(flags.autoUpdateEnabled, "memory auto update enabled");
+        return {
+          userDescriptionEnabled: flags.userDescriptionEnabled,
+          autoUpdateEnabled: flags.autoUpdateEnabled
+        };
+      } finally {
+        this.release();
+      }
+    });
+  }
+  /** Reads the selected owner's actual USER.md document. */
+  readUser(ownerKey) {
+    return this.readOwnerMetadata(ownerKey, (row) => __async(this, null, function* () {
+      const document = yield Tools.Files.read(
+        this.ownerDocumentPath(ownerKey, row)
+      );
+      assertString(document.content, "USER.md content");
+      return { ownerKey, content: document.content };
+    }));
+  }
+  /** Resolves the canonical document path for an existing owner. */
+  readUserPath(ownerKey) {
+    return this.readOwnerMetadata(
+      ownerKey,
+      (row) => this.ownerDocumentPath(ownerKey, row)
+    );
+  }
+  /** Validates the stored document identity before exposing a filesystem path. */
+  ownerDocumentPath(ownerKey, row) {
+    assertString(row.userDocumentPath, "owner document path");
+    if (row.userDocumentPath !== userDocumentPath(ownerKey))
+      throw new Error("Invalid owner document path");
+    return this.directory + "/" + row.userDocumentPath;
+  }
+  /** Serializes one indexed owner query with domain mutations and checks migration readiness. */
+  readOwnerMetadata(ownerKey, action) {
+    return __async(this, null, function* () {
+      requireId(ownerKey, "memory owner");
+      yield this.acquire();
+      try {
+        if (this.publicationFailure !== null) throw this.publicationFailure.error;
+        const rows = yield this.database.sql.query(
+          `SELECT o.* FROM "owners" o JOIN "meta" state ON state."_key" = 'state'
+        WHERE o."_key" = ? AND (state."migrationStatus__state" = 0 OR state."migrationStatus" = 'complete')
+        AND (EXISTS (SELECT 1 FROM "cards" c WHERE 'character:' || c."id" = o."ownerKey")
+          OR EXISTS (SELECT 1 FROM "stores" s WHERE 'shared:' || s."id" = o."ownerKey"))`,
+          [ownerKey]
+        );
+        if (rows.length !== 1 || rows[0].ownerKey !== ownerKey) {
+          throw new Error(
+            "Memory owner is missing or its migration is incomplete: " + ownerKey
+          );
+        }
+        return yield action(rows[0]);
       } finally {
         this.release();
       }
@@ -5204,30 +7223,70 @@ var DatabaseCharacterRepository = class _DatabaseCharacterRepository {
   /** Commits only changed domain records and retains the migration provenance in the metadata guard. */
   publish(state, before, documents, removed, metadataVersion, metadata) {
     return __async(this, null, function* () {
-      const previous = new Map(before.map((row) => [row.collection + "\0" + row.key, row]));
+      const previous = new Map(
+        before.map((row) => [row.collection + "\0" + row.key, row])
+      );
       const mutations = [];
       for (const row of records2(state)) {
         const key = row.collection + "\0" + row.key, existing = previous.get(key);
-        if (existing === void 0 || !equal(existing.value, row.value)) mutations.push({ op: "put", collection: row.collection, key: row.key, value: row.value, expectedVersion: existing === void 0 ? null : existing.version });
+        if (existing === void 0 || !equal(existing.value, row.value))
+          mutations.push({
+            op: "put",
+            collection: row.collection,
+            key: row.key,
+            value: row.value,
+            expectedVersion: existing === void 0 ? null : existing.version
+          });
         previous.delete(key);
       }
-      for (const row of previous.values()) mutations.push({ op: "delete", collection: row.collection, key: row.key, expectedVersion: row.version });
-      mutations.push({ op: "put", collection: "meta", key: "state", value: { ...metadata, version: state.version, nextId: state.nextId, active: state.active, memoryPreferences: state.memoryPreferences }, expectedVersion: metadataVersion });
-      if (mutations.length > 1e3) throw new Error("Character operation exceeds the host transaction limit of 1000 records");
+      for (const row of previous.values())
+        mutations.push({
+          op: "delete",
+          collection: row.collection,
+          key: row.key,
+          expectedVersion: row.version
+        });
+      mutations.push({
+        op: "put",
+        collection: "meta",
+        key: "state",
+        value: {
+          ...metadata,
+          version: state.version,
+          nextId: state.nextId,
+          active: storedValue(state.active),
+          memoryPreferences: storedValue(state.memoryPreferences)
+        },
+        expectedVersion: metadataVersion
+      });
+      if (mutations.length > 1e3)
+        throw new Error(
+          "Character operation exceeds the host transaction limit of 1000 records"
+        );
       const stagedDocuments = [];
       for (const document of documents) {
         if (document.newDocument) {
           const existing = yield Tools.Files.exists(document.path);
-          if (existing.exists) throw new Error("New owner document path is already occupied: " + document.path);
-          completed(yield Tools.Files.mkdir(document.path.slice(0, document.path.lastIndexOf("/")), true));
+          if (existing.exists)
+            throw new Error(
+              "New owner document path is already occupied: " + document.path
+            );
+          completed(
+            yield Tools.Files.mkdir(
+              document.path.slice(0, document.path.lastIndexOf("/")),
+              true
+            )
+          );
         }
         const stagedPath = document.path + ".pending";
         completed(yield Tools.Files.write(stagedPath, document.content, false));
         stagedDocuments.push({ path: document.path, stagedPath });
       }
       yield this.database.commit(mutations);
-      for (const document of stagedDocuments) completed(yield Tools.Files.move(document.stagedPath, document.path));
-      for (const path of removed) completed(yield Tools.Files.deleteFile(path, true));
+      for (const document of stagedDocuments)
+        completed(yield Tools.Files.move(document.stagedPath, document.path));
+      for (const path of removed)
+        completed(yield Tools.Files.deleteFile(path, true));
     });
   }
 };
@@ -5410,8 +7469,8 @@ function chatContextActionsApi(event) {
       const active = yield service.dispatchDomain("activePrompt.get", {});
       return contextActions(chatUiRoutes, { chatId: null, selection: encodeSelection(active) }, directory);
     }
-    const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId: input.chatId })).extension;
-    const selection = extension === null ? null : decodeChatMarker(extension).selection;
+    const binding = yield findChatBinding(input.chatId);
+    const selection = binding === null ? null : binding.selection;
     return contextActions(chatUiRoutes, { chatId: input.chatId, selection }, directory);
   });
 }
@@ -5420,10 +7479,7 @@ function chatListSectionsApi(event) {
     requireUiCaller(event.callerPackage);
     const input = parseSectionsRequest(event.payload), service = yield getService(), directory = yield service.snapshot();
     const bindings = [];
-    for (const chat of input.chats) {
-      const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId: chat.id })).extension;
-      if (extension !== null) bindings.push({ chatId: chat.id, selection: decodeChatMarker(extension).selection });
-    }
+    for (const [chatId, selection] of yield bindingsForChats(input.chats.map((chat) => chat.id))) bindings.push({ chatId, selection });
     return listSections(chatUiRoutes.editor, directory, bindings, input.chats.map(
       /** Preserves the host's actual chat ordering in each section. */
       (chat) => chat.id
@@ -5630,33 +7686,33 @@ function optionalIdentifier(raw) {
   const value = raw.trim();
   return value === "" ? null : value;
 }
-function bool(raw, field) {
+function bool(raw, field2) {
   if (raw === "true") return true;
   if (raw === "false") return false;
-  throw new Error(`invalid bool for ${field}: ${raw}; expected true | false`);
+  throw new Error(`invalid bool for ${field2}: ${raw}; expected true | false`);
 }
-function integer2(raw, field) {
-  if (!/^[+-]?\d+$/.test(raw)) throw new Error(`${field} must be an integer: ${raw}`);
+function integer2(raw, field2) {
+  if (!/^[+-]?\d+$/.test(raw)) throw new Error(`${field2} must be an integer: ${raw}`);
   const value = Number(raw);
-  if (!Number.isSafeInteger(value)) throw new Error(`${field} must be a safe integer: ${raw}`);
+  if (!Number.isSafeInteger(value)) throw new Error(`${field2} must be a safe integer: ${raw}`);
   return value;
 }
-function number2(raw, field) {
-  if (raw.trim() === "") throw new Error(`${field} must be a finite number`);
+function number2(raw, field2) {
+  if (raw.trim() === "") throw new Error(`${field2} must be a finite number`);
   const value = Number(raw);
-  if (!Number.isFinite(value)) throw new Error(`${field} must be a finite number: ${raw}`);
+  if (!Number.isFinite(value)) throw new Error(`${field2} must be a finite number: ${raw}`);
   return value;
 }
-function json(raw, field) {
+function json(raw, field2) {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    throw new Error(`${field}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`${field2}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
-function characterField(field, raw) {
+function characterField(field2, raw) {
   let value;
-  switch (field) {
+  switch (field2) {
     case "name":
     case "description":
     case "characterSetting":
@@ -5680,28 +7736,28 @@ function characterField(field, raw) {
       break;
     case "sharedMemoryMounts":
     case "toolAccessConfig":
-      value = json(raw, field);
+      value = json(raw, field2);
       break;
     case "isDefault":
-      value = bool(raw, field);
+      value = bool(raw, field2);
       break;
     case "createdAt":
     case "updatedAt":
-      value = integer2(raw, field);
+      value = integer2(raw, field2);
       break;
     default:
-      throw new Error(`unsupported character field: ${field}`);
+      throw new Error(`unsupported character field: ${field2}`);
   }
-  return parseCharacterChanges({ [field]: value });
+  return parseCharacterChanges({ [field2]: value });
 }
-function groupField(field, raw) {
-  switch (field) {
+function groupField(field2, raw) {
+  switch (field2) {
     case "name":
     case "description":
-      return parseGroupChanges({ [field]: raw });
+      return parseGroupChanges({ [field2]: raw });
     case "createdAt":
     case "updatedAt":
-      return parseGroupChanges({ [field]: integer2(raw, field) });
+      return parseGroupChanges({ [field2]: integer2(raw, field2) });
     case "members": {
       const members2 = [];
       const values = raw.split(",");
@@ -5712,35 +7768,35 @@ function groupField(field, raw) {
       return parseGroupChanges({ members: members2 });
     }
     default:
-      throw new Error(`unsupported group field: ${field}`);
+      throw new Error(`unsupported group field: ${field2}`);
   }
 }
-function tagField(field, raw) {
-  switch (field) {
+function tagField(field2, raw) {
+  switch (field2) {
     case "name":
     case "description":
     case "promptContent":
     case "tagType":
-      return parseTagChanges({ [field]: raw });
+      return parseTagChanges({ [field2]: raw });
     case "createdAt":
     case "updatedAt":
-      return parseTagChanges({ [field]: integer2(raw, field) });
+      return parseTagChanges({ [field2]: integer2(raw, field2) });
     default:
-      throw new Error(`unsupported tag field: ${field}`);
+      throw new Error(`unsupported tag field: ${field2}`);
   }
 }
 function changes(args, family, decodeField) {
   arity(args, 4, 4, `operit2 ${family} update <id> <field|--record|--patch> <value>`);
-  const field = args[2];
-  if (field === "--patch") return { field: "record", changes: parseJsonObject(args[3], `${family} changes`) };
-  if (field === "--record") {
+  const field2 = args[2];
+  if (field2 === "--patch") return { field: "record", changes: parseJsonObject(args[3], `${family} changes`) };
+  if (field2 === "--record") {
     const complete = parseJsonObject(args[3], `${family} record`);
     if (Object.prototype.hasOwnProperty.call(complete, "id") && complete.id !== args[1]) throw new Error(`${family} record id does not match ${args[1]}`);
     const { id: identity3, ...mutable } = complete;
     void identity3;
     return { field: "record", changes: mutable };
   }
-  return { field, changes: record(decodeField(field, args[3]), `${family} changes`) };
+  return { field: field2, changes: record(decodeField(field2, args[3]), `${family} changes`) };
 }
 function displayOptional(value) {
   return value === null ? "-" : value;
@@ -5993,33 +8049,33 @@ function memoryRow(item) {
 function memoryText(item) {
   return lines([`Memory item ${item.id}`, `UUID: ${item.uuid}`, `Title: ${item.title}`, `Content: ${item.content}`, `Content type: ${item.contentType}`, `Source: ${item.source}`, `Credibility: ${item.credibility}`, `Importance: ${item.importance}`, `Folder: ${displayOptional(item.folderPath)}`, `Created at: ${item.createdAt}`, `Updated at: ${item.updatedAt}`, `Last accessed at: ${item.lastAccessedAt}`, `Tags: ${memoryTags(item)}`]);
 }
-function memoryField(field, raw) {
-  switch (field) {
+function memoryField(field2, raw) {
+  switch (field2) {
     case "uuid":
     case "title":
     case "content":
     case "contentType":
     case "source":
     case "folderPath":
-      return { [field]: raw };
+      return { [field2]: raw };
     case "documentPath":
     case "chunkIndexFilePath":
-      return { [field]: optionalIdentifier(raw) };
+      return { [field2]: optionalIdentifier(raw) };
     case "credibility":
     case "importance":
-      return { [field]: number2(raw, field) };
+      return { [field2]: number2(raw, field2) };
     case "isDocumentNode":
-      return { [field]: bool(raw, field) };
+      return { [field2]: bool(raw, field2) };
     case "createdAt":
     case "updatedAt":
     case "lastAccessedAt":
-      return { [field]: integer2(raw, field) };
+      return { [field2]: integer2(raw, field2) };
     case "tags":
       return { tags: csv(raw) };
     case "properties":
-      return { properties: json(raw, field) };
+      return { properties: json(raw, field2) };
     default:
-      throw new Error(`unsupported memory field: ${field}`);
+      throw new Error(`unsupported memory field: ${field2}`);
   }
 }
 function memoryRecord(raw) {
@@ -6641,13 +8697,13 @@ var MemoryTools = class {
         }
         case "update_memory": {
           const oldTitle = requiredText(input, "old_title"), current = yield this.domain("memory.get", { ownerKey, title: oldTitle }), changes2 = {};
-          for (const [parameter, field] of [["new_title", "title"], ["content", "content"], ["content_type", "contentType"], ["source", "source"], ["folder_path", "folderPath"]]) {
+          for (const [parameter, field2] of [["new_title", "title"], ["content", "content"], ["content_type", "contentType"], ["source", "source"], ["folder_path", "folderPath"]]) {
             const value = optionalText(input, parameter);
-            if (value !== void 0) changes2[field] = value;
+            if (value !== void 0) changes2[field2] = value;
           }
-          for (const field of ["credibility", "importance"]) {
-            const value = score2(input, field);
-            if (value !== void 0) changes2[field] = value;
+          for (const field2 of ["credibility", "importance"]) {
+            const value = score2(input, field2);
+            if (value !== void 0) changes2[field2] = value;
           }
           const tags = optionalText(input, "tags");
           if (tags !== void 0) changes2.tags = this.tags(tags);
@@ -6866,7 +8922,48 @@ var memoryQueries = new MemoryTools(dispatchDomain2);
 function chatConfigurationResolveApi(event) {
   return __async(this, null, function* () {
     if (event.callerPackage !== "host") throw new Error("chat.configuration.resolve requires an authenticated host caller");
-    return dispatchDomain2("chat.configuration.resolve", parseDomainPayload("chat.configuration.resolve", event.payload));
+    const request = parseDomainPayload("chat.configuration.resolve", event.payload);
+    if (request.chatId !== null && request.messageExtension === null) {
+      const binding = yield dispatchDomain2("chat.configuration.binding.read", { chatId: request.chatId });
+      request.chatExtension = { version: 1, selection: binding.selection };
+    }
+    return dispatchDomain2("chat.configuration.resolve", request);
+  });
+}
+function chatConfigurationDraftResolveApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Draft configuration requires the host caller");
+    const request = parseDomainPayload("chat.configuration.resolve", event.payload);
+    if (request.chatId === null || request.purpose !== "display") throw new Error("Draft configuration requires a display identity");
+    const binding = yield readDraftBinding(request.chatId);
+    request.chatExtension = { version: 1, selection: binding.selection };
+    return dispatchDomain2("chat.configuration.resolve", request);
+  });
+}
+function chatConfigurationDraftCommitApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Draft commit requires the host caller");
+    yield commitDraftBinding(event.payload.chatId);
+    return { committed: true };
+  });
+}
+function chatConfigurationDraftAbortApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Draft abort requires the host caller");
+    yield abortDraftBinding(event.payload.chatId);
+    return { aborted: true };
+  });
+}
+function chatConfigurationSnapshotStoreApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Snapshot storage requires the host caller");
+    return storeSnapshot(event.payload);
+  });
+}
+function chatConfigurationSnapshotReadApi(event) {
+  return __async(this, null, function* () {
+    if (event.callerPackage !== "host") throw new Error("Snapshot reads require the host caller");
+    return readStoredSnapshot(event.payload);
   });
 }
 function chatConfigurationBindingReadApi(event) {
@@ -7251,6 +9348,11 @@ function memoryImportApi(event) {
   });
 }
 function registerDomainApis() {
+  ToolPkg.registerApi({ name: "chat.configuration.draft.resolve", function: chatConfigurationDraftResolveApi });
+  ToolPkg.registerApi({ name: "chat.configuration.draft.commit", function: chatConfigurationDraftCommitApi });
+  ToolPkg.registerApi({ name: "chat.configuration.draft.abort", function: chatConfigurationDraftAbortApi });
+  ToolPkg.registerApi({ name: "chat.configuration.snapshot.store", function: chatConfigurationSnapshotStoreApi });
+  ToolPkg.registerApi({ name: "chat.configuration.snapshot.read", function: chatConfigurationSnapshotReadApi });
   ToolPkg.registerApi({ name: "memory.query", function: memoryQueryApi });
   ToolPkg.registerApi({ name: "memory.searchWithOptions", function: memorySearchWithOptionsApi });
   ToolPkg.registerApi({ name: "memory.candidate.enqueue", function: memoryCandidateEnqueueApi });
@@ -7407,7 +9509,12 @@ function requireSelection(selection) {
 function beforeChatCreate(event) {
   return __async(this, null, function* () {
     if (event.eventName !== "before_create") throw new Error("Character chat lifecycle requires before_create");
-    return initializeChatExtension(event.eventPayload, { readActiveSelection, requireSelection });
+    const payload = { ...event.eventPayload };
+    if (payload.sourceChatId !== null) payload.sourceExtension = { version: 1, selection: (yield readChatBinding(payload.sourceChatId)).selection };
+    const result2 = yield initializeChatExtension(payload, { readActiveSelection, requireSelection });
+    const marker = decodeChatMarker(result2.extension);
+    yield prepareChatBinding({ chatId: payload.chat.id, selection: marker.selection });
+    return { extension: { recordId: payload.chat.id, schemaVersion: 1 } };
   });
 }
 function registerChatInitialization() {
@@ -7936,9 +10043,7 @@ function sequenceKey(chatId, submissionId) {
 }
 function verifySnapshot(chatId, selected, assistant2) {
   return __async(this, null, function* () {
-    const extension = (yield Tools.Chat.readExtension({ kind: "message", chatId, messageTimestamp: assistant2.messageTimestamp, variantIndex: assistant2.variantIndex })).extension;
-    if (extension === null) throw new Error("Committed group assistant has no participant message extension");
-    const marker = decodeMessageMarker(extension);
+    const marker = yield readMessageSnapshot(chatId, assistant2.messageTimestamp, assistant2.variantIndex);
     if (marker.selection !== selected.selection || marker.profile.id !== selected.participantId || marker.promptFunctionType !== "CHAT") {
       throw new Error("Committed group assistant snapshot identifies a different participant or selection");
     }
@@ -8107,9 +10212,8 @@ function onGroupInputSubmit(event) {
     const payload = event.eventPayload;
     if (payload.source === "Sequence") return null;
     const chatId = requireId(payload.chatId, "submitted chatId");
-    const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId })).extension;
-    if (extension === null) return null;
-    const binding = decodeChatMarker(extension);
+    const binding = yield findChatBinding(chatId);
+    if (binding === null) return null;
     if (parseChatSelection(binding.selection).kind !== "group") return null;
     const service = yield getService();
     const input = submission(payload, chatId, binding.selection);
@@ -8377,14 +10481,8 @@ function readSidebarCatalog(value) {
 }
 function readSidebarSelections(chats) {
   return __async(this, null, function* () {
-    const selections = [];
-    for (let offset = 0; offset < chats.length; offset += 8) {
-      selections.push(...yield Promise.all(chats.slice(offset, offset + 8).map((chat) => __async(null, null, function* () {
-        const extension = (yield Tools.Chat.readExtension({ kind: "chat", chatId: chat.id })).extension;
-        return { chatId: chat.id, selection: extension === null ? null : decodeChatMarker(extension).selection };
-      }))));
-    }
-    return selections;
+    const bindings = yield bindingsForChats(chats.map((chat) => chat.id));
+    return chats.map((chat) => ({ chatId: chat.id, selection: bindings.has(chat.id) ? bindings.get(chat.id) : null }));
   });
 }
 function registerSidebarChannel() {

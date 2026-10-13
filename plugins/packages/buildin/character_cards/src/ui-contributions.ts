@@ -4,7 +4,7 @@ import { parseDomainPayload, record } from "./domain";
 import { parseChatSelection, selectionForActive } from "./chat-bindings";
 import { type EntityKind, type PresentationCancel, type PresentationComplete, type ScreenSession, type ScreenPresentation, type PresentedScreen, type SelectScreen, type ScreenResult, createScreenSession, parseScreenResult } from "./presentation";
 import { getService } from "./service-runtime";
-import { decodeChatMarker } from "./chat-markers";
+import { findChatBinding, bindingsForChats } from "./chat-storage";
 import { chatUiRoutes } from "./definition";
 
 /** Separates the actual native selector from the large Web editor route without exposing either mode to the host. */
@@ -186,8 +186,8 @@ export async function chatContextActionsApi(event: ToolPkg.PublicApiEvent<{ chat
     const active = await service.dispatchDomain("activePrompt.get", {});
     return contextActions(chatUiRoutes, { chatId: null, selection: encodeSelection(active) }, directory);
   }
-  const extension = (await Tools.Chat.readExtension({ kind: "chat", chatId: input.chatId })).extension;
-  const selection = extension === null ? null : decodeChatMarker(extension).selection;
+  const binding = await findChatBinding(input.chatId);
+  const selection = binding === null ? null : binding.selection;
   return contextActions(chatUiRoutes, { chatId: input.chatId, selection }, directory);
 }
 
@@ -196,10 +196,7 @@ export async function chatListSectionsApi(event: ToolPkg.PublicApiEvent<{ chats:
   requireUiCaller(event.callerPackage);
   const input = parseSectionsRequest(event.payload), service = await getService(), directory = await service.snapshot();
   const bindings = [];
-  for (const chat of input.chats) {
-    const extension = (await Tools.Chat.readExtension({ kind: "chat", chatId: chat.id })).extension;
-    if (extension !== null) bindings.push({ chatId: chat.id, selection: decodeChatMarker(extension).selection });
-  }
+  for (const [chatId, selection] of await bindingsForChats(input.chats.map(chat => chat.id))) bindings.push({ chatId, selection });
   return listSections(chatUiRoutes.editor, directory, bindings, input.chats.map(
     /** Preserves the host's actual chat ordering in each section. */
     chat => chat.id,

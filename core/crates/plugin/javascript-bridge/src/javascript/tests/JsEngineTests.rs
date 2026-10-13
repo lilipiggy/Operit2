@@ -493,6 +493,11 @@ impl JsExecutionHost for TestPluginConfigExecutionHost {
         panic!("Compose DSL file picking is not part of the plugin config test")
     }
 
+    /// Rejects unexpected Compose DSL file-save requests.
+    fn save_compose_file(&self, _payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+        panic!("Compose DSL file saving is not part of the plugin config test")
+    }
+
     /// Rejects unexpected package state access.
     fn is_package_imported(&self, _package_name: &str) -> Result<bool, String> {
         panic!("Package state is not part of the plugin config test")

@@ -1,6 +1,7 @@
 import type { EditorContext } from "../../bridge/context";
 import type { UIState } from "../../bridge/contracts";
 import { dataValue, requireElement } from "../../shared/dom";
+import { cancelGraphCameraAnimation } from "./camera";
 import { graphEntry, zoomMemoryGraph } from "./layout";
 /** Owns pointer, wheel and keyboard gestures without replacing the pressed SVG target. */
 export function createGraphGestures(context: EditorContext) {
@@ -19,6 +20,7 @@ export function createGraphGestures(context: EditorContext) {
     const action = event.target.closest<HTMLElement | SVGElement>("[data-action]");
     if (action !== null && action.dataset.action !== "select-memory" && action.dataset.action !== "select-edge") return;
     const dialog = topDialog("graph"), nodeId = action !== null && action.dataset.action === "select-memory" ? dataValue(action, "id") : null;
+    cancelGraphCameraAnimation(dialog);
     const nodePosition = nodeId === null ? null : graphEntry(dialog.positions, nodeId);
     if (nodeId !== null && nodePosition === undefined) throw new Error("无法定位拖动的记忆节点");
     if (state.pointers.size === 0) state.gestureMoved = false;
@@ -87,6 +89,7 @@ export function createGraphGestures(context: EditorContext) {
     if (!(event.target instanceof Element) || event.target.closest<SVGSVGElement>("[data-graph-surface]") === null) return;
     event.preventDefault();
     const dialog = topDialog("graph"), bounds = requireElement(event.target.closest<SVGSVGElement>("[data-graph-surface]"), SVGSVGElement).getBoundingClientRect();
+    cancelGraphCameraAnimation(dialog);
     const deltaMode = event.deltaMode;
     let delta = event.deltaY;
     switch (deltaMode) {

@@ -618,6 +618,11 @@ mod tests {
             Err("Compose DSL file picking is not part of this test".to_string())
         }
 
+        /// Rejects Compose DSL file-save requests in manager tests.
+        fn save_compose_file(&self, _payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+            Err("Compose DSL file saving is not part of this test".to_string())
+        }
+
         /// Reports no imported packages in manager tests.
         fn is_package_imported(&self, _package_name: &str) -> Result<bool, String> {
             Ok(false)

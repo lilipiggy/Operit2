@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod DartPort;
+pub mod SharedBuffer;
 
 #[cfg(all(feature = "serial", not(any(target_os = "ios", target_os = "espidf", target_arch = "wasm32"))))]
 mod SerialPort;

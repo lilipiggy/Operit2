@@ -114,6 +114,6 @@ test("actual registered initializer rejects a missing source namespace before to
     chat: { id: "new-real-draft", title: "Real lifecycle input", workspaceId: null, parentChatId: null },
     sourceChatId: "explicit-source-chat", sourceMessageTimestamp: null, input: null, sourceExtension: null,
   };
-  await assert.rejects(definition.function({ eventName: "before_create", eventPayload: plain(event) }), /Explicit sourceChatId has no character namespace extension/);
-  assert.equal(disk.calls.length, 0, "Explicit absent source association must never trigger active selection or create storage");
+  await assert.rejects(definition.function({ eventName: "before_create", eventPayload: plain(event) }), /Chat has no stored character binding/);
+  assert.equal(disk.calls.filter(call => call.method === "storage.transaction").length, 0);
 });

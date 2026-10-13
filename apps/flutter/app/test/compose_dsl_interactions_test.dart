@@ -377,6 +377,45 @@ void main() {
     },
   );
   testWidgets(
+    'type scopes and exclusions reject foreign and self payloads without a member list',
+
+    /// Exercises generic drop filtering with opaque structured payloads.
+    (tester) async {
+      final events = <(String, Object?)>[];
+      await mount(
+        tester,
+        node('Column', {}, [
+          draggable('Matching', {'id': 'a'}, type: 'scope:a'),
+          draggable('Self', {'id': 'b'}, type: 'scope:a'),
+          draggable('Foreign', {'id': 'a'}, type: 'scope:b'),
+          node(
+            'DragTarget',
+            {
+              'acceptedTypes': ['scope:a'],
+              'excludedData': [
+                {'id': 'b'},
+              ],
+              'onDrop': action('drop'),
+            },
+            [surface('Target')],
+          ),
+        ]),
+        events,
+      );
+      await drag(tester, 'Matching', 'Target');
+      await drag(tester, 'Self', 'Target');
+      await drag(tester, 'Foreign', 'Target');
+      expect(events.where((event) => event.$1 == 'drop'), hasLength(1));
+      expect(
+        events
+            .where((event) => event.$1 == 'ended')
+            .map((event) => (event.$2 as Map)['wasAccepted']),
+        [true, false, false],
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
     'long press dragging and disabled drop targets follow the same generic contract',
     (tester) async {
       final events = <(String, Object?)>[];

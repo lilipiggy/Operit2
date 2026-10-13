@@ -56,6 +56,7 @@ fn data() -> CharacterMigrationData {
     let mut source = CharacterMigrationData {
         cards: vec![card],
         active: Some(json!({"CharacterCard":{"id":"legacy"}})),
+        memory_preferences: Some(json!({"userDescriptionEnabled":true,"autoUpdateEnabled":true})),
         ..CharacterMigrationData::default()
     };
     source.owners.push(ownerMetadata(
@@ -77,6 +78,216 @@ fn memory(id: i64) -> (String, String, Value) {
         "credibility":0.8,"importance":0.9,"documentPath":null,"isDocumentNode":false,"chunkIndexFilePath":null,"folderPath":"folder",
         "createdAt":100,"updatedAt":200,"lastAccessedAt":300,"tags":[{"id":id,"name":"tag"}],"properties":[{"id":id,"key":"key","value":"value"}]
     })).unwrap()
+}
+
+/// Creates one document memory so imported chunks can resolve their exact parent UUID.
+fn document(id: i64) -> (String, String, Value) {
+    let (collection, key, mut value) = memory(id);
+    value["record"]["isDocumentNode"] = json!(true);
+    (collection, key, value)
+}
+
+/// Exercises actual bounded commits, exact identities, durable reopen, and once-only source adoption.
+#[test]
+fn relational_owner_metadata_preserves_integer_counters_and_real_search_weights() {
+    let fixture = Fixture::new();
+    let value = ownerMetadata(
+        "character:legacy",
+        MemorySettings::default(),
+        MemorySearchConfig::default(),
+    );
+    fixture
+        .writer()
+        .relational
+        .put(&[(
+            "owners".into(),
+            "character:legacy".into(),
+            value.clone(),
+            None,
+        )])
+        .unwrap();
+    let actual = fixture
+        .writer()
+        .get("owners", "character:legacy")
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual["value"], value);
+}
+
+/// Exercises actual bounded commits, exact identities, durable reopen, and once-only source adoption.
+#[test]
+fn v28_object_adoption_verifies_and_retires_business_records_once() {
+    let fixture = Fixture::new();
+    let writer = fixture.writer();
+    let marker = writer
+        .legacyGet("imports", "objects-to-relational-v1")
+        .unwrap()
+        .unwrap();
+    let mut card = serde_json::to_value(&data().cards[0]).unwrap();
+    card["themeConfigId"] = Value::Null;
+    let source_memory = memory(12);
+    writer
+        .request(StorageRequest::Commit {
+            handle: writer.handle.clone(),
+            mutations: vec![
+                StorageMutation {
+                    collection: "imports".into(),
+                    key: "objects-to-relational-v1".into(),
+                    value: Value::Null,
+                    deleted: true,
+                    check_version: true,
+                    expected_version: Some(requiredString(&marker, "version").unwrap().into()),
+                },
+                StorageMutation {
+                    collection: "cards".into(),
+                    key: "legacy".into(),
+                    value: card.clone(),
+                    deleted: false,
+                    check_version: true,
+                    expected_version: None,
+                },
+                StorageMutation {
+                    collection: source_memory.0.clone(),
+                    key: source_memory.1.clone(),
+                    value: source_memory.2.clone(),
+                    deleted: false,
+                    check_version: true,
+                    expected_version: None,
+                },
+            ],
+        })
+        .unwrap();
+    let reopened = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
+    assert_eq!(
+        reopened.get("cards", "legacy").unwrap().unwrap()["value"],
+        card
+    );
+    assert_eq!(
+        reopened.get("memories", &source_memory.1).unwrap().unwrap()["value"],
+        source_memory.2
+    );
+    assert!(reopened.legacyList("cards").unwrap().is_empty());
+    assert!(reopened.legacyList("memories").unwrap().is_empty());
+    assert_eq!(
+        reopened
+            .legacyGet("imports", "objects-to-relational-v1")
+            .unwrap()
+            .unwrap()["value"]["complete"],
+        true
+    );
+    card["name"] = json!("Edited after adoption");
+    reopened
+        .commit(vec![reopened
+            .mutation("cards", "legacy", card.clone())
+            .unwrap()])
+        .unwrap();
+    let again = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
+    assert_eq!(
+        again.get("cards", "legacy").unwrap().unwrap()["value"],
+        card
+    );
+}
+
+/// Requires explicit global flags before any fresh import can publish business data.
+#[test]
+fn core_rows_adopt_legacy_bindings_snapshots_and_only_committed_import_drafts() {
+    let fixture = Fixture::new();
+    let writer = fixture.writer();
+    writer.import("operit2-v27", data()).unwrap();
+    let database =
+        SqliteStore::openWithHost(fixture.host.clone(), "runtime/test-core.sqlite").unwrap();
+    operit_store::db::AppDatabase::createAllTables(&database).unwrap();
+    for (id, extensions) in [
+        (
+            "bound",
+            json!({PLUGIN_ID:{"version":1,"selection":"card:legacy"},"other.plugin":{"retained":true}}),
+        ),
+        (
+            "v27",
+            json!({LEGACY_BINDING_NAMESPACE:{"characterCardName":"Original","characterGroupId":null}}),
+        ),
+        (
+            "imported",
+            json!({PLUGIN_ID:{"recordId":"imported","schemaVersion":1}}),
+        ),
+        ("same-id", json!({})),
+    ] {
+        database.execute("INSERT INTO chats(id,title,createdAt,updatedAt,pluginExtensions) VALUES(?1,?1,1,1,?2)", vec![SqliteValue::Text(id.into()), SqliteValue::Text(extensions.to_string())]).unwrap();
+    }
+    for id in ["imported", "same-id", "uncommitted"] {
+        writer
+            .adoptRecord(
+                "chat_drafts",
+                id,
+                json!({"version":1,"selection":"card:legacy"}),
+            )
+            .unwrap();
+    }
+    let profile = json!({
+        "id":"legacy","name":"Historical role","avatarUri":null,"introPrompt":"Frozen prompt",
+        "userPreferencesText":"Frozen USER","openingStatement":"Hello",
+        "modelBinding":{"providerId":"provider","modelId":"model"},"ttsConfigId":"voice",
+        "toolAccess":{"enabled":false,"allowedBuiltinTools":[],"allowedPackages":[],"allowedSkills":[],"allowedMcpServers":[]},
+        "resources":[{"key":"character:legacy","readable":true,"writable":true}]
+    });
+    let snapshot = json!({"version":1,"selection":"card:legacy","promptFunctionType":"CHAT","primaryOwnerKey":"character:legacy","profile":profile,"participants":[profile]});
+    database.execute("INSERT INTO messages(chatId,sender,timestamp,orderIndex,pluginExtensions) VALUES('bound','ai',10,0,?1)", vec![SqliteValue::Text(json!({PLUGIN_ID:snapshot,"other.plugin":{"retained":true}}).to_string())]).unwrap();
+    adoptCoreConfigurationRows(&database, writer).unwrap();
+    for id in ["bound", "v27", "imported"] {
+        assert_eq!(
+            writer.get("chat_bindings", id).unwrap().unwrap()["value"]["selection"],
+            "card:legacy"
+        );
+    }
+    assert!(writer.get("chat_bindings", "same-id").unwrap().is_none());
+    assert!(writer
+        .get("chat_bindings", "uncommitted")
+        .unwrap()
+        .is_none());
+    assert!(writer.list("chat_drafts").unwrap().is_empty());
+    let extensions: String = database
+        .queryOne(
+            "SELECT pluginExtensions FROM chats WHERE id='bound'",
+            vec![],
+        )
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&extensions).unwrap(),
+        json!({"other.plugin":{"retained":true}})
+    );
+    let extensions: String = database
+        .queryOne(
+            "SELECT pluginExtensions FROM messages WHERE chatId='bound'",
+            vec![],
+        )
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    let extensions: Value = serde_json::from_str(&extensions).unwrap();
+    assert_eq!(extensions["other.plugin"]["retained"], true);
+    assert_eq!(extensions[PLUGIN_ID]["schemaVersion"], 1);
+    let key = requiredString(&extensions[PLUGIN_ID], "recordId").unwrap();
+    assert_eq!(
+        writer.get("message_snapshots", key).unwrap().unwrap()["value"],
+        snapshot
+    );
+    adoptCoreConfigurationRows(&database, writer).unwrap();
+    assert_eq!(writer.list("message_snapshots").unwrap().len(), 1);
+}
+
+/// Requires explicit global flags before any fresh import can publish business data.
+#[test]
+fn import_without_memory_preferences_rejects_before_publication() {
+    let fixture = Fixture::new();
+    let mut source = data();
+    source.memory_preferences = None;
+    assert!(fixture.writer().import("operit1", source).is_err());
+    assert!(fixture.writer().get("meta", "state").unwrap().is_none());
+    assert!(fixture.writer().list("cards").unwrap().is_empty());
 }
 
 /// Exercises actual bounded commits, exact identities, durable reopen, and once-only source adoption.
@@ -121,6 +332,46 @@ fn imports_pages_and_reopens_without_replacing_completed_data() {
             .unwrap(),
         b"# Actual source profile\n"
     );
+}
+
+/// Keeps resolvable relationships and drops references to a legacy memory that was deleted without cleanup.
+#[test]
+fn drops_relationships_whose_legacy_target_was_deleted() {
+    let fixture = Fixture::new();
+    let mut source = data();
+    source.records.push(memory(1));
+    source.records.push(memory(2));
+    let link = |id: i64, target: i64| {
+        ownerRecord("links", "character:legacy", json!({
+            "id":id,"sourceMemoryId":1,"targetMemoryId":target,"type_":"related","weight":0.5,"description":"link"
+        })).unwrap()
+    };
+    source.records.push(link(1, 2));
+    source.records.push(link(2, 99));
+    fixture.writer().import("operit2-v27", source).unwrap();
+    let links = fixture.writer().list("links").unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["value"]["record"]["targetMemoryId"], "2");
+    assert_eq!(fixture.writer().list("memories").unwrap().len(), 2);
+}
+
+/// Keeps chunks of imported documents and drops chunks whose legacy document was deleted.
+#[test]
+fn drops_chunks_whose_legacy_document_was_deleted() {
+    let fixture = Fixture::new();
+    let mut source = data();
+    source.records.push(document(1));
+    let chunk = |id: i64, uuid: &str| {
+        ownerRecord("chunks", "character:legacy", json!({
+            "id":id,"memoryUuid":uuid,"chunkIndex":0,"content":"chunk"
+        })).unwrap()
+    };
+    source.records.push(chunk(1, "uuid-1"));
+    source.records.push(chunk(2, "uuid-99"));
+    fixture.writer().import("operit2-v27", source).unwrap();
+    let chunks = fixture.writer().list("chunks").unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0]["value"]["record"]["memoryUuid"], "uuid-1");
 }
 
 /// Confirms verified resources and records survive deletion of legacy owners and preference files.
@@ -334,7 +585,8 @@ fn candidate(source_type: &str, cutoff: i64) -> Value {
 #[test]
 fn migrates_automatic_candidate_cutoff_to_the_actual_source_revision() {
     let fixture = Fixture::new();
-    let database = SqliteStore::openWithHost(fixture.host.clone(), "runtime/candidate-source.sqlite").unwrap();
+    let database =
+        SqliteStore::openWithHost(fixture.host.clone(), "runtime/candidate-source.sqlite").unwrap();
     database.executeBatch(
         "CREATE TABLE messages (chatId TEXT, timestamp INTEGER, selectedVariantIndex INTEGER, sender TEXT);
          INSERT INTO messages VALUES ('source-chat',90,0,'user'),('source-chat',100,3,'ai'),
@@ -357,9 +609,15 @@ fn migrates_automatic_candidate_cutoff_to_the_actual_source_revision() {
     ).unwrap();
     assert_eq!(original_history, adopted_history);
     let mut source = data();
-    source.records.push(ownerRecord("candidates", "character:legacy", record).unwrap());
+    source
+        .records
+        .push(ownerRecord("candidates", "character:legacy", record).unwrap());
     fixture.writer().import("operit2-v27", source).unwrap();
-    let stored = fixture.writer().get("candidates", "character:legacy/9007199254740993").unwrap().unwrap();
+    let stored = fixture
+        .writer()
+        .get("candidates", "character:legacy/9007199254740993")
+        .unwrap()
+        .unwrap();
     assert_eq!(stored["value"]["record"]["triggerMessageTimestamp"], 100);
     assert_eq!(stored["value"]["record"]["triggerVariantIndex"], 3);
     assert_eq!(stored["value"]["record"]["id"], "9007199254740993");
@@ -368,34 +626,49 @@ fn migrates_automatic_candidate_cutoff_to_the_actual_source_revision() {
 /// Keeps selected-user candidates exact rather than interpreting their timestamps as automatic history cutoffs.
 #[test]
 fn selected_candidate_requires_its_exact_user_message_revision() {
-    let messages = vec![(100,4,"user".to_string()),(200,7,"ai".to_string())];
+    let messages = vec![(100, 4, "user".to_string()), (200, 7, "ai".to_string())];
     let mut record = candidate("selected_user_message", 100);
-    migrateCandidateTrigger(&mut record, &messages).unwrap();
+    assert_eq!(
+        migrateCandidateTrigger(&mut record, &messages).unwrap(),
+        CandidateSourceState::Migrated
+    );
     assert_eq!(record["triggerMessageTimestamp"], 100);
     assert_eq!(record["triggerVariantIndex"], 4);
     let mut missing = candidate("selected_user_message", 150);
     let original = missing.clone();
-    assert!(migrateCandidateTrigger(&mut missing, &messages).is_err());
+    assert_eq!(
+        migrateCandidateTrigger(&mut missing, &messages).unwrap(),
+        CandidateSourceState::Unresolvable
+    );
     assert_eq!(missing, original);
 }
 
-/// Rejects invalid histories without creating fictional messages or versions during migration.
+/// Reports queue records whose released history no longer resolves while malformed source types stay errors.
 #[test]
-fn invalid_candidate_sources_remain_errors() {
+fn unresolvable_candidate_sources_are_reported_while_unknown_types_stay_errors() {
     for (source_type, messages) in [
         ("reply_finalized_auto", vec![]),
-        ("reply_finalized_auto", vec![(200,0,"ai".to_string())]),
-        ("reply_finalized_auto", vec![(100,0,"ai".to_string()),(100,1,"ai".to_string())]),
-        ("reply_finalized_auto", vec![(100,0,"user".to_string())]),
-        ("reply_finalized_auto", vec![(100,-1,"ai".to_string())]),
-        ("selected_user_message", vec![(150,0,"ai".to_string())]),
-        ("unknown", vec![(100,0,"ai".to_string())]),
+        ("reply_finalized_auto", vec![(200, 0, "ai".to_string())]),
+        (
+            "reply_finalized_auto",
+            vec![(100, 0, "ai".to_string()), (100, 1, "ai".to_string())],
+        ),
+        ("reply_finalized_auto", vec![(100, 0, "user".to_string())]),
+        ("reply_finalized_auto", vec![(100, -1, "ai".to_string())]),
+        ("selected_user_message", vec![(150, 0, "ai".to_string())]),
     ] {
         let mut record = candidate(source_type, 150);
         let original = record.clone();
-        assert!(migrateCandidateTrigger(&mut record, &messages).is_err());
+        assert_eq!(
+            migrateCandidateTrigger(&mut record, &messages).unwrap(),
+            CandidateSourceState::Unresolvable
+        );
         assert_eq!(record, original);
     }
+    let mut unknown = candidate("unknown", 150);
+    let original = unknown.clone();
+    assert!(migrateCandidateTrigger(&mut unknown, &vec![(100, 0, "ai".to_string())]).is_err());
+    assert_eq!(unknown, original);
 }
 
 /// Reads released optional fields and profiles without materializing or changing the source files.
@@ -404,15 +677,22 @@ fn legacy_readers_preserve_source_defaults_without_writing_source_files() {
     let fixture = Fixture::new();
     let root = legacyMemoryRoot("character:legacy").unwrap();
     assert!(!fixture.host.exists(&root).unwrap());
-    let (settings, search) = readLegacyMemorySettings(fixture.host.clone(), "character:legacy").unwrap();
+    let (settings, search) =
+        readLegacyMemorySettings(fixture.host.clone(), "character:legacy").unwrap();
     assert_eq!(settings, MemorySettings::default());
     assert_eq!(search, MemorySearchConfig::default());
-    assert_eq!(readLegacyUserMarkdown(fixture.host.as_ref(), "character:legacy").unwrap(), b"# USER\n\n");
+    assert_eq!(
+        readLegacyUserMarkdown(fixture.host.as_ref(), "character:legacy").unwrap(),
+        b"# USER\n\n"
+    );
     assert!(!fixture.host.exists(&root).unwrap());
     let user_path = format!("{root}/USER.md");
     let original = b"# Source profile\r\n  exact whitespace  \r\n";
     fixture.host.writeBytes(&user_path, original).unwrap();
-    assert_eq!(readLegacyUserMarkdown(fixture.host.as_ref(), "character:legacy").unwrap(), original);
+    assert_eq!(
+        readLegacyUserMarkdown(fixture.host.as_ref(), "character:legacy").unwrap(),
+        original
+    );
     assert_eq!(fixture.host.readBytes(&user_path).unwrap(), original);
 }
 
@@ -420,9 +700,19 @@ fn legacy_readers_preserve_source_defaults_without_writing_source_files() {
 #[test]
 fn legacy_settings_reader_propagates_malformed_json() {
     let fixture = Fixture::new();
-    let path = format!("{}/settings/memory_search_settings.preferences.json", legacyMemoryRoot("character:legacy").unwrap());
+    let path = format!(
+        "{}/settings/memory_search_settings.preferences.json",
+        legacyMemoryRoot("character:legacy").unwrap()
+    );
     let preferences = PreferencesDataStore::newWithStorage(fixture.host.clone(), path.clone());
-    preferences.edit(|fields| fields.set(&stringPreferencesKey("memory_settings"), "{invalid".to_string())).unwrap();
+    preferences
+        .edit(|fields| {
+            fields.set(
+                &stringPreferencesKey("memory_settings"),
+                "{invalid".to_string(),
+            )
+        })
+        .unwrap();
     let original = fixture.host.readBytes(&path).unwrap();
     assert!(readLegacyMemorySettings(fixture.host.clone(), "character:legacy").is_err());
     assert_eq!(fixture.host.readBytes(&path).unwrap(), original);
@@ -435,13 +725,26 @@ fn legacy_settings_reader_propagates_malformed_json() {
 fn imports_global_memory_policy_without_a_second_runtime_preference_owner() {
     let fixture = Fixture::new();
     let mut source = data();
-    source.memory_preferences = Some(json!({"userDescriptionEnabled":false,"autoUpdateEnabled":false}));
-    fixture.writer().import("global-memory-policy", source).unwrap();
+    source.memory_preferences =
+        Some(json!({"userDescriptionEnabled":false,"autoUpdateEnabled":false}));
+    fixture
+        .writer()
+        .import("global-memory-policy", source)
+        .unwrap();
     let reopened = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
-    let saved = reopened.get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"].clone();
-    assert_eq!(saved, json!({"userDescriptionEnabled":false,"autoUpdateEnabled":false}));
-    reopened.import("global-memory-policy", CharacterMigrationData::default()).unwrap();
-    assert_eq!(reopened.get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"], saved);
+    let saved =
+        reopened.get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"].clone();
+    assert_eq!(
+        saved,
+        json!({"userDescriptionEnabled":false,"autoUpdateEnabled":false})
+    );
+    reopened
+        .import("global-memory-policy", CharacterMigrationData::default())
+        .unwrap();
+    assert_eq!(
+        reopened.get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"],
+        saved
+    );
 }
 
 /// Malformed imported flags fail before the migration marker or any domain records are published.
@@ -449,11 +752,19 @@ fn imports_global_memory_policy_without_a_second_runtime_preference_owner() {
 fn rejects_invalid_global_memory_policy_before_publication() {
     let fixture = Fixture::new();
     let mut source = data();
-    source.memory_preferences = Some(json!({"userDescriptionEnabled":false,"autoUpdateEnabled":"false"}));
-    assert!(fixture.writer().import("invalid-global-memory-policy", source).is_err());
+    source.memory_preferences =
+        Some(json!({"userDescriptionEnabled":false,"autoUpdateEnabled":"false"}));
+    assert!(fixture
+        .writer()
+        .import("invalid-global-memory-policy", source)
+        .is_err());
     assert!(fixture.writer().get("meta", "state").unwrap().is_none());
     assert!(fixture.writer().list("cards").unwrap().is_empty());
-    assert!(fixture.writer().get("imports", "invalid-global-memory-policy").unwrap().is_none());
+    assert!(fixture
+        .writer()
+        .get("imports", "invalid-global-memory-policy")
+        .unwrap()
+        .is_none());
 }
 
 /// Opens the canonical user preference file on the fixture's production storage host.
@@ -500,7 +811,10 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
         MemorySettings::default(),
         MemorySearchConfig::default(),
     ));
-    source.documents.insert("shared:store".to_string(), b"# Shared source profile\n".to_vec());
+    source.documents.insert(
+        "shared:store".to_string(),
+        b"# Shared source profile\n".to_vec(),
+    );
     source.groups.push(CharacterGroupCard {
         id: "group".to_string(),
         name: "Group".to_string(),
@@ -805,7 +1119,12 @@ fn resumes_theme_adoption_after_configuration_conflict() {
     let conflict = crate::data::preferences::ThemeConfigManager::ThemeConfig {
         id: "legacy-theme:operit2-v27:cards:legacy".to_string(),
         name: "Conflicting source".to_string(),
-        snapshot: readLegacyCharacterThemeSnapshot(&operit_store::PreferencesDataStore::emptyPreferences(), "character_card_theme_legacy_").unwrap().0,
+        snapshot: readLegacyCharacterThemeSnapshot(
+            &operit_store::PreferencesDataStore::emptyPreferences(),
+            "character_card_theme_legacy_",
+        )
+        .unwrap()
+        .0,
         createdAt: 100,
         updatedAt: 200,
     };
@@ -867,7 +1186,12 @@ fn theme_cleanup_rejects_source_changed_during_interruption() {
     let conflict = crate::data::preferences::ThemeConfigManager::ThemeConfig {
         id: "legacy-theme:operit2-v27:cards:legacy".to_string(),
         name: "Conflicting source".to_string(),
-        snapshot: readLegacyCharacterThemeSnapshot(&operit_store::PreferencesDataStore::emptyPreferences(), "character_card_theme_legacy_").unwrap().0,
+        snapshot: readLegacyCharacterThemeSnapshot(
+            &operit_store::PreferencesDataStore::emptyPreferences(),
+            "character_card_theme_legacy_",
+        )
+        .unwrap()
+        .0,
         createdAt: 100,
         updatedAt: 200,
     };
@@ -914,21 +1238,41 @@ fn theme_cleanup_rejects_source_changed_during_interruption() {
 fn cleanup_removes_retired_memory_policy_and_preserves_live_api_preferences() {
     let fixture = Fixture::new();
     let mut source = data();
-    source.memory_preferences = Some(json!({"userDescriptionEnabled":true,"autoUpdateEnabled":false}));
+    source.memory_preferences =
+        Some(json!({"userDescriptionEnabled":true,"autoUpdateEnabled":false}));
     fixture.writer().import("operit2-v27", source).unwrap();
     let api = PreferencesDataStore::newWithStorage(fixture.host.clone(), API_PREFERENCES_PATH);
     api.edit(|saved| {
-        saved.set(&stringPreferencesKey("enable_memory_auto_update"), "false".to_string());
-        saved.set(&stringPreferencesKey("disable_user_preference_description"), "false".to_string());
+        saved.set(
+            &stringPreferencesKey("enable_memory_auto_update"),
+            "false".to_string(),
+        );
+        saved.set(
+            &stringPreferencesKey("disable_user_preference_description"),
+            "false".to_string(),
+        );
         saved.set(&stringPreferencesKey("unrelated"), "keep".to_string());
-    }).unwrap();
+    })
+    .unwrap();
     cleanupLegacyCharacters(fixture.writer()).unwrap();
     cleanupLegacyCharacters(fixture.writer()).unwrap();
     let saved = api.data().unwrap();
     assert!(!saved.contains(&stringPreferencesKey("enable_memory_auto_update")));
-    assert_eq!(saved.get(&stringPreferencesKey("disable_user_preference_description")).unwrap(), "false");
-    assert_eq!(saved.get(&stringPreferencesKey("unrelated")).unwrap(), "keep");
-    assert_eq!(fixture.writer().get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"]["autoUpdateEnabled"], false);
+    assert_eq!(
+        saved
+            .get(&stringPreferencesKey("disable_user_preference_description"))
+            .unwrap(),
+        "false"
+    );
+    assert_eq!(
+        saved.get(&stringPreferencesKey("unrelated")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        fixture.writer().get("meta", "state").unwrap().unwrap()["value"]["memoryPreferences"]
+            ["autoUpdateEnabled"],
+        false
+    );
 }
 
 /// Retains obsolete settings when the destination memory policy has not been verified.
@@ -937,43 +1281,127 @@ fn cleanup_keeps_unverified_memory_policy_source() {
     let fixture = Fixture::new();
     fixture.writer().import("operit2-v27", data()).unwrap();
     let api = PreferencesDataStore::newWithStorage(fixture.host.clone(), API_PREFERENCES_PATH);
-    api.edit(|saved| saved.set(&stringPreferencesKey("enable_memory_auto_update"), "false".to_string())).unwrap();
+    api.edit(|saved| {
+        saved.set(
+            &stringPreferencesKey("enable_memory_auto_update"),
+            "false".to_string(),
+        )
+    })
+    .unwrap();
     assert!(cleanupLegacyCharacters(fixture.writer()).is_err());
-    assert_eq!(api.data().unwrap().get(&stringPreferencesKey("enable_memory_auto_update")).unwrap(), "false");
-    assert_eq!(fixture.writer().get("imports", "operit2-v27").unwrap().unwrap()["value"]["cleanupComplete"], false);
+    assert_eq!(
+        api.data()
+            .unwrap()
+            .get(&stringPreferencesKey("enable_memory_auto_update"))
+            .unwrap(),
+        "false"
+    );
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit2-v27")
+            .unwrap()
+            .unwrap()["value"]["cleanupComplete"],
+        false
+    );
 }
 
 /// Adopts rewritten archive resource paths while preserving the destination's ordinary user preferences.
 #[test]
 fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences() {
     let fixture = Fixture::new();
-    fixture.writer().import("operit1:archive:1", data()).unwrap();
+    fixture
+        .writer()
+        .import("operit1:archive:1", data())
+        .unwrap();
     let destination = themePreferences(&fixture);
-    destination.edit(|saved| {
-        saved.set(&stringPreferencesKey("active_theme_config_id"), "null".to_string());
-        saved.set(&stringPreferencesKey("theme_mode"), "light".to_string());
-        saved.set(&stringPreferencesKey("custom_user_avatar_uri"), "/app/data/current-user.png".to_string());
-    }).unwrap();
-    let before = fixture.host.readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH).unwrap();
+    destination
+        .edit(|saved| {
+            saved.set(
+                &stringPreferencesKey("active_theme_config_id"),
+                "null".to_string(),
+            );
+            saved.set(&stringPreferencesKey("theme_mode"), "light".to_string());
+            saved.set(
+                &stringPreferencesKey("custom_user_avatar_uri"),
+                "/app/data/current-user.png".to_string(),
+            );
+        })
+        .unwrap();
+    let before = fixture
+        .host
+        .readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH)
+        .unwrap();
     let mut source = operit_store::PreferencesDataStore::emptyPreferences();
-    source.set(&stringPreferencesKey("character_card_theme_legacy_background_image_uri"), "/app/data/imported/archive-background.png".to_string());
-    source.set(&stringPreferencesKey("character_card_theme_legacy_use_background_image"), "true".to_string());
-    source.set(&stringPreferencesKey("character_card_theme_legacy_theme_mode"), "dark".to_string());
-    source.set(&stringPreferencesKey("custom_user_avatar_uri"), "/app/data/imported/archive-user.png".to_string());
+    source.set(
+        &stringPreferencesKey("character_card_theme_legacy_background_image_uri"),
+        "/app/data/imported/archive-background.png".to_string(),
+    );
+    source.set(
+        &stringPreferencesKey("character_card_theme_legacy_use_background_image"),
+        "true".to_string(),
+    );
+    source.set(
+        &stringPreferencesKey("character_card_theme_legacy_theme_mode"),
+        "dark".to_string(),
+    );
+    source.set(
+        &stringPreferencesKey("custom_user_avatar_uri"),
+        "/app/data/imported/archive-user.png".to_string(),
+    );
     let targets = vec![("cards".to_string(), "legacy".to_string())];
-    fixture.writer().migrateThemes("operit1:archive:1", &source, &targets, false).unwrap();
-    let manager = crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
+    fixture
+        .writer()
+        .migrateThemes("operit1:archive:1", &source, &targets, false)
+        .unwrap();
+    let manager =
+        crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
     let configs = manager.list().unwrap();
     assert_eq!(configs.len(), 1);
-    assert_eq!(configs[0].snapshot["backgroundImageUri"], "/app/data/imported/archive-background.png");
-    assert_eq!(configs[0].snapshot["customUserAvatarUri"], "/app/data/imported/archive-user.png");
+    assert_eq!(
+        configs[0].snapshot["backgroundImageUri"],
+        "/app/data/imported/archive-background.png"
+    );
+    assert_eq!(
+        configs[0].snapshot["customUserAvatarUri"],
+        "/app/data/imported/archive-user.png"
+    );
     let saved = destination.data().unwrap();
-    assert_eq!(saved.get(&stringPreferencesKey("theme_mode")).unwrap(), "light");
-    assert_eq!(saved.get(&stringPreferencesKey("custom_user_avatar_uri")).unwrap(), "/app/data/current-user.png");
-    assert!(source.contains(&stringPreferencesKey("character_card_theme_legacy_theme_mode")));
-    let committed = fixture.host.readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH).unwrap();
+    assert_eq!(
+        saved.get(&stringPreferencesKey("theme_mode")).unwrap(),
+        "light"
+    );
+    assert_eq!(
+        saved
+            .get(&stringPreferencesKey("custom_user_avatar_uri"))
+            .unwrap(),
+        "/app/data/current-user.png"
+    );
+    assert!(source.contains(&stringPreferencesKey(
+        "character_card_theme_legacy_theme_mode"
+    )));
+    let committed = fixture
+        .host
+        .readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH)
+        .unwrap();
     assert_ne!(committed, before);
-    fixture.writer().migrateThemes("operit1:archive:1", &source, &targets, false).unwrap();
-    assert_eq!(fixture.host.readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH).unwrap(), committed);
-    assert_eq!(fixture.writer().get("imports", "operit1:archive:1:themes-v1").unwrap().unwrap()["value"], json!({"complete":true}));
+    fixture
+        .writer()
+        .migrateThemes("operit1:archive:1", &source, &targets, false)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .host
+            .readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH)
+            .unwrap(),
+        committed
+    );
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit1:archive:1:themes-v1")
+            .unwrap()
+            .unwrap()["value"],
+        json!({"complete":true})
+    );
 }

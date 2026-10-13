@@ -530,7 +530,7 @@ impl StandardFileSystemTools {
         let bytes = match vfs.readFileBytes(path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                eprintln!("[StandardFileSystemTools] unable to read image for intent recognition: {error}");
+                operit_util::AppLogger::AppLogger::w("StandardFileSystemTools", &format!("unable to read image for intent recognition: {error}"));
                 return None;
             }
         };
@@ -540,7 +540,7 @@ impl StandardFileSystemTools {
             None,
         );
         if imageId == "error" {
-            eprintln!("[StandardFileSystemTools] unable to register image for intent recognition: {path}");
+            operit_util::AppLogger::AppLogger::w("StandardFileSystemTools", &format!("unable to register image for intent recognition: {path}"));
             return None;
         }
 
@@ -564,12 +564,12 @@ impl StandardFileSystemTools {
                 if !output.trim().is_empty() {
                     Some(output)
                 } else {
-                    eprintln!("[StandardFileSystemTools] image recognition returned an empty result: {path}");
+                    operit_util::AppLogger::AppLogger::w("StandardFileSystemTools", &format!("image recognition returned an empty result: {path}"));
                     None
                 }
             }
             Err(error) => {
-                eprintln!("[StandardFileSystemTools] image recognition failed for {path}: {error}");
+                operit_util::AppLogger::AppLogger::w("StandardFileSystemTools", &format!("image recognition failed for {path}: {error}"));
                 None
             }
         }

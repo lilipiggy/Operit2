@@ -62,7 +62,7 @@ test("copied SDK memory queries retain owner-scoped deduplication in the provide
   await assert.rejects(env.client.memory.query({ ...request, limit: 1.5 }), /Expected a nonnegative integer/);
   await assert.rejects(env.client.memory.query({ ...request, participantId: "missing-participant" }));
   const beforeFailure = env.disk.stateBytes();
-  const failure = new Error("query-storage-original"); env.disk.failNext("storage.list", failure);
+  const failure = new Error("query-storage-original"); env.disk.failNext("storage.query", failure);
   await assert.rejects(env.client.memory.query({ ...request, snapshotId: null }), error => error === failure);
   assert.deepEqual(env.disk.stateBytes(), beforeFailure);
 });

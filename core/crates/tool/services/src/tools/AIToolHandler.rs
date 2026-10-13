@@ -1450,6 +1450,18 @@ impl JsExecutionHost for AIToolHandler {
             .map_err(|error| error.to_string())
     }
 
+    /// Validates and forwards an export to the registered host file-save owner.
+    fn save_compose_file(&self, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let request = operit_host_api::ComposeDslFileSaveRequest::fromValue(payload.clone())
+            .map_err(|error| error.to_string())?;
+        self.getContext()
+            .composeDslWebViewHost
+            .as_ref()
+            .ok_or_else(|| "ComposeDslWebViewHost is not registered".to_string())?
+            .saveFile(request)
+            .map_err(|error| error.to_string())
+    }
+
     /// Returns whether one package is imported.
     fn is_package_imported(&self, package_name: &str) -> Result<bool, String> {
         Ok(self

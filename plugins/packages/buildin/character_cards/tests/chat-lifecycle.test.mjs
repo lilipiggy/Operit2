@@ -127,12 +127,13 @@ test("real beforeChatCreate callback initializes its namespace through one autho
   const card = await runtime.dispatchDomain("character.create", { values: { name: "Real hook active role" } });
   await runtime.dispatchDomain("activePrompt.setCard", { id: card.id });
   const result = await runtime.beforeChatCreate({ event: "before_create", eventName: "before_create", toolPkgId: "com.operit.character_cards", eventPayload: event() });
-  assert.deepEqual(plain(result), { extension: { version: 1, selection: "card:" + card.id } });
+  assert.deepEqual(plain(result), { extension: { recordId: "draft-chat", schemaVersion: 1 } });
+  runtime.disk.storage.inspect(sql => assert.equal(sql.prepare('SELECT selection FROM chat_drafts WHERE _key=?').get("draft-chat").selection, "card:" + card.id));
   assert.deepEqual(Object.keys(result), ["extension"], "The callback must not return an owner id or native chat fields");
 });
 /** Rejects source linkage errors before the real handler attempts any directory, file, or chat operation. */
-test("real beforeChatCreate callback rejects missing source namespace without opening storage", async t => {
+test("real beforeChatCreate callback requires a source binding in the plugin datastore", async t => {
   const runtime = await callbackEnvironment(t);
-  await assert.rejects(runtime.beforeChatCreate({ event: "before_create", eventName: "before_create", eventPayload: event({ sourceChatId: "source-chat", sourceExtension: null }) }), /has no character namespace extension/);
-  assert.equal(runtime.disk.calls.length, 0);
+  await assert.rejects(runtime.beforeChatCreate({ event: "before_create", eventName: "before_create", eventPayload: event({ sourceChatId: "source-chat", sourceExtension: null }) }), /no stored character binding/);
+  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.transaction").length, 0);
 });

@@ -1610,7 +1610,7 @@ impl MessageProcessingDelegate {
                     error.to_string(),
                 )
             })?;
-        AIMessageManager::applyConfigurationSnapshot(&mut userMessage, &configuration).map_err(
+        AIMessageManager::applyConfigurationSnapshot(&mut userMessage, &configuration, &request.enhancedAiService.tool_handler).await.map_err(
             operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed,
         )?;
         }
@@ -1789,7 +1789,7 @@ impl MessageProcessingDelegate {
                     error.to_string(),
                 )
             })?;
-        AIMessageManager::applyConfigurationSnapshot(&mut aiMessage, &configuration).map_err(
+        AIMessageManager::applyConfigurationSnapshot(&mut aiMessage, &configuration, &request.enhancedAiService.tool_handler).await.map_err(
             operit_providers::chat::llmprovider::AIService::AiServiceError::RequestFailed,
         )?;
         let streamKey = format!("chat-message-stream:{}:{}", chatId, aiMessage.timestamp);

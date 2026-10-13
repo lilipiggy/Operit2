@@ -24,6 +24,9 @@ pub enum StorageSqlValue {
 pub struct StorageStatement {
     pub sql: String,
     pub params: Vec<StorageSqlValue>,
+    /// Requires an exact write count inside the transaction for optimistic concurrency.
+    #[serde(default, rename = "expectedAffectedRows", skip_serializing_if = "Option::is_none")]
+    pub expected_affected_rows: Option<u64>,
 }
 
 /// Selects a database's permanently recorded data contract.

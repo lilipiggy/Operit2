@@ -4,6 +4,7 @@ import path from "node:path";
 /** Adapts generic object-storage calls to real SQLite transactions without implementing character business logic. */
 export function createStorageHost(directory, attempted) {
   const handles = new Set();
+  let transactionGate = null;
   /** Opens a real SQLite file and exposes the generic object collection contract used by the repository. */
   async function open(options) {
     const target = path.resolve(options.path), relative = path.relative(directory, target);
@@ -64,11 +65,62 @@ export function createStorageHost(directory, attempted) {
   }
   return {
     objects: { open },
+    sqlite: {
+      /** Opens a real SQL database without providing any plugin business behavior. */
+      async open(options) {
+        const target = path.resolve(options.path), relative = path.relative(directory, target);
+        if (path.isAbsolute(relative) || relative.split(path.sep)[0] === "..") throw new Error("Storage path escapes the test directory");
+        attempted("storage.open", [options]);
+        const sql = new DatabaseSync(target); handles.add(sql);
+        /** Converts a VM byte view into the SQLite driver's supported binary value. */
+        function params(values = []) { return values.map(value => Object.prototype.toString.call(value) === "[object Uint8Array]" ? Buffer.from(value) : value); }
+        return {
+          path: options.path,
+          /** Declares exactly the supplied scalar columns and primary identity. */
+          async defineTable(table) {
+            sql.exec('CREATE TABLE IF NOT EXISTS "' + table.name + '" (' + table.columns.map(column => '"' + column.name + '" ' + column.affinity.toUpperCase() + (column.nullable ? "" : " NOT NULL") + (column.name === table.primaryKey ? " PRIMARY KEY" : "")).join(",") + ")");
+            return { changed: true };
+          },
+          /** Queries actual SQLite rows with the supplied parameters. */
+          async query(query, values = []) { attempted("storage.query", [query, values]); return sql.prepare(query).all(...params(values)); },
+          /** Executes one real SQL statement through the generic storage interface. */
+          async execute(query, values = []) { attempted("storage.execute", [query, values]); const result = sql.prepare(query).run(...params(values)); return { affectedRows: result.changes, lastInsertId: String(result.lastInsertRowid) }; },
+          /** Rolls back the entire SQL batch when a real SQLite constraint rejects a stale write. */
+          async transaction(statements) {
+            attempted("storage.transaction", [structuredClone(statements)]);
+            if (transactionGate !== null && transactionGate.predicate(statements)) await transactionGate.promise;
+            if (statements.length < 1 || statements.length > 1000) throw new Error("Storage transaction limit");
+            sql.exec("BEGIN IMMEDIATE");
+            try {
+              const receipts = statements.map(statement => { const result = sql.prepare(statement.sql).run(...params(statement.params)); if (statement.expectedAffectedRows !== undefined && result.changes !== statement.expectedAffectedRows) throw new Error("SQLite statement affected-row precondition failed"); return { affectedRows: result.changes, lastInsertId: String(result.lastInsertRowid) }; });
+              sql.exec("COMMIT"); return receipts;
+            } catch (error) { sql.exec("ROLLBACK"); throw error; }
+          },
+          /** Closes only this execution handle. */
+          async close() { sql.close(); handles.delete(sql); },
+        };
+      },
+    },
+    /** Holds a real SQL transaction at the host boundary for explicit concurrency tests. */
+    holdTransaction(predicate) {
+      if (transactionGate !== null) throw new Error("A SQL transaction is already held");
+      let release;
+      const promise = new Promise(resolve => { release = resolve; });
+      transactionGate = { predicate, promise };
+      return {
+        /** Releases the pending transaction once without manufacturing a receipt. */
+        release() {
+          if (transactionGate === null) throw new Error("SQL transaction was already released");
+          transactionGate = null;
+          release();
+        },
+      };
+    },
     /** Closes every actual SQLite handle before the temporary test directory is removed. */
     close() { for (const sql of handles) sql.close(); handles.clear(); },
     /** Reads raw collection entries for independent test assertions and deliberate corruption cases. */
     inspect(callback) {
-      const sql = new DatabaseSync(path.join(directory, "characters.sqlite"));
+      const sql = new DatabaseSync(path.join(directory, "characters-relational.sqlite"));
       try { return callback(sql); } finally { sql.close(); }
     },
   };

@@ -43,7 +43,7 @@ async function controlsPage(t, width = 390, view = "memory") {
     requests.push(plain(request)); return plain(await runtime.web(request));
   });
   await context.exposeFunction("exportRealMemoryFile", async (path, content) => {
-    await harness.tools.Files.write(path, content, false); return true;
+    await harness.tools.Files.write(path, content, false); return { cancelled: false, path };
   });
   await context.addInitScript(({ theme, view }) => {
     window.rejectMemoryAction = null;
@@ -58,7 +58,13 @@ async function controlsPage(t, width = 390, view = "memory") {
       },
       async avatarImage() { return null; },
       async openEntity() { throw new Error("No avatar picker configured for memory-controls test"); },
-      async exportFile(path, content) { return window.rejectExport === true ? false : window.exportRealMemoryFile(path, content); },
+      /** Separates the host user's destination and cancellation from plugin preview state. */
+      async exportFile(name, content) {
+        if (window.rejectExport === true) throw new Error("Host save denied");
+        if (window.cancelExport === true) return { cancelled: true, path: null };
+        if (name !== "memory-backup.json") throw new Error("Unexpected export name");
+        return window.exportRealMemoryFile(window.exportDestination, content);
+      },
       async completeScreen() { throw new Error("Management has no presentation completion channel"); },
       async cancelScreen() { throw new Error("Management has no presentation cancellation channel"); },
     };
@@ -114,7 +120,7 @@ test("real main IPC: memory settings load/save atomically, retain scheduler stat
   ui.harness.disk.clearCalls();
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
   await ui.page.getByText("记忆设置已保存", { exact: true }).waitFor();
-  assert.equal(ui.harness.disk.calls.filter(call => call.method === "storage.commit").length, 1);
+  assert.equal(ui.harness.disk.calls.filter(call => call.method === "storage.transaction").length, 1);
   const owner = await storedOwner(ui.harness);
   assert.equal(owner.settings.autoSaveIntervalMinutes, 13);
   assert.equal(owner.settings.memoryExtractionCustomRules, "Only real owner-scoped extraction rules");
@@ -383,7 +389,7 @@ test("global preferences reject malformed IPC and failed transactions without pu
     { action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: "true" },
   ]) await assert.rejects(() => ui.runtime.web(operation), /Unknown global|必须是布尔值/);
   assert.equal(await ui.harness.readStateText(), before);
-  ui.harness.disk.failNext("storage.commit", new Error("Actual global preference transaction failure"));
+  ui.harness.disk.failNext("storage.transaction", new Error("Actual global preference transaction failure"));
   await assert.rejects(() => ui.runtime.web({ action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: false }), /Actual global preference transaction failure/);
   assert.equal(await ui.harness.readStateText(), before);
   assert.equal((await ui.harness.openRuntime().web({ action: "snapshot" })).memoryPreferences.autoUpdateEnabled, true);
@@ -416,13 +422,18 @@ test("graph canonical relationship editing and full memory backup import/export 
   assert.equal(backup.space.memories.length, 2); assert.equal(backup.space.links[0].type_, "canonical-edited");
   assert.equal(backup.userMarkdown, "# Full backup USER.md\n  exact whitespace\n");
   const path = ui.harness.disk.directory + "/actual-memory-backup.json";
-  await exported.getByLabel("导出文件 VFS 路径 *", { exact: true }).fill(path);
+  assert.equal(await exported.locator("input").count(), 0);
+  await ui.page.evaluate(path => { window.exportDestination = path; window.cancelExport = true; }, path);
+  await exported.getByRole("button", { name: "保存文件", exact: true }).click();
+  assert.equal(await exported.count(), 1);
+  assert.equal(await exported.locator(".dialog-error:not([hidden])").count(), 0);
+  await ui.page.evaluate(() => { window.cancelExport = false; });
   await ui.page.evaluate(() => { window.rejectExport = true; });
-  await exported.getByRole("button", { name: "导出", exact: true }).click();
-  assert.match(await exported.getByRole("alert").innerText(), /未确认文件导出成功/);
+  await exported.getByRole("button", { name: "保存文件", exact: true }).click();
+  assert.match(await exported.getByRole("alert").innerText(), /Host save denied/);
   assert.equal(await exported.count(), 1);
   await ui.page.evaluate(() => { window.rejectExport = false; });
-  await exported.getByRole("button", { name: "导出", exact: true }).click();
+  await exported.getByRole("button", { name: "保存文件", exact: true }).click();
   assert.equal((await ui.harness.disk.readBytes(path)).toString("utf8"), content);
   await graph.getByRole("button", { name: "导入记忆 JSON", exact: true }).click();
   const imported = ui.page.getByRole("dialog", { name: "导入记忆 JSON", exact: true });
@@ -463,18 +474,15 @@ test("Tavern import selector delegates untouched input to genuine codecs; native
   assert.deepEqual(ui.errors, []);
 });
 
-test("existing v3 metadata upgrades once with active behavior preserved; corrupt stored flags never become guessed defaults", async t => {
+/** Requires centralized migration to supply complete flags and rejects malformed live SQL values. */
+test("runtime rejects missing or corrupt memory preferences without writing defaults", async t => {
   const ui = await controlsPage(t);
-  const metadata = () => ui.harness.disk.storage.inspect(sql => JSON.parse(sql.prepare("SELECT value FROM records WHERE collection='meta' AND key='state'").get().value));
-  const replace = value => ui.harness.disk.storage.inspect(sql => sql.prepare("UPDATE records SET value=?,version='preference-upgrade-test' WHERE collection='meta' AND key='state'").run(JSON.stringify(value)));
-  const legacy = metadata(); delete legacy.memoryPreferences; legacy.migrationSource = "original-preserved-source"; replace(legacy);
-  const snapshot = await ui.runtime.web({ action: "snapshot" });
-  assert.deepEqual(plain(snapshot.memoryPreferences), { userDescriptionEnabled: true, autoUpdateEnabled: true });
-  assert.deepEqual(metadata().memoryPreferences, plain(snapshot.memoryPreferences));
-  assert.equal(metadata().migrationSource, "original-preserved-source");
   await ui.runtime.web({ action: "writeGlobalMemoryPreference", key: "autoUpdateEnabled", value: false });
   assert.equal((await ui.harness.openRuntime().web({ action: "snapshot" })).memoryPreferences.autoUpdateEnabled, false);
-  const corrupt = metadata(); corrupt.memoryPreferences.autoUpdateEnabled = "false"; replace(corrupt);
-  await assert.rejects(() => ui.runtime.web({ action: "snapshot" }), /必须是布尔值/);
-  assert.deepEqual(metadata(), corrupt);
+  ui.harness.disk.storage.inspect(sql => sql.prepare('UPDATE meta SET "memoryPreferences__state"=0 WHERE "_key"=?').run("state"));
+  await assert.rejects(ui.runtime.web({ action: "snapshot" }), /global memory preferences/);
+  assert.equal(ui.harness.disk.storage.inspect(sql => sql.prepare('SELECT "memoryPreferences__state" FROM meta WHERE "_key"=?').get("state").memoryPreferences__state), 0);
+  ui.harness.disk.storage.inspect(sql => sql.prepare('UPDATE meta SET "memoryPreferences__state"=2, "memoryPreferences__autoUpdateEnabled"=? WHERE "_key"=?').run("false", "state"));
+  await assert.rejects(ui.runtime.web({ action: "snapshot" }), /Invalid stored boolean/);
+  assert.equal(ui.harness.disk.storage.inspect(sql => sql.prepare('SELECT "memoryPreferences__autoUpdateEnabled" FROM meta WHERE "_key"=?').get("state").memoryPreferences__autoUpdateEnabled), "false");
 });

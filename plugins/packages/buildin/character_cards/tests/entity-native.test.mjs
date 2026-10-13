@@ -19,9 +19,9 @@ function oneSurface(tree) {
 }
 async function click(ui, key, prop = "onClick", payload) { return ui.dispatch(keyedNode(ui.render().tree, key).props[prop], payload); }
 /** Supplies only explicitly controlled independent catalogues/native chat summaries, never entity CRUD. */
-async function environment(t, themes = []) {
+async function environment(t, themes = [], runtimeGlobals = {}) {
   const plugin = await selectorEnvironment(t, {Theme: { async listConfigs() { return { configs: themes }; }
-  }}, {}, composeModules);
+  }}, runtimeGlobals, composeModules);
   plugin.tools.Chat.listAll = async () => ({ totalCount: plugin.records.size, chats: [...plugin.records.keys()].map(id => ({ id, title: "Controlled native conversation", messageCount: 0, createdAt: "2026-10-08T12:00:00Z", updatedAt: "2026-10-08T12:00:00Z", isCurrent: true, inputTokens: 0, outputTokens: 0 })) });
   return plugin;
 }
@@ -330,16 +330,41 @@ test("management creation is a native unsaved draft and commits only on save for
   }
 });
 
-test("native export writes the actual saved Operit and Tavern data to the explicitly entered VFS destination", async t => {
-  const plugin = await environment(t), card = await plugin.api("character.create", { values: { name: "唯一原生导出", characterSetting: "原始正文", marks: "导出保留备注" } });
+test("native export saves canonical Operit and Tavern data through the host selector and preserves cancelled or failed previews", async t => {
+  let saveOutcome = "cancel", destination, plugin;
+  const saves = [];
+  plugin = await environment(t, [], {
+    /** Models only the external host save selector; serialization and actions use production code. */
+    async __operitNativeComposeFileSaveCommand(payload) {
+      saves.push(plain(payload));
+      assert.equal(payload.executionContextKey, "selector-test");
+      assert.equal(payload.routeInstanceId, "native-selector-test");
+      if (saveOutcome === "error") throw new Error("Host save denied");
+      if (saveOutcome === "cancel") return { cancelled: true, path: null };
+      await plugin.disk.files.write(destination, payload.options.content, false);
+      return { cancelled: false, path: destination };
+    },
+  });
+  const card = await plugin.api("character.create", { values: { name: "唯一原生导出", characterSetting: "原始正文", marks: "导出保留备注" } });
   const ui = management(plugin); await ui.load(); await ui.open("edit", "card", card.id); await loadManagementModal(ui);
   await click(ui, "entity-field-characterSetting", "onValueChange", "不能导出未保存的草稿");
   for (const format of ["json", "tavern"]) {
     await click(ui, "entity-export"); await click(ui, "entity-export-" + format);
+    assert.equal(composeNodes(ui.render().tree, node => node.type === "TextField").length, 0);
+    saveOutcome = "cancel";
+    await click(ui, "entity-export-save");
+    assert.ok(keyedNode(ui.render().tree, "entity-export-save"));
+    assert.equal(composeNodes(ui.render().tree, node => node.props.key === "entity-error").length, 0);
+    saveOutcome = "error";
     await click(ui, "entity-export-save");
     assert.ok(composeNodes(ui.render().tree, node => node.props.key === "entity-error").length);
     const path = plugin.disk.directory + "/export-" + format + ".json";
-    await click(ui, "entity-field-export-path", "onValueChange", path); await click(ui, "entity-export-save");
+    destination = path; saveOutcome = "save";
+    await click(ui, "entity-export-save");
+    assert.equal(saves.at(-1).options.suggestedName, "唯一原生导出-" + (format === "json" ? "operit" : "tavern") + ".json");
+    assert.equal(saves.at(-1).options.mimeType, "application/json");
+    assert.deepEqual(saves.at(-1).options.extensions, ["json"]);
+    assert.equal((await plugin.disk.readBytes(path)).toString(), saves.at(-1).options.content);
     const data = JSON.parse((await plugin.disk.readBytes(path)).toString());
     if (format === "tavern") { assert.equal(data.spec, "chara_card_v2"); assert.equal(data.data.name, card.name); assert.equal(data.data.system_prompt, "原始正文"); }
     else { assert.equal(data.name, card.name); assert.equal(data.characterSetting, "原始正文"); }
@@ -347,6 +372,14 @@ test("native export writes the actual saved Operit and Tavern data to the explic
   }
   await click(ui, "entity-cancel");
   assert.equal((await plugin.api("character.get", { id: card.id })).characterSetting, "原始正文");
+  assert.equal(saves.length, 6);
+  const group = await plugin.api("group.create", { values: { name: "宿主保存群组", members: [{ characterCardId: card.id, orderIndex: 0 }] } });
+  await ui.open("edit", "group", group.id); await loadManagementModal(ui);
+  await click(ui, "entity-export"); await click(ui, "entity-export-json");
+  destination = plugin.disk.directory + "/group.json";
+  await click(ui, "entity-export-save");
+  assert.equal(saves.at(-1).options.suggestedName, "宿主保存群组-operit.json");
+  assert.equal((await plugin.disk.readBytes(destination)).toString(), (await plugin.api("group.export", { id: group.id })).content);
 });
 
 test("the sole native editor retains model TTS shared-memory and four-category tool bindings on the real save transaction", async t => {

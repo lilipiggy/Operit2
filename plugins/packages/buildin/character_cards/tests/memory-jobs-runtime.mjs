@@ -3,7 +3,7 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { createDiskHarness } from "./disk-files.mjs";
 import { openPlugin } from "./plugin-entry-harness.mjs";
-import { plain } from "./runtime.mjs";
+import { loadModule, plain } from "./runtime.mjs";
 
 export const CONTROLLED_CHAT_ID = "memory-jobs-controlled-chat";
 export const CONTROLLED_OWNER = "character:default";
@@ -65,7 +65,8 @@ export async function createMemoryJobsHarness(testContext) {
 
   const controlledChat = strictCapability("Tools.Chat", {
     /** Enumerates the sole explicit generic host conversation without a file-backed association mirror. */
-    async listAll() {
+    async listChats(options) {
+      assert.deepEqual(plain(options), { chat_ids: [chat.id], limit: 200 });
       return { totalCount: 1, currentChatId: chat.id, chats: [plain(chat)],
         /** Formats only the controlled generic directory response. */
         toString() { return "Controlled chat directory"; },
@@ -125,7 +126,7 @@ export async function createMemoryJobsHarness(testContext) {
       const outcome = outcomes.shift();
       switch (outcome.kind) {
         case "error": throw outcome.error;
-        case "error-and-status-write": disk.failNext("storage.commit", outcome.statusError); throw outcome.error;
+        case "error-and-status-write": disk.failNext("storage.transaction", outcome.statusError); throw outcome.error;
         case "output": return { text: outcome.text, turns: [{ kind: "ASSISTANT", content: outcome.text, metadata: { fixture: "controlled" } }],
           finishReason: "stop", metadata: { fixture: "controlled-chat-ai" }, receivedAt: SOURCE_TIME + 5000,
           /** Formats only the explicitly queued controlled response. */
@@ -137,6 +138,11 @@ export async function createMemoryJobsHarness(testContext) {
   });
   const tools = strictCapability("Tools", { Files: disk.files, Storage: disk.storage, Chat: controlledChat });
   const statePath = path.join(disk.directory, "character-memory", "state.json");
+  const snapshotStorage = loadModule("src/chat-storage.ts", { ...disk.globals, Tools: tools });
+  /** Writes a real typed snapshot before assigning its generic Core reference. */
+  async function saveMessageSnapshot(timestamp, variantIndex) {
+    messageExtensions.set(JSON.stringify([timestamp, variantIndex]), await snapshotStorage.storeSnapshot(messageMarker()));
+  }
 
   /** Opens a fresh production main module against the same real disk after the previous runtime is retired. */
   function openRuntime(runtimeGlobals = {}) {
@@ -149,6 +155,12 @@ export async function createMemoryJobsHarness(testContext) {
         assert.equal(plugin.lifecycle.length, 1); assert.equal(plugin.lifecycle[0].id, "service-initialize");
         assert.equal(plugin.lifecycle[0].event, "application_on_create");
         await plugin.lifecycle[0].function({ event: "application_on_create", eventName: "application_on_create", eventPayload: {} });
+        for (const message of history) {
+          const key = JSON.stringify([message.timestamp, message.variantIndex]);
+          if (message.sender === "ai" && messageExtensions.get(key)?.schemaVersion !== 1) {
+            await saveMessageSnapshot(message.timestamp, message.variantIndex);
+          }
+        }
       },
       /** Writes the real plugin chat selection through its registered typed API. */
       async bind() { return plugin.api("chat.configuration.binding.write", { chatId: chat.id, selection: "card:default" }); },
@@ -206,16 +218,16 @@ export async function createMemoryJobsHarness(testContext) {
     /** Removes one explicitly saved assistant snapshot while leaving the actual message revision present. */
     removeMessageMarker(timestamp, variantIndex) { assert.equal(messageExtensions.delete(JSON.stringify([timestamp, variantIndex])), true); },
     /** Removes the current chat marker to prove background assistant work uses only immutable message snapshots. */
-    removeChatMarker() { chatExtension = null; },
+    async removeChatMarker() { await snapshotStorage.deleteChatBinding(chat.id); },
     /** Selects a genuinely present controlled variant and changes source metadata before the next scheduled read. */
-    selectNewVariant(timestamp) {
+    async selectNewVariant(timestamp) {
       const messages = history.filter(
         /** Requires one explicitly present message to receive the controlled persisted variant. */
         message => message.timestamp === timestamp,
       );
       assert.equal(messages.length, 1); const message = messages[0];
       message.variantCount += 1; message.variantIndex = message.variantCount - 1; message.content += " [Controlled selected variant]";
-      messageExtensions.set(JSON.stringify([timestamp, message.variantIndex]), messageMarker()); historyChanged();
+      await saveMessageSnapshot(timestamp, message.variantIndex); historyChanged();
     },
     /** Deletes exactly one claimed source and updates the controlled host's actual summary metadata. */
     deleteMessage(timestamp) {

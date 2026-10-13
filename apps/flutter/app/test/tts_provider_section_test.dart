@@ -196,14 +196,14 @@ Future<void> _pumpSection(
 }
 
 /// Creates a complete voice configuration for the generated Core protocol.
-core.TtsConfig _config({
+core.CoreOperitModelTtsConfigTtsConfig _config({
   required String id,
   required String name,
   required String providerType,
   String model = '',
   String voice = '',
 }) {
-  return core.TtsConfig(
+  return core.CoreOperitModelTtsConfigTtsConfig(
     id: id,
     name: name,
     providerType: providerType,
@@ -226,16 +226,17 @@ core.TtsConfig _config({
 /// Implements only independent TTS configuration calls and rejects domain lookups.
 class _TtsSettingsBridge extends OperitRuntimeBridge {
   final List<CoreCallRequest> calls = <CoreCallRequest>[];
-  final List<core.TtsConfig> configs = <core.TtsConfig>[
-    _config(id: 'system', name: '系统 TTS', providerType: 'SYSTEM_TTS'),
-    _config(
-      id: 'remote',
-      name: 'SiliconFlow',
-      providerType: 'SILICONFLOW_TTS',
-      model: 'remote-model',
-      voice: 'remote-voice',
-    ),
-  ];
+  final List<core.CoreOperitModelTtsConfigTtsConfig> configs =
+      <core.CoreOperitModelTtsConfigTtsConfig>[
+        _config(id: 'system', name: '系统 TTS', providerType: 'SYSTEM_TTS'),
+        _config(
+          id: 'remote',
+          name: 'SiliconFlow',
+          providerType: 'SILICONFLOW_TTS',
+          model: 'remote-model',
+          voice: 'remote-voice',
+        ),
+      ];
   String currentConfigId = 'system';
   late Completer<Uint8List> selection;
   late String requestedConfigId;

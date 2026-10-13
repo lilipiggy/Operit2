@@ -1329,27 +1329,44 @@ fn filterByTitle(
     }
 }
 
+/// Reads and sorts chat summaries using the explicit complete-list or bounded-list contract.
 fn buildFilteredChatList(tool: &AITool) -> Result<(usize, Option<String>, Vec<ChatInfo>), String> {
     let manager = ChatHistoryManager::default()
         .map_err(|error| format!("Error opening chat history: {error}"))?;
-    let histories = manager
-        .loadChatHistories()
-        .map_err(|error| format!("Error loading chats: {error}"))?;
+    let (histories, messageCounts) = match optionalParameterValue(tool, "chat_ids") {
+        Some(value) => {
+            let ids: Vec<String> = serde_json::from_str(&value)
+                .map_err(|error| format!("Invalid chat_ids: {error}"))?;
+            let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
+            if ids.is_empty()
+                || ids.len() > 200
+                || unique.len() != ids.len()
+                || ids.iter().any(|id| id.trim().is_empty())
+            {
+                return Err("chat_ids requires 1..200 unique nonempty identities".into());
+            }
+            let histories = manager
+                .loadChatHistoriesByIds(&ids)
+                .map_err(|error| format!("Error loading selected chats: {error}"))?;
+            let counts = manager
+                .getMessageCountsForChats(&ids)
+                .map_err(|error| format!("Error loading selected message counts: {error}"))?;
+            (histories, counts)
+        }
+        None => (
+            manager
+                .loadChatHistories()
+                .map_err(|error| format!("Error loading chats: {error}"))?,
+            manager
+                .getMessageCountsByChatId()
+                .map_err(|error| format!("Error loading message counts: {error}"))?,
+        ),
+    };
     let currentChatId = manager
         .currentChatIdFlow()
         .map_err(|error| format!("Error loading current chat: {error}"))?;
-    let messageCounts = manager
-        .getMessageCountsByChatId()
-        .map_err(|error| format!("Error loading message counts: {error}"))?;
     let query = optionalParameterValue(tool, "query").unwrap_or_default();
     let matchMode = parseMatchMode(tool)?;
-    let limit = match optionalParameterValue(tool, "limit") {
-        Some(value) if !value.trim().is_empty() => value
-            .parse::<usize>()
-            .map_err(|_| "Invalid parameter: limit must be an integer".to_string())?
-            .clamp(1, 200),
-        _ => 50,
-    };
     let sortBy = match optionalParameterValue(tool, "sort_by") {
         Some(value) if value == "createdAt" || value == "updatedAt" || value == "messageCount" => {
             value
@@ -1379,13 +1396,31 @@ fn buildFilteredChatList(tool: &AITool) -> Result<(usize, Option<String>, Vec<Ch
             rightValue.cmp(&leftValue)
         }
     });
-    let totalCount = matched.len();
+    let (totalCount, matched) = selectChatListRecords(tool, matched)?;
     let chats = matched
         .into_iter()
-        .take(limit)
         .map(|chat| buildChatInfo(&chat, &messageCounts, currentChatId.as_deref()))
         .collect();
     Ok((totalCount, currentChatId, chats))
+}
+
+/// Returns every matched record for listAll and retains listChats' declared result limits.
+fn selectChatListRecords<T>(tool: &AITool, mut records: Vec<T>) -> Result<(usize, Vec<T>), String> {
+    let totalCount = records.len();
+    match parseOptionalBoolean(tool, "list_all")? {
+        Some(true) => {}
+        Some(false) | None => {
+            let limit = match optionalParameterValue(tool, "limit") {
+                Some(value) if !value.trim().is_empty() => value
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid parameter: limit must be an integer".to_string())?
+                    .clamp(1, 200),
+                _ => 50,
+            };
+            records.truncate(limit);
+        }
+    }
+    Ok((totalCount, records))
 }
 
 fn sortableChatValue(
@@ -1708,6 +1743,7 @@ mod sidebar_chat_tool_contract_tests {
     use super::*;
     use crate::ToolExecutionManager::ToolParameter;
 
+    /// Builds explicit executor arguments for chat tool contract tests.
     fn request(parameters: &[(&str, &str)]) -> AITool {
         AITool {
             name: "contract-test".to_string(),
@@ -1715,6 +1751,44 @@ mod sidebar_chat_tool_contract_tests {
                 name: (*name).to_string(), value: (*value).to_string(),
             }).collect(),
         }
+    }
+
+    /// Ensures complete enumeration includes records beyond both bounded-list limits.
+    #[test]
+    fn list_all_returns_every_declared_record() {
+        let records = (0..251).collect::<Vec<_>>();
+        let (totalCount, selected) = selectChatListRecords(
+            &request(&[("list_all", "true")]), records.clone(),
+        ).unwrap();
+        assert_eq!(totalCount, 251);
+        assert_eq!(selected, records);
+        assert_eq!(selectChatListRecords::<i32>(
+            &request(&[("list_all", "true")]), Vec::new(),
+        ).unwrap(), (0, Vec::new()));
+    }
+
+    /// Keeps ordinary list requests bounded while reporting the full matching count.
+    #[test]
+    fn list_chats_preserves_default_and_explicit_limits() {
+        for (parameters, expected) in [
+            (vec![], 50),
+            (vec![("limit", "7")], 7),
+            (vec![("limit", "999")], 200),
+            (vec![("list_all", "false")], 50),
+        ] {
+            let (totalCount, selected) = selectChatListRecords(
+                &request(&parameters), (0..251).collect(),
+            ).unwrap();
+            assert_eq!(totalCount, 251);
+            assert_eq!(selected, (0..expected).collect::<Vec<_>>());
+        }
+    }
+
+    /// Rejects malformed enumeration controls rather than silently limiting the result.
+    #[test]
+    fn list_chats_rejects_invalid_controls() {
+        assert!(selectChatListRecords(&request(&[("list_all", "invalid")]), vec![1]).is_err());
+        assert!(selectChatListRecords(&request(&[("limit", "invalid")]), vec![1]).is_err());
     }
 
     #[test]

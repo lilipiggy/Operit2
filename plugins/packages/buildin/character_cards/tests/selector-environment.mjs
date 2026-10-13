@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { createDiskHarness } from "./disk-files.mjs";
 import { fixture } from "./fixtures.mjs";
 import { openPlugin } from "./plugin-entry-harness.mjs";
-import { plain } from "./runtime.mjs";
+import { loadModule, plain } from "./runtime.mjs";
 import { createNativeChatHost } from "./native-chat-host.mjs";
 
 /** Opens real plugin files and registrations with explicitly controlled generic host-record namespaces, never fixture CRUD. */
@@ -50,5 +50,22 @@ export async function selectorEnvironment(t, configurationSettings = {}, runtime
     },
   } } });
   assert.equal(disk.calls.length, 0); assert.deepEqual(calls, []); assert.deepEqual(directoryCalls, []);
-  return { ...plugin, disk, records, calls, tools, failNext: native.failNext, holdWrite: native.holdWrite };
+  const storage = loadModule("src/chat-storage.ts", { ...disk.globals, Tools: tools });
+  return {
+    ...plugin, disk, records, calls, tools,
+    /** Reads actual plugin binding rows for independent persistence assertions. */
+    async binding(chatId = "selector-chat") {
+      const row = await (await storage.chatDatabase()).get("chat_bindings", chatId);
+      return row === null ? null : plain(row.value);
+    },
+    /** Seeds a declared SQL binding instead of modifying a Core extension fixture. */
+    async seedBinding(chatId, value) {
+      const database = await storage.chatDatabase(), existing = await database.get("chat_bindings", chatId);
+      await database.commit([{ op: "put", collection: "chat_bindings", key: chatId, value, expectedVersion: existing === null ? null : existing.version }]);
+    },
+    /** Schedules an original error on the SQL boundary exercised by selection writes. */
+    failNext(method, failure) { disk.failNext(method, failure); },
+    /** Holds only real binding writes, allowing directory reads and UI rendering to continue. */
+    holdWrite() { return disk.storage.holdTransaction(statements => statements.some(statement => /^(INSERT INTO|UPDATE) "chat_bindings" /.test(statement.sql))); },
+  };
 }

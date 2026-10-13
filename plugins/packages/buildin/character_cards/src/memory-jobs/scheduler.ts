@@ -3,7 +3,7 @@ import type { MemoryCandidate, MemoryRebuild, MemoryRebuildProgress, MemoryRebui
 import { assertInteger, assertObject, assertStrings, requireId } from "../validation";
 import { extractMessages } from "./analysis";
 import { chatParticipants, planWindows, primaryOwner, readMessages, requireChat, requireChatOwner, requireMessageOwner, requireMessagesOwner } from "./chat";
-import { readMessageExtensionMarker } from "../chat-extensions";
+import { readMessageSnapshot } from "../chat-storage";
 
 export type CandidateSource = "reply_finalized_auto" | "selected_user_message";
 export interface CandidateRequest { chatId: string; timestamp: number; variantIndex: number; sourceType: CandidateSource; ownerKey: string | null }
@@ -50,7 +50,7 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
   if (message.content.trim() === "") throw new Error("Memory candidate source is blank");
   const owners = new Set<string>();
   if (input.sourceType === "reply_finalized_auto") {
-    const marker = await readMessageExtensionMarker(input.chatId, message.timestamp, message.variantIndex);
+    const marker = await readMessageSnapshot(input.chatId, message.timestamp, message.variantIndex);
     const ownerKey = input.ownerKey === null ? marker.primaryOwnerKey : input.ownerKey;
     if (!marker.profile.resources.some(
       /** Authorizes only the exact submitted resource through the already-read historical snapshot. */

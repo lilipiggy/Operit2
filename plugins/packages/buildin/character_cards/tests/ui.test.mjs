@@ -251,13 +251,58 @@ async function graphCamera(graph) {
   );
 }
 
-/** Verifies list selection brings a tiny node to the viewport center at a readable scale. */
+/** Waits for the selected node to reach the exact destination of its camera animation. */
+async function waitForGraphNavigation(page, id, scale) {
+  await page.waitForFunction(
+    /** Measures the selected node in viewport coordinates rather than assuming a duration. */
+    ({ id, scale }) => {
+      const surface = document.querySelector("dialog[open] [data-graph-surface]");
+      const node = surface.querySelector(`.graph-node[data-id="${id}"]`);
+      const bounds = surface.getBoundingClientRect();
+      const center = new DOMPoint(0, 0).matrixTransform(node.getScreenCTM());
+      const camera = surface.firstElementChild.transform.baseVal.consolidate().matrix;
+      return Math.abs(center.x - bounds.left - bounds.width / 2) < 0.01 && Math.abs(center.y - bounds.top - bounds.height / 2) < 0.01 && Math.abs(camera.a - scale) < 0.000001;
+    }, { id, scale },
+  );
+}
+
+/** Records rendered camera frames through a complete navigation interval. */
+async function sampleGraphCamera(graph) {
+  return graph.locator("[data-graph-surface]").evaluate(
+    /** Reads the current surface on every frame so dialog repainting is included. */
+    () => new Promise(resolve => {
+      const started = performance.now(), samples = [];
+      /** Captures each painted transform until the navigation interval has elapsed. */
+      function sample(now) {
+        const surface = document.querySelector("dialog[open] [data-graph-surface]");
+        const matrix = surface.firstElementChild.transform.baseVal.consolidate().matrix;
+        samples.push({ scale: matrix.a, x: matrix.e, y: matrix.f });
+        if (now - started >= 420) resolve(samples);
+        else requestAnimationFrame(sample);
+      }
+      requestAnimationFrame(sample);
+    }),
+  );
+}
+
+/** Verifies list selection animates a tiny node to the viewport center at a readable scale. */
 test("memory list selection centers and reveals its graph node", async () => {
   const ui = await page(390, 844), graph = await openCharacterGraph(ui.page);
   try {
     for (let step = 0; step < 8; step++) await graph.getByRole("button", { name: "缩小", exact: true }).click();
-    assert.ok((await graphCamera(graph)).scale < 0.5);
+    const before = await graphCamera(graph);
+    assert.ok(before.scale < 0.5);
     await graph.locator('.memory-item[data-id="memory-three"]').click();
+    const samples = await sampleGraphCamera(graph);
+    assert.ok(samples.filter(
+      /** Requires multiple rendered zoom steps before reaching the destination. */
+      sample => sample.scale > before.scale + 0.01 && sample.scale < 0.99,
+    ).length >= 3, "Navigation must render intermediate zoom levels");
+    assert.ok(samples.some(
+      /** Requires camera translation to advance during the zoom transition. */
+      sample => Math.abs(sample.x - before.x) > 1 && sample.scale < 0.99,
+    ), "Pan and zoom must progress together");
+    await waitForGraphNavigation(ui.page, "memory-three", 1);
     const camera = await graphCamera(graph);
     const center = await graph.locator('.graph-node[data-id="memory-three"]').evaluate(
       /** Projects the selected node center into the surface's local viewport. */
@@ -271,6 +316,47 @@ test("memory list selection centers and reveals its graph node", async () => {
     assert.ok(Math.abs(center.y - camera.height / 2) < 0.01);
     assert.ok(camera.scale >= 1);
     assert.equal(await graph.locator('.graph-node.selected[data-id="memory-three"]').count(), 1);
+  } finally { await ui.context.close(); }
+});
+
+/** Verifies mouse and keyboard selection inside the graph leave its camera unchanged. */
+test("SVG node selection preserves graph pan and zoom", async () => {
+  const ui = await page(), graph = await openCharacterGraph(ui.page);
+  try {
+    for (let step = 0; step < 4; step++) await graph.getByRole("button", { name: "缩小", exact: true }).click();
+    const before = await graphCamera(graph);
+    await graph.locator('.graph-node[data-id="memory-one"]').click();
+    assert.equal(await graph.locator(".graph-detail h3").innerText(), "喜欢安静的旅行");
+    assert.deepEqual(await graphCamera(graph), before);
+    assert.ok((await sampleGraphCamera(graph)).every(
+      /** Rejects delayed camera movement after an in-canvas selection. */
+      sample => sample.scale === before.scale && sample.x === before.x && sample.y === before.y,
+    ));
+    await graph.locator('.graph-node[data-id="memory-two"]').focus();
+    await ui.page.keyboard.press("Enter");
+    assert.equal(await graph.locator(".graph-detail h3").innerText(), "饮食偏好");
+    assert.deepEqual(await graphCamera(graph), before);
+  } finally { await ui.context.close(); }
+});
+
+/** Verifies newer list navigation takes over and wheel input cancels camera motion immediately. */
+test("graph list animation can be retargeted and interrupted by wheel input", async () => {
+  const ui = await page(), graph = await openCharacterGraph(ui.page);
+  try {
+    for (let step = 0; step < 6; step++) await graph.getByRole("button", { name: "缩小", exact: true }).click();
+    await graph.locator('.memory-item[data-id="memory-three"]').click();
+    await graph.locator('.memory-item[data-id="memory-two"]').click();
+    await waitForGraphNavigation(ui.page, "memory-two", 1);
+    assert.equal(await graph.locator('.graph-node.selected[data-id="memory-two"]').count(), 1);
+    await graph.locator('.memory-item[data-id="memory-one"]').click();
+    await graph.locator("[data-graph-surface]").dispatchEvent("wheel", { deltaY: 120, deltaMode: 0, clientX: 100, clientY: 200, bubbles: true, cancelable: true });
+    const camera = await graphCamera(graph), samples = await sampleGraphCamera(graph);
+    assert.ok(samples.every(
+      /** Requires every later frame to retain the camera chosen by wheel input. */
+      sample => sample.scale === camera.scale && sample.x === camera.x && sample.y === camera.y,
+    ), "Canceled navigation must not resume after wheel input");
+    await graph.locator('.memory-item[data-id="memory-three"]').click();
+    await waitForGraphNavigation(ui.page, "memory-three", 1);
   } finally { await ui.context.close(); }
 });
 
@@ -294,6 +380,7 @@ test("graph wheel zoom preserves the cursor anchor and survives selection", asyn
     assert.ok(Math.abs((focal.x - after.x) / after.scale - (focal.x - before.x) / before.scale) < 1);
     assert.ok(Math.abs((focal.y - after.y) / after.scale - (focal.y - before.y) / before.scale) < 1);
     await graph.locator('.memory-item[data-id="memory-one"]').click();
+    await waitForGraphNavigation(ui.page, "memory-one", Math.max(1, after.scale));
     assert.equal((await graphCamera(graph)).scale, Math.max(1, after.scale));
     await surface.hover({ position: focal });
     await ui.page.mouse.wheel(0, 240);
@@ -809,12 +896,13 @@ test("current plugin routes connect selector and memory attachment to the actual
     const row = keyedNode(ui.render().tree, "card:" + card.id), committed = await ui.dispatch(row.props.onClick);
     assert.deepEqual(plain(committed.actionResult), { type: "toolpkg.presentation.complete", requestId: "selector-card", value: { selection: "card:" + card.id, contextKey: "card:" + card.id } });
     const file = path.join(plugin.disk.directory, "character-memory/state.json"), before = await plugin.disk.stateBytes();
-    const stored = JSON.parse(before.toString("utf8")), binding = plain(plugin.records.get("chat-dom").extension), count = plugin.hostCalls.length;
-    assert.equal(Object.hasOwn(stored, "chatBindings"), false, "Bindings belong to the native record namespace, not plugin files");
-    assert.deepEqual(binding, { version: 1, selection: "card:" + card.id });
+    const stored = JSON.parse(before.toString("utf8")), binding = await plugin.api("chat.configuration.binding.read", { chatId: "chat-dom" }), count = plugin.hostCalls.length;
+    assert.equal(Object.hasOwn(stored, "chatBindings"), false);
+    assert.deepEqual(binding, { chatId: "chat-dom", selection: "card:" + card.id });
+    assert.equal(plugin.records.get("chat-dom").extension, null);
     await assert.rejects(ui.dispatch(row.props.onClick), /already finished/);
     assert.equal(plugin.hostCalls.length, count, "Repeated native action must not issue another extension read or write");
-    assert.deepEqual(plugin.records.get("chat-dom").extension, binding); assert.deepEqual(await plugin.disk.stateBytes(), before);
+    assert.deepEqual(await plugin.api("chat.configuration.binding.read", { chatId: "chat-dom" }), binding); assert.deepEqual(await plugin.disk.stateBytes(), before);
     assert.deepEqual(await plugin.api("activePrompt.get", {}), active);
   });
   /** Confirms a real group binding while preserving the global active identity. */
@@ -822,7 +910,7 @@ test("current plugin routes connect selector and memory attachment to the actual
     const ui = mountRegisteredSelector(plugin, { requestId: "selector-group", input: { mode: "select", chatId: "chat-dom", kind: "group", selected: null } }); await ui.load();
     const committed = await ui.dispatch(keyedNode(ui.render().tree, "group:" + group.id).props.onClick);
     assert.deepEqual(plain(committed.actionResult), { type: "toolpkg.presentation.complete", requestId: "selector-group", value: { selection: "group:" + group.id, contextKey: "group:" + group.id } });
-    assert.deepEqual(plugin.records.get("chat-dom").extension, { version: 1, selection: "group:" + group.id });
+    assert.equal(plugin.records.get("chat-dom").extension, null);
     assert.equal((await plugin.api("chat.configuration.binding.read", { chatId: "chat-dom" })).selection, "group:" + group.id);
     assert.deepEqual(await plugin.api("activePrompt.get", {}), active);
   });

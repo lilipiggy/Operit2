@@ -280,6 +280,27 @@ fn sqlite_tracks_only_changed_rows_and_preserves_int64_and_blobs() {
     f.dispose();
 }
 
+/// Rejects stale SQL mutations without publishing earlier writes or synchronization changes.
+#[test]
+fn sql_affected_row_guards_rollback_the_batch_and_journal() {
+    let f = Fixture::new("first");
+    let handle = f.open("sqlite");
+    f.call(json!({"op":"define_table","handle":handle,"table":table()})).unwrap();
+    f.call(json!({"op":"execute","handle":handle,"statement":{"sql":"INSERT INTO records VALUES('one',1,NULL)","params":[],"expectedAffectedRows":1}})).unwrap();
+    let before = f.export();
+    let error = f.call(json!({"op":"transaction","handle":handle,"statements":[
+        {"sql":"UPDATE records SET count=2 WHERE id='one'","params":[],"expectedAffectedRows":1},
+        {"sql":"DELETE FROM records WHERE id='absent'","params":[],"expectedAffectedRows":1}
+    ]})).unwrap_err();
+    assert!(error.contains("affected-row precondition"), "{error}");
+    let rows = f.call(json!({"op":"query","handle":handle,"statement":{"sql":"SELECT count FROM records WHERE id='one'","params":[]}})).unwrap();
+    assert_eq!(rows[0]["values"][0]["value"], "1");
+    assert_eq!(f.export().len(), before.len());
+    let error = f.call(json!({"op":"query","handle":handle,"statement":{"sql":"SELECT count FROM records","params":[],"expectedAffectedRows":1}})).unwrap_err();
+    assert!(error.contains("require a mutation"), "{error}");
+    f.dispose();
+}
+
 /// Rejects real quoted identifiers and introspection functions through parsed AST names.
 #[test]
 fn sql_cannot_reach_private_tables_or_external_functions() {

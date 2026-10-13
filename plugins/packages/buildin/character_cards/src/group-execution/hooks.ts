@@ -1,5 +1,5 @@
 import type { ToolPkg as ToolPkgTypes } from "../../../../../types/index";
-import { decodeChatMarker } from "../chat-markers";
+import { findChatBinding } from "../chat-storage";
 import { parseChatSelection } from "../chat-bindings";
 import { jsonValue } from "../domain";
 import { getService } from "../service-runtime";
@@ -54,10 +54,9 @@ export async function onGroupInputSubmit(event: ToolPkgTypes.ChatInputHookEvent)
   // Native plugin sends already carry an explicit turn; this hook never recursively replans those sends.
   if (payload.source === "Sequence") return null;
   const chatId = requireId(payload.chatId, "submitted chatId");
-  const extension = (await Tools.Chat.readExtension({ kind: "chat", chatId })).extension;
+  const binding = await findChatBinding(chatId);
   // An unassociated chat is outside this plugin's ownership, not an unsuccessful group lookup.
-  if (extension === null) return null;
-  const binding = decodeChatMarker(extension);
+  if (binding === null) return null;
   if (parseChatSelection(binding.selection).kind !== "group") return null;
   const service = await getService();
   const input = submission(payload, chatId, binding.selection);

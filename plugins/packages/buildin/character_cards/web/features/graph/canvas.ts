@@ -1,5 +1,6 @@
 import type { GraphDialog } from "../../bridge/contracts";
 import { escapeHtml } from "../../shared/ui/html";
+import { cancelGraphCameraAnimation } from "./camera";
 import { graphData, graphItems, graphViewport } from "./data";
 import { graphInspector } from "./inspector";
 import { fitMemoryGraph, graphEntry, layoutMemoryGraph, measureMemoryNode, memoryGraphBounds } from "./layout";
@@ -24,6 +25,7 @@ export function initializePositions(dialog: GraphDialog): void {
   );
   const signature = JSON.stringify({ nodes, edges });
   if (dialog.layoutSignature === signature) return;
+  cancelGraphCameraAnimation(dialog);
   const scene = layoutMemoryGraph(nodes, edges, measureMemoryNode);
   dialog.positions = scene.positions; dialog.sizes = scene.sizes; dialog.layoutSignature = signature;
   dialog.viewport = null;
@@ -34,6 +36,7 @@ export function setGraphViewport(dialog: GraphDialog, surface: SVGSVGElement): v
   const bounds = surface.getBoundingClientRect(), width = bounds.width, height = bounds.height;
   surface.setAttribute("viewBox", `0 0 ${width} ${height}`);
   if (dialog.viewport !== null && dialog.viewport.width === width && dialog.viewport.height === height) return;
+  cancelGraphCameraAnimation(dialog);
   if (dialog.viewport === null) dialog.camera = fitMemoryGraph(memoryGraphBounds(dialog.positions, dialog.sizes), width, height);
   else { dialog.camera.x += (width - graphViewport(dialog).width) / 2; dialog.camera.y += (height - graphViewport(dialog).height) / 2; }
   dialog.viewport = { width, height }; surface.innerHTML = graphSvg(dialog);

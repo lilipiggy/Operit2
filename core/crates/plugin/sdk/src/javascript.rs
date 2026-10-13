@@ -264,6 +264,9 @@ pub trait JsExecutionHost: Send + Sync {
     /// Opens one Compose DSL file picker through the embedding application's host UI.
     fn open_compose_file_picker(&self, payload: &Value) -> Result<Value, String>;
 
+    /// Saves a UTF-8 export through the embedding application's file selector.
+    fn save_compose_file(&self, payload: &Value) -> Result<Value, String>;
+
     /// Returns whether one package is currently imported.
     fn is_package_imported(&self, package_name: &str) -> Result<bool, String>;
 

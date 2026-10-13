@@ -64,9 +64,10 @@ test("actual plugin files preserve themeConfigId and reject old incomplete recor
     session => session.getCharacter(saved.id),
   );
   assert.equal(retained.themeConfigId, "independent-theme-one");
-  const stored = JSON.parse(await disk.stateBytes().toString("utf8")); delete stored.cards.find(card => card.id === saved.id).themeConfigId;
-  const malformed = JSON.stringify(stored); disk.replaceState(stored); disk.clearCalls();
-  await assert.rejects(repository(disk), /themeConfigId/); assert.equal(await disk.stateBytes().toString("utf8"), malformed);
+  disk.storage.inspect(sql => sql.prepare('UPDATE cards SET "themeConfigId__state"=0 WHERE "_key"=?').run(saved.id));
+  disk.clearCalls();
+  await assert.rejects(repository(disk), /themeConfigId/);
+  assert.equal(disk.storage.inspect(sql => sql.prepare('SELECT "themeConfigId__state" FROM cards WHERE "_key"=?').get(saved.id).themeConfigId__state), 0);
   assert.equal(disk.calls.filter(
     /** Confirms failed reads cannot manufacture a new field or publish any implicit migration. */
     call => ["write", "move", "mkdir"].indexOf(call.method) >= 0,

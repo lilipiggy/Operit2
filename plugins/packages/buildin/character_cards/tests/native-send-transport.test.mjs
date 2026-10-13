@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadModule, plain } from "./runtime.mjs";
+import { createDiskHarness } from "./disk-files.mjs";
 
 const submitted = { submissionId: "submission", chatId: "chat", selection: "group:33", runtime: "main", notifyReply: true,
   text: "Original full input", attachments: [{ filePath: "vfs://a", nodeId: "node", fileName: "a.txt", mimeType: "text/plain", fileSize: 7, content: "payload" }], replyToMessageTimestamp: 9 };
@@ -19,29 +20,31 @@ function receipt(message, timestamp, status = "completed", user = 10) {
 }
 
 /** Loads the real transport with only the declared current Chat capabilities. */
-function transport(chat) {
+function transport(chat, globals = {}) {
   const namespace = new Proxy(chat, {
     /** Rejects every retired method or undeclared host capability immediately. */
     get(target, name) { assert.equal(Object.hasOwn(target, name), true, "Undeclared native capability: " + String(name)); return target[name]; },
   });
-  const module = loadModule("src/group-execution/native-transport.ts", { Tools: { Chat: namespace } });
+  const module = loadModule("src/group-execution/native-transport.ts", { ...globals, Tools: { ...globals.Tools, Chat: namespace } });
   return new module.NativeGroupTurnTransport();
 }
 
 /** The real plugin transport submits once, continues the precise user row and never asks for native handles or finish methods. */
-test("native send transport: complete input, exact continuations and host-authored snapshots", async () => {
+test("native send transport: complete input, exact continuations and host-authored snapshots", async t => {
+  const disk = await createDiskHarness(t);
+  const storage = loadModule("src/chat-storage.ts", disk.globals);
   const calls = [], snapshots = new Map(); let count = 0;
   const native = transport({
     /** Acknowledges the explicitly planned send and stores its complete controlled native message snapshot. */
     async sendMessage(request) {
       const input = plain(request); calls.push(input); count++;
       const id = input.kind === "submit" ? input.turn.participantId : input.participantId;
-      snapshots.set(20 + count, marker(id));
+      snapshots.set(20 + count, await storage.storeSnapshot(marker(id)));
       return receipt(input.kind === "submit" ? input.input.text : "", 20 + count);
     },
     /** Reads only the exact committed message locator, never current character state. */
-    async readExtension(target) { assert.deepEqual(Object.keys(target).sort(), ["chatId", "kind", "messageTimestamp", "variantIndex"]); assert.equal(target.kind, "message"); assert.equal(target.chatId, "chat"); assert.equal(target.variantIndex, 0); assert.equal(snapshots.has(target.messageTimestamp), true); return snapshots.get(target.messageTimestamp); },
-  });
+    async readExtension(target) { assert.deepEqual(Object.keys(target).sort(), ["chatId", "kind", "messageTimestamp", "variantIndex"]); assert.equal(target.kind, "message"); assert.equal(target.chatId, "chat"); assert.equal(target.variantIndex, 0); assert.equal(snapshots.has(target.messageTimestamp), true); return { extension: snapshots.get(target.messageTimestamp) }; },
+  }, disk.globals);
   const first = { kind: "execute", submission: submitted, turn: { requestKey: "local-1", selection: "group:33", participantId: "1", notifyReply: false } };
   const initial = await native.submit(first);
   const continued = await native.continue({ submissionId: "submission", chatId: "chat", runtime: "main", userMessageTimestamp: 10,

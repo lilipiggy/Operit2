@@ -1,4 +1,5 @@
 import { changeMemoryControls } from "../features/memory/controls-events";
+import { cancelGraphCameraAnimation } from "../features/graph/camera";
 import { updateScoreOutput } from "../features/memory/item-events";
 import { dataValue } from "../shared/dom";
 import { editableDialog, setEditableValue } from "../shared/edits";
@@ -28,6 +29,7 @@ export function createEditorEvents(context: EditorContext, features: readonly Ac
     event.preventDefault();
     state.busy = true;
     const owner = state.dialogs.length === 0 ? null : topDialog();
+    if (owner !== null && owner.type === "graph") cancelGraphCameraAnimation(owner);
     if (owner !== null) owner.error = ""; else state.error = "";
     try { await handleAction(dataValue(element, "action"), element); }
     catch (error) {

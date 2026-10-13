@@ -19,6 +19,9 @@ var OperitComposeRetained = function () {
   /// Creates a persistent retained graph with occurrence-local mutation queues.
   function create(runtime) {
     var nodes = new Map();
+    var occurrenceIds = new Map();
+    var occurrenceKeys = new Map();
+    var nextNodeId = 0;
     var dirty = new Map();
     var revision = 0;
     var rootId = null;
@@ -28,6 +31,16 @@ var OperitComposeRetained = function () {
       removedNodes: 0,
       commits: 0
     };
+
+    /// Assigns a compact transport handle while retaining the exact keyed occurrence identity locally.
+    function occurrenceId(key) {
+      if (!occurrenceIds.has(key)) {
+        var id = 'n:' + ++nextNodeId;
+        occurrenceIds.set(key, id);
+        occurrenceKeys.set(id, key);
+      }
+      return occurrenceIds.get(key);
+    }
 
     /// Coalesces mutation flags for one retained occurrence.
     function invalidate(id, structure) {
@@ -88,7 +101,7 @@ var OperitComposeRetained = function () {
           }
           if (identities.has(identity)) throw new Error('duplicate compose node key in ' + parent + ':' + slot);
           identities.add(identity);
-          var id = parent + '/s:' + slot.length + ':' + slot + '/' + identity + '/t:' + value.type;
+          var id = occurrenceId(parent + '/s:' + slot.length + ':' + slot + '/' + identity + '/t:' + value.type);
           // Reattachment must reconcile even a previously skipped dirty occurrence.
           if (removalRoots.delete(id)) invalidate(id, true);
           var previous = nodes.get(id);
@@ -191,6 +204,8 @@ var OperitComposeRetained = function () {
         });
         entry.unsubscribe();
         nodes.delete(id);
+        occurrenceIds.delete(occurrenceKeys.get(id));
+        occurrenceKeys.delete(id);
         dirty.delete(id);
         upserts.delete(id);
         // Dirty detached branches can create temporary occurrences during
@@ -199,7 +214,7 @@ var OperitComposeRetained = function () {
         if (!created.has(id)) removed.push(id);
         stats.removedNodes += 1;
       }
-      var nextRoot = 'root/t:' + tree.type;
+      var nextRoot = occurrenceId('root/t:' + tree.type);
       if (rootId !== null && rootId !== nextRoot) removalRoots.add(rootId);
       visit(tree, nextRoot, null);
       // Only explicitly queued occurrences are visited beneath unchanged ancestors.

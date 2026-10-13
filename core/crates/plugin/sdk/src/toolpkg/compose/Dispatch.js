@@ -147,7 +147,11 @@ function dispatchComposeDslAction(actionRequest) {
     finalizeAction();
     throw actionError;
   }
-  if (isPromise(maybePromise) && !noRender) {
+  // Synchronous callbacks have already settled before queued state notifications.
+  // Their final response owns the only render; asynchronous work still streams.
+  if (!isPromise(maybePromise)) {
+    actionFinalizing = true;
+  } else if (!noRender) {
     scheduleIntermediateRender();
   }
   return Promise.resolve(maybePromise).then(buildFinalResponse).finally(finalizeAction);

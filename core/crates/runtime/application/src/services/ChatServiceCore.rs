@@ -1081,12 +1081,13 @@ impl ChatServiceCore {
             variantIndex,
         };
         let extension = self.chatHistoryDelegate.chatHistoryManager.readPluginExtension(api.extensionOwner(), &target).map_err(|error| error.to_string())?.ok_or_else(|| format!("Message revision has no configuration owner snapshot: {chatId}:{messageTimestamp}:{variantIndex}"))?;
-        let snapshot = extension
+        let reference = extension
             .as_object()
             .ok_or_else(|| {
                 "Persisted message configuration extension must be an object".to_string()
             })?
             .clone();
+        let snapshot = api.readSnapshot(reference).await?;
         let support = service.provider_runtime_context.support();
         api.resolve(ChatConfigurationRequest {
             purpose: ChatConfigurationPurpose::Execution,
@@ -1149,10 +1150,19 @@ impl ChatServiceCore {
             .map_err(|error| error.to_string())
     }
 
-    /// Deletes the real conversation and its row-owned namespaces without a plugin binding mirror.
+    /// Deletes the Core conversation and its configuration owner's plugin binding.
     pub async fn deleteChatHistory(&mut self, chatId: String) -> Result<bool, String> {
         self.chatHistoryDelegate.requireChatExists(&chatId)?;
-        let deleted = self.chatHistoryDelegate.deleteChatHistory(chatId);
+        let service = self
+            .enhancedAiService
+            .as_ref()
+            .ok_or("Chat deletion requires an initialized runtime")?;
+        let api = ChatConfigurationApi::ready(&service.tool_handler).await?;
+        let deleted = self.chatHistoryDelegate.deleteChatHistory(chatId.clone());
+        if !deleted {
+            return Err(format!("Core conversation deletion failed: {chatId}"));
+        }
+        api.deleteBinding(&chatId).await?;
         self.syncTokenStatisticsForCurrentChat();
         Ok(deleted)
     }
@@ -2455,7 +2465,7 @@ impl ChatServiceCore {
             ("width".into(), CoreValue::Unsigned(chunk.width as u64)),
             ("height".into(), CoreValue::Unsigned(chunk.height as u64)),
             ("offset".into(), CoreValue::Unsigned(chunk.offset as u64)),
-            ("bytes".into(), CoreValue::Bytes(chunk.bytes)),
+            ("bytes".into(), CoreValue::Bytes(chunk.bytes.into())),
         ])))
     }
 

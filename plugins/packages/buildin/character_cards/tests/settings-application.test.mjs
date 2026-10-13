@@ -14,9 +14,9 @@ const cardCalls = ["Theme.listConfigs", "Tts.listConfigs", "Theme.applyConfig", 
 
 /** Audits genuine host writes without supplying any role, selection or persistence implementation. */
 function writes(runtime) {
-  return runtime.calls.filter(
+  return runtime.disk.calls.filter(
     /** Counts only the actual generic native namespace write. */
-    call => call.method === "writeExtension",
+    call => call.method === "storage.transaction" && call.args[0].some(statement => /^(INSERT INTO|UPDATE) "chat_bindings" /.test(statement.sql)),
   );
 }
 
@@ -40,14 +40,14 @@ async function environment(t) {
 
 /** Asserts every directory validation observes the exact pre-selection file and namespace before any real mutation. */
 async function auditPrevalidation(runtime) {
-  const before = await stateBytes(runtime), extension = plain(runtime.records.get("selector-chat").extension);
+  const before = await stateBytes(runtime), extension = plain((await runtime.binding("selector-chat")));
   for (const method of ["Theme.listConfigs", "Tts.listConfigs"]) {
     const [namespace, name] = method.split(".");
     const original = runtime.tools[namespace][name];
     /** Inspects actual native and file state at the SDK read boundary, not a plugin-provided success flag. */
     runtime.tools[namespace][name] = async (...args) => {
       assert.equal(Buffer.compare(await stateBytes(runtime), before), 0, method + " must precede file publication");
-      assert.deepEqual(runtime.records.get("selector-chat").extension, extension, method + " must precede native selection writes");
+      assert.deepEqual((await runtime.binding("selector-chat")), extension, method + " must precede native selection writes");
       return original(...args);
     };
   }
@@ -92,7 +92,7 @@ test("registered card selection APIs share the main Settings adapter and await e
       const actual = JSON.parse((await stateBytes(runtime)).toString("utf8"));
       if (operation === "chat.configuration.binding.write") {
         assert.deepEqual(actual.active, { CharacterCard: { id: "default" } });
-        assert.deepEqual(runtime.records.get("selector-chat").extension, { version: 1, selection: "card:" + card.id });
+        assert.deepEqual((await runtime.binding("selector-chat")), { version: 1, selection: "card:" + card.id });
         assert.equal(writes(runtime).length, 1);
       } else {
         assert.deepEqual(actual.active, { CharacterCard: { id: card.id } }); assert.equal(writes(runtime).length, 0);
@@ -113,7 +113,7 @@ test("registered group selection aliases use only the group own Theme and never 
       assert.notEqual(group.themeConfigId, settings.themes.get(themeId).id);
       assert.deepEqual(settings.calls, [{ method: "Theme.listConfigs", args: [] }, { method: "Theme.applyConfig", args: [group.themeConfigId] }]);
       assert.deepEqual(settings.current, { theme: group.themeConfigId, tts: "tts-one" });
-      if (operation === "chat.configuration.binding.write") assert.equal(runtime.records.get("selector-chat").extension.selection, "group:" + group.id);
+      if (operation === "chat.configuration.binding.write") assert.equal((await runtime.binding("selector-chat")).selection, "group:" + group.id);
       else assert.deepEqual(JSON.parse((await stateBytes(runtime)).toString("utf8")).active, { CharacterGroup: { id: group.id } });
     });
   }
@@ -134,7 +134,7 @@ test("real Web activate and writeChatBinding IPC requests await the same central
       ), expected);
       assert.deepEqual(settings.current, { theme: themeId, tts: speechId });
       if (action === "activate") assert.deepEqual(JSON.parse((await stateBytes(runtime)).toString("utf8")).active, { CharacterCard: { id: card.id } });
-      else { assert.equal(writes(runtime).length, 1); assert.equal(runtime.records.get("selector-chat").extension.selection, "card:" + card.id); }
+      else { assert.equal(writes(runtime).length, 1); assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id); }
     });
   }
 });
@@ -146,7 +146,7 @@ test("registered null-reference selections do not read or mutate independent Set
   await runtime.api("activePrompt.setCard", { id: "default" });
   await runtime.api("chat.configuration.binding.write", { chatId: "selector-chat", selection: "group:" + group.id });
   assert.deepEqual(settings.calls, []); assert.deepEqual(settings.current, { theme: "independent-theme-one", tts: "tts-one" });
-  assert.equal(runtime.records.get("selector-chat").extension.selection, "group:" + group.id);
+  assert.equal((await runtime.binding("selector-chat")).selection, "group:" + group.id);
 });
 
 /** Deleted references reject before any published selection, native namespace write or preference application. */
@@ -164,7 +164,7 @@ test("deleted Theme or TTS IDs reject registered active, binding and native sele
           : ui.dispatch(keyedNode(ui.render().tree, "card:" + card.id).props.onClick);
         await assert.rejects(operation, missing === "theme" ? /主题配置不存在/ : /TTS 配置不存在/);
         assert.equal(Buffer.compare(await stateBytes(runtime), before), 0); assert.equal(writes(runtime).length, 0);
-        assert.equal(runtime.records.get("selector-chat").extension, null);
+        assert.equal((await runtime.binding("selector-chat")), null);
         assert.deepEqual(settings.calls.map(
           /** Requires only the actual preceding validation reads, never an apply or setter invocation. */
           call => call.method,
@@ -213,7 +213,7 @@ test("registered selector awaits Theme and TTS before V1 completion for both cha
       try {
         await gate.reached; assert.equal(resolved, false);
         if (chatId === null) assert.deepEqual(JSON.parse((await stateBytes(runtime)).toString("utf8")).active, { CharacterCard: { id: card.id } });
-        else assert.equal(runtime.records.get(chatId).extension.selection, "card:" + card.id);
+        else assert.equal((await runtime.binding(chatId)).selection, "card:" + card.id);
         const busy = ui.render().tree;
         assert.equal(keyedNode(busy, "selector-close").props.enabled, false); assert.equal(keyedNode(busy, "card:" + card.id).props.onClick, undefined);
         await assert.rejects(ui.dispatch(row.props.onClick), /already running/);
@@ -252,7 +252,7 @@ test("registered selector apply failures retain partial selection state and do n
           return true;
         },
       );
-      assert.equal(runtime.records.get("selector-chat").extension.selection, "card:" + card.id); assert.equal(writes(runtime).length, 1);
+      assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id); assert.equal(writes(runtime).length, 1);
       assert.equal(settings.current.theme, themeId); assert.equal(settings.current.tts, method === "Theme.applyConfig" ? "tts-one" : speechId);
       const tree = ui.render().tree; assert.equal(tree.type, "Dialog"); assert.equal(keyedNode(tree, "selector-close").props.enabled, true);
       assert.match(keyedNode(tree, "selector-commit-error").props.text, /选择已提交.*实际存储状态待核对.*未自动撤销或重试.*Controlled post-write rejection/);
@@ -277,7 +277,7 @@ test("registered binding application rejects contradictory Theme, TTS setter and
           assert.equal(failure.failedStep.type, method === "Theme.applyConfig" ? "theme" : "tts"); return true;
         },
       );
-      assert.equal(writes(runtime).length, 1); assert.equal(runtime.records.get("selector-chat").extension.selection, "card:" + card.id);
+      assert.equal(writes(runtime).length, 1); assert.equal((await runtime.binding("selector-chat")).selection, "card:" + card.id);
       assert.equal(settings.current.theme, themeId); assert.equal(settings.current.tts, method === "Theme.applyConfig" ? "tts-one" : speechId);
       assert.equal(settings.calls.length, method === "Theme.applyConfig" ? 3 : method === "Tts.setCurrentConfigId" ? 4 : 5);
     });
@@ -293,7 +293,7 @@ test("registered selector cancellation never writes selection or applies Theme a
       settings.clearCalls(); runtime.disk.clearCalls(); const response = await ui.dispatch(keyedNode(ui.render().tree, "selector-close").props.onClick);
       assert.deepEqual(plain(response.actionResult), { type: "toolpkg.presentation.cancel", requestId: "cancel-settings" });
       assert.equal(Buffer.compare(await stateBytes(runtime), before), 0); assert.equal(writes(runtime).length, 0); assert.deepEqual(settings.calls, []);
-      assert.equal(runtime.records.get("selector-chat").extension, null);
+      assert.equal((await runtime.binding("selector-chat")), null);
     });
   }
 });
@@ -301,7 +301,7 @@ test("registered selector cancellation never writes selection or applies Theme a
 /** A real file publication error cannot be reported as a successful selection or trigger independent preference mutations. */
 test("registered file selection commit failure preserves the original IO rejection and makes zero apply calls", async t => {
   const { runtime, settings, card } = await environment(t), original = new Error("Controlled selection file move failure"), before = await stateBytes(runtime);
-  runtime.disk.failNext("storage.commit", original);
+  runtime.disk.failNext("storage.transaction", original);
   await assert.rejects(runtime.api("activePrompt.setCard", { id: card.id }),
     /** Preserves the actual original IO error identity through the registered provider and central coordinator. */
     failure => failure === original,
@@ -315,6 +315,7 @@ test("registered file selection commit failure preserves the original IO rejecti
 test("actual registered before-create hook never applies configs for explicit, source-free or branch initialization", async t => {
   const { runtime, settings, card } = await environment(t); await runtime.api("activePrompt.setCard", { id: card.id });
   settings.clearCalls(); runtime.calls.length = 0;
+  await runtime.seedBinding("selector-chat", { version: 1, selection: "card:" + card.id });
   assert.equal(runtime.chatLifecycleHooks.length, 1); assert.equal(runtime.chatLifecycleHooks[0].function, runtime.main.beforeChatCreate);
   for (const creation of ["explicit", "source-free", "branch"]) {
     const branch = creation === "branch", payload = {
@@ -325,7 +326,7 @@ test("actual registered before-create hook never applies configs for explicit, s
       sourceExtension: branch ? { version: 1, selection: "card:" + card.id } : null,
     };
     const initialized = await runtime.chatLifecycleHooks[0].function({ eventName: "before_create", eventPayload: payload });
-    assert.deepEqual(plain(initialized), { extension: { version: 1, selection: "card:" + card.id } });
+    assert.deepEqual(plain(initialized), { extension: { recordId: payload.chat.id, schemaVersion: 1 } });
   }
   assert.deepEqual(settings.calls, []); assert.deepEqual(runtime.calls, []);
 });

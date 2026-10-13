@@ -23,6 +23,10 @@ export type StorageSqlValue = { kind: "null"; } | { kind: "integer"; value: stri
 export interface StorageStatement {
   sql: string;
   params: StorageSqlValue[];
+  /**
+   * Requires an exact write count inside the transaction for optimistic concurrency.
+   */
+  expectedAffectedRows: number | null;
 }
 
 /**

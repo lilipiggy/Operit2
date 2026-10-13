@@ -14,9 +14,74 @@ import 'package:operit2/ui/features/packages/screens/PackageManagerScreen.dart';
 import 'package:operit2/ui/features/packages/dialogs/PackageEnvironmentVariablesDialog.dart';
 import 'package:operit2/ui/main/navigation/ToolPkgCatalogChangeBus.dart';
 import 'package:operit2/ui/common/components/RetainedPage.dart';
+import 'package:operit2/ui/common/contributions/ChatSidebarTabHost.dart';
 
 /// Verifies installation notifications update an already mounted package list.
 void main() {
+  for (final selection in <String>[
+    chatSidebarTabIdentity('demo_toolpkg', 'sidebar-demo'),
+    chatSidebarTabIdentity('another_toolpkg', 'sidebar-demo'),
+    UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB,
+  ]) {
+    testWidgets(
+      'disabling a plugin updates only its selected tab: $selection',
+      (tester) async {
+        final bridge = _CatalogBridge()
+          ..installed = true
+          ..enabled = true;
+        bridge.preferences['chat_sidebar_tab_v1'] = selection;
+        final selectionsAtNotification = <String?>[];
+        final subscription = ToolPkgCatalogChangeBus.listen(() {
+          selectionsAtNotification.add(
+            bridge.preferences['chat_sidebar_tab_v1'],
+          );
+        });
+        addTearDown(subscription.cancel);
+        await tester.pumpWidget(_manager(bridge));
+        await tester.pumpAndSettle();
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        await tester.tap(find.byType(Switch));
+        await tester.pumpAndSettle();
+        final expected =
+            selection == chatSidebarTabIdentity('demo_toolpkg', 'sidebar-demo')
+            ? UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB
+            : selection;
+        expect(bridge.enabled, isFalse);
+        expect(bridge.preferences['chat_sidebar_tab_v1'], expected);
+        expect(selectionsAtNotification, [expected]);
+        expect(
+          bridge.mutations,
+          expected != selection ? ['disable', 'selection'] : ['disable'],
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('failed plugin disable keeps the current sidebar selection', (
+    tester,
+  ) async {
+    final bridge = _CatalogBridge()
+      ..installed = true
+      ..enabled = true
+      ..disableError = StateError('Disable rejected');
+    final selection = chatSidebarTabIdentity('demo_toolpkg', 'sidebar-demo');
+    bridge.preferences['chat_sidebar_tab_v1'] = selection;
+    var notifications = 0;
+    final subscription = ToolPkgCatalogChangeBus.listen(() => notifications++);
+    addTearDown(subscription.cancel);
+    await tester.pumpWidget(_manager(bridge));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(bridge.enabled, isTrue);
+    expect(bridge.preferences['chat_sidebar_tab_v1'], selection);
+    expect(bridge.mutations, isEmpty);
+    expect(notifications, 0);
+    expect(find.textContaining('Disable rejected'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('catalog change refreshes list without reopening or rescanning', (
     tester,
   ) async {
@@ -138,6 +203,16 @@ void main() {
   });
 }
 
+/// Mounts the production package controls with the supplied runtime bridge.
+Widget _manager(_CatalogBridge bridge) => OperitTheme(
+  initialThemePreferenceSnapshot:
+      UserPreferencesManager.defaultThemePreferenceSnapshot,
+  initialThemeIsReady: false,
+  unconfiguredChildEnabled: true,
+  hostInteractionHostsEnabled: false,
+  child: PackageManagerScreen(clients: GeneratedCoreProxyClients(bridge)),
+);
+
 class _CatalogBridge extends OperitRuntimeBridge {
   /// Rejects push operations outside this catalog fixture.
   @override
@@ -162,6 +237,10 @@ class _CatalogBridge extends OperitRuntimeBridge {
   }
 
   bool installed = false;
+  bool enabled = false;
+  Object? disableError;
+  final preferences = <String, String>{};
+  final mutations = <String>[];
   int scans = 0;
   int watchers = 0;
   int catalogReads = 0;
@@ -192,6 +271,29 @@ class _CatalogBridge extends OperitRuntimeBridge {
         catalogReads += 1;
         return installed ? [_pluginRuntime().toJson()] : [];
       case 'getEnabledPackageNames':
+        return installed && enabled ? ['demo_toolpkg'] : [];
+      case 'disableToolPkgContainer':
+        expect((request.args as Map)['containerPackageName'], 'demo_toolpkg');
+        if (disableError case final Object error) throw error;
+        enabled = false;
+        mutations.add('disable');
+        return 'Disabled';
+      case 'getPreferences':
+        expect(
+          (request.args as Map)['fileName'],
+          'user_preferences.preferences.json',
+        );
+        return Map<String, String>.of(preferences);
+      case 'setPreferences':
+        expect(
+          (request.args as Map)['fileName'],
+          'user_preferences.preferences.json',
+        );
+        preferences.addAll(
+          ((request.args as Map)['values'] as Map).cast<String, String>(),
+        );
+        mutations.add('selection');
+        return null;
       case 'getToolPkgContainerOrder':
       case 'getBundledExternalPackageCandidates':
       case 'getBundledExternalToolPkgContainerRuntimes':
@@ -255,7 +357,20 @@ core_proxy.ToolPkgContainerRuntime _pluginRuntime() {
       ),
     ],
     chatComposerSlots: <core_proxy.ToolPkgChatComposerSlotRuntime>[],
-    navigationEntries: <core_proxy.ToolPkgNavigationEntryRuntime>[],
+    navigationEntries: <core_proxy.ToolPkgNavigationEntryRuntime>[
+      core_proxy.ToolPkgNavigationEntryRuntime(
+        id: 'sidebar-demo',
+        routeId: 'main',
+        params: null,
+        surface: 'chat_sidebar_tabs',
+        title: core_proxy.LocalizedText(
+          values: <String, String>{'default': 'Demo sidebar'},
+        ),
+        action: null,
+        icon: null,
+        order: 0,
+      ),
+    ],
     desktopWidgets: <core_proxy.ToolPkgDesktopWidgetRuntime>[],
     appLifecycleHooks: <core_proxy.ToolPkgAppLifecycleHookRuntime>[],
     messageProcessingPlugins: <core_proxy.ToolPkgFunctionHookRuntime>[],

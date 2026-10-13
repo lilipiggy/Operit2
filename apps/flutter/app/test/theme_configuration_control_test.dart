@@ -94,7 +94,7 @@ void main() {
       final previous = bridge.configs.first;
       final edited = Map<String, Object?>.from(previous.snapshot)
         ..['themeMode'] = 'dark';
-      bridge.configs[0] = core.ThemeConfig(
+      bridge.configs[0] = core.CoreDataPreferencesThemeConfigManagerThemeConfig(
         id: previous.id,
         name: previous.name,
         snapshot: edited,
@@ -197,7 +197,7 @@ class _ThemeBridge extends OperitRuntimeBridge {
   /// Declares the two genuine configuration records supplied to the selector test.
   _ThemeBridge() : configs = [_config('day', 'Day'), _config('night', 'Night')];
 
-  final List<core.ThemeConfig> configs;
+  final List<core.CoreDataPreferencesThemeConfigManagerThemeConfig> configs;
   final List<CoreCallRequest> calls = [];
   final Map<CoreWatchRequest, StreamController<CoreEvent>> watches = {};
   String? active = 'day';
@@ -218,7 +218,7 @@ class _ThemeBridge extends OperitRuntimeBridge {
         result = configs.singleWhere((config) => config.id == active).toJson();
         _publish();
       case 'create':
-        final config = core.ThemeConfig(
+        final config = core.CoreDataPreferencesThemeConfigManagerThemeConfig(
           id: 'created',
           name: args['name'] as String,
           snapshot: Map<String, Object?>.from(args['snapshot'] as Map),
@@ -235,7 +235,7 @@ class _ThemeBridge extends OperitRuntimeBridge {
       case 'rename':
         final index = configs.indexWhere((config) => config.id == args['id']);
         final old = configs[index];
-        configs[index] = core.ThemeConfig(
+        configs[index] = core.CoreDataPreferencesThemeConfigManagerThemeConfig(
           id: old.id,
           name: args['name'] as String,
           snapshot: old.snapshot,
@@ -312,7 +312,10 @@ class _ThemeBridge extends OperitRuntimeBridge {
 }
 
 /// Builds one complete explicit named-theme record for the external catalog fixture.
-core.ThemeConfig _config(String id, String name) => core.ThemeConfig(
+core.CoreDataPreferencesThemeConfigManagerThemeConfig _config(
+  String id,
+  String name,
+) => core.CoreDataPreferencesThemeConfigManagerThemeConfig(
   id: id,
   name: name,
   snapshot: UserPreferencesManager.defaultThemePreferenceSnapshot.toJson(),

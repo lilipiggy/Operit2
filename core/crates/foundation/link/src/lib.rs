@@ -2,6 +2,7 @@ pub mod client;
 pub mod session;
 pub use session::CoreLinkSession;
 pub mod codec;
+pub use bytes::Bytes as CoreBytes;
 #[path = "CoreStream.rs"]
 mod core_stream;
 pub mod protocol;

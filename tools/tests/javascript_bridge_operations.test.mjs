@@ -234,6 +234,13 @@ test('Compose WebView and file picker have no callback-ID or JSON-text bridge', 
       assert.deepEqual(JSON.parse(JSON.stringify(payload.options)), {picker: 'document', allowedMimeTypes: ['image/png']});
       return {cancelled: false, files: [{path:'/picked/value'}]};
     },
+    /** Receives UTF-8 exports as structured data through the same scoped host Promise ABI. */
+    __operitNativeComposeFileSaveCommand(payload) {
+      assert.equal(payload.executionContextKey, 'ui-owner');
+      assert.equal(payload.routeInstanceId, 'route');
+      assert.deepEqual(JSON.parse(JSON.stringify(payload.options)), { suggestedName: '角色.json', content: '{"name":"角色"}', mimeType: 'application/json', extensions: ['json'] });
+      return { cancelled: false, path: '/selected/角色.json' };
+    },
   });
   openCall();
   const compose = context.OperitComposeDslRuntime.createContext({routeInstanceId:'route', executionContextKey:'ui-owner'}).ctx;
@@ -242,6 +249,7 @@ test('Compose WebView and file picker have no callback-ID or JSON-text bridge', 
   assert.equal(web.getState(), '{"literal":true}');
   assert.equal(await web.evaluateJavascript('1'), '{"literal":true}');
   assert.equal((await compose.openFilePicker({picker: 'document', allowedMimeTypes: ['image/png']})).files[0].path, '/picked/value');
+  assert.equal((await compose.saveFile({ suggestedName: '角色.json', content: '{"name":"角色"}', mimeType: 'application/json', extensions: ['json'] })).path, '/selected/角色.json');
   await flush();
   assert.equal(context.__operitGetCallState('owner').pendingReferences, 0);
   assert.equal(Object.keys(context).some(key => /^__operit_compose_webview_/.test(key)), false);

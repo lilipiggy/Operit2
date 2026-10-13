@@ -590,6 +590,24 @@ impl MessageDao {
             .collect()
     }
 
+    /// Counts messages only for an explicitly bounded set of chat identities.
+    pub fn getMessageCountsForChats(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<Vec<ChatMessageCount>, SqliteStoreError> {
+        if chat_ids.is_empty() || chat_ids.len() > 200 {
+            return Err(SqliteStoreError::Message(
+                "Message counts require 1..200 chat identities".into(),
+            ));
+        }
+        let placeholders = vec!["?"; chat_ids.len()].join(",");
+        let params = chat_ids.iter().cloned().map(SqliteValue::Text).collect();
+        self.store.queryRows(
+            &format!("SELECT chatId, COUNT(*) FROM messages WHERE chatId IN ({placeholders}) GROUP BY chatId"),
+            params,
+        )?.into_iter().map(|row| Ok(ChatMessageCount { chatId: row.get(0)?, count: row.get(1)? })).collect()
+    }
+
     /// Processes the exact persisted message record with explicit storage errors.
     pub fn updateSelectedVariantIndex(
         &self,

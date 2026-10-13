@@ -114,7 +114,14 @@ async function __operitStorageOpen(kind, options) {
             /** Commits a complete statement batch without holding a transaction across JS awaits. */
             transaction(statements) {
                 if (!Array.isArray(statements)) throw new Error("SQL transaction requires statements");
-                return request("transaction",{statements:statements.map(/** Encodes one member of an atomic statement batch. */ function(statement) {return __operitStorageStatement(statement.sql,statement.params === undefined ? [] : statement.params);})});
+                return request("transaction",{statements:statements.map(/** Encodes one member of an atomic statement batch with its write-count precondition. */ function(statement) {
+                    var encoded = __operitStorageStatement(statement.sql,statement.params === undefined ? [] : statement.params);
+                    if (statement.expectedAffectedRows !== undefined) {
+                        if (!Number.isSafeInteger(statement.expectedAffectedRows) || statement.expectedAffectedRows < 0) throw new Error("expectedAffectedRows must be a nonnegative safe integer");
+                        encoded.expectedAffectedRows = statement.expectedAffectedRows;
+                    }
+                    return encoded;
+                })});
             },
             /** Declares a typed synchronized table and installs primary-key dirty tracking. */
             defineTable(table) { return request("define_table",{table:table}); },

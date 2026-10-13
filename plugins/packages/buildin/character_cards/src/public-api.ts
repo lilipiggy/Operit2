@@ -2,6 +2,9 @@ import type { MemoryQueryRequest, MemoryQueryResult, ChatConfigurationRequest, C
 import { parseDomainPayload, parseMemoryQueryRequest } from "./domain";
 import { MemoryTools } from "./runtime-tools/memory";
 import { dispatchDomain } from "./service-runtime";
+import { readStoredSnapshot, storeSnapshot, readDraftBinding, commitDraftBinding, abortDraftBinding } from "./chat-storage";
+import type { SnapshotReference } from "./chat-storage";
+import type { MessageMarker } from "./chat-markers";
 export { onMemoryMessagePersisted, onMemoryInterval, registerMemoryJobHooks } from "./memory-jobs/hooks";
 
 const memoryQueries = new MemoryTools(dispatchDomain);
@@ -9,7 +12,42 @@ const memoryQueries = new MemoryTools(dispatchDomain);
 /** Resolves this chat's persisted configuration through the sole initialized service. */
 export async function chatConfigurationResolveApi(event: ToolPkg.PublicApiEvent<ChatConfigurationRequest>): Promise<ChatConfigurationResult> {
   if (event.callerPackage !== "host") throw new Error("chat.configuration.resolve requires an authenticated host caller");
-  return dispatchDomain("chat.configuration.resolve", parseDomainPayload("chat.configuration.resolve", event.payload));
+  const request = parseDomainPayload("chat.configuration.resolve", event.payload);
+  if (request.chatId !== null && request.messageExtension === null) {
+    const binding = await dispatchDomain("chat.configuration.binding.read", { chatId: request.chatId });
+    request.chatExtension = { version: 1, selection: binding.selection };
+  }
+  return dispatchDomain("chat.configuration.resolve", request);
+}
+
+/** Resolves an explicitly prepared creation draft without exposing it in committed chat queries. */
+export async function chatConfigurationDraftResolveApi(event: ToolPkg.PublicApiEvent<ChatConfigurationRequest>): Promise<ChatConfigurationResult> {
+  if (event.callerPackage !== "host") throw new Error("Draft configuration requires the host caller");
+  const request = parseDomainPayload("chat.configuration.resolve", event.payload);
+  if (request.chatId === null || request.purpose !== "display") throw new Error("Draft configuration requires a display identity");
+  const binding = await readDraftBinding(request.chatId); request.chatExtension = { version: 1, selection: binding.selection };
+  return dispatchDomain("chat.configuration.resolve", request);
+}
+/** Publishes only the prepared binding selected by the authenticated Core commit. */
+export async function chatConfigurationDraftCommitApi(event: ToolPkg.PublicApiEvent<{ chatId: string }>): Promise<{ committed: true }> {
+  if (event.callerPackage !== "host") throw new Error("Draft commit requires the host caller");
+  await commitDraftBinding(event.payload.chatId); return { committed: true };
+}
+/** Removes an aborted draft after Core chooses to reuse an existing conversation. */
+export async function chatConfigurationDraftAbortApi(event: ToolPkg.PublicApiEvent<{ chatId: string }>): Promise<{ aborted: true }> {
+  if (event.callerPackage !== "host") throw new Error("Draft abort requires the host caller");
+  await abortDraftBinding(event.payload.chatId); return { aborted: true };
+}
+
+/** Persists a frozen snapshot under the authenticated owner's SQL tables. */
+export async function chatConfigurationSnapshotStoreApi(event: ToolPkg.PublicApiEvent<MessageMarker>): Promise<SnapshotReference> {
+  if (event.callerPackage !== "host") throw new Error("Snapshot storage requires the host caller");
+  return storeSnapshot(event.payload);
+}
+/** Resolves an immutable reference without reading current role settings. */
+export async function chatConfigurationSnapshotReadApi(event: ToolPkg.PublicApiEvent<SnapshotReference>): Promise<MessageMarker> {
+  if (event.callerPackage !== "host") throw new Error("Snapshot reads require the host caller");
+  return readStoredSnapshot(event.payload);
 }
 
 /** Reads the actual binding without changing the current global selection. */
@@ -397,6 +435,11 @@ export async function memoryImportApi(event: ToolPkg.PublicApiEvent<DomainInput<
 
 /** Publishes independent typed methods backed by the same service as commands and UI. */
 export function registerDomainApis(): void {
+  ToolPkg.registerApi({ name: "chat.configuration.draft.resolve", function: chatConfigurationDraftResolveApi });
+  ToolPkg.registerApi({ name: "chat.configuration.draft.commit", function: chatConfigurationDraftCommitApi });
+  ToolPkg.registerApi({ name: "chat.configuration.draft.abort", function: chatConfigurationDraftAbortApi });
+  ToolPkg.registerApi({ name: "chat.configuration.snapshot.store", function: chatConfigurationSnapshotStoreApi });
+  ToolPkg.registerApi({ name: "chat.configuration.snapshot.read", function: chatConfigurationSnapshotReadApi });
   ToolPkg.registerApi<MemoryQueryRequest, MemoryQueryResult>({ name: "memory.query", function: memoryQueryApi });
   ToolPkg.registerApi<DomainInput<"memory.searchWithOptions">, DomainOutput<"memory.searchWithOptions">>({ name: "memory.searchWithOptions", function: memorySearchWithOptionsApi });
   ToolPkg.registerApi<DomainInput<"memory.candidate.enqueue">, DomainOutput<"memory.candidate.enqueue">>({ name: "memory.candidate.enqueue", function: memoryCandidateEnqueueApi });

@@ -38,7 +38,6 @@ export function setEditableValue(dialog: EditableDialog, key: string, value: str
       if (key === "content") { dialog.content = value; return; }
       break;
     case "user": if (key === "content") { dialog.content = value; return; } break;
-    case "export": if (key === "path") { dialog.path = value; return; } break;
   }
   throw new Error(`此页面不能编辑字段：${key}`);
 }

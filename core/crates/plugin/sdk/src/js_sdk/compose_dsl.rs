@@ -2499,6 +2499,8 @@ pub struct DragTargetProps {
     pub enabled: Option<bool>,
     pub acceptedTypes: Option<Vec<String>>,
     pub acceptedData: Option<Vec<ToolPkgJsonValue>>,
+    /// Rejects matching payloads independently of the accepted type and data filters.
+    pub excludedData: Option<Vec<ToolPkgJsonValue>>,
     pub hoverBackground: Option<ComposeColor>,
     pub hoverBorderColor: Option<ComposeColor>,
     pub shape: Option<ComposeShape>,
@@ -3196,6 +3198,24 @@ pub struct ComposeFilePickerResult {
     /// Files selected by the user; empty when the request was cancelled.
     pub files: Vec<ComposePickedFile>,
 }
+/// UTF-8 content and metadata passed to the host file-save selector.
+pub struct ComposeFileSaveOptions {
+    /// File name suggested in the save dialog, without directory components.
+    pub suggestedName: String,
+    /// Exact UTF-8 text to save after the user accepts the destination.
+    pub content: String,
+    /// Media type of the exported file.
+    pub mimeType: String,
+    /// File extensions accepted by the save dialog, without leading dots.
+    pub extensions: Vec<String>,
+}
+/// Outcome returned after the file is saved or the user cancels.
+pub struct ComposeFileSaveResult {
+    /// Whether the user dismissed the selector without saving.
+    pub cancelled: bool,
+    /// Destination reported by the host; null on cancellation.
+    pub path: JsOptional<String>,
+}
 /// Discoverable navigation target exposed to a Compose DSL screen.
 pub struct ComposeRouteInfo {
     /// Stable route identifier accepted by `navigate`.
@@ -3300,6 +3320,8 @@ pub trait ComposeDslContextMethods: Send + Sync {
         &self,
         options: Option<ComposeFilePickerOptions>,
     ) -> JsFuture<ComposeFilePickerResult>;
+    /// Saves UTF-8 content to a user-selected destination through the host file selector.
+    fn saveFile(&self, options: ComposeFileSaveOptions) -> JsFuture<ComposeFileSaveResult>;
     /// Returns the registered runtime-module specification decoded as the requested type.
     fn getModuleSpec<TSpec>(&self) -> TSpec;
     /// Returns the package name that owns the current Compose DSL module.

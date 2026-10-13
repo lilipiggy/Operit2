@@ -36,8 +36,8 @@ test("controlled Chat/AI: registered main lifecycle and message hooks persist ca
   );
   assert.throws(
     /** Probes a capped directory API not supplied by this controlled fixture. */
-    () => harness.tools.Chat.listChats,
-    /does not provide Tools\.Chat\.listChats/u,
+    () => harness.tools.Chat.listAll,
+    /does not provide Tools\.Chat\.listAll/u,
   );
   await first.initialize(); await first.bind(); const sources = await first.enqueueReplies();
   await first.persistMessage(sources[0]);
@@ -146,16 +146,16 @@ test("controlled Chat/AI: rebuild and candidate execution plus state-publication
       error => error === statusFailure,
     );
     assert.equal(harness.modelCalls.length, calls);
-    const writes = harness.disk.calls.filter(call => call.method === "storage.commit");
+    const writes = harness.disk.calls.filter(call => call.method === "storage.transaction");
     assert.ok(writes.length > 0, "The failure must occur during an actual storage transaction");
     const unpublished = writes[writes.length - 1].args[0];
     if (kind === "rebuild") {
-      const owner = unpublished.find(row => row.collection === "owners" && row.key === CONTROLLED_OWNER);
-      assert.equal(owner.value.rebuildProgress.status, "failed");
-      assert.equal(owner.value.rebuildProgress.lastError, failure.message);
+      const owner = unpublished.find(statement => /^UPDATE "owners" /.test(statement.sql));
+      assert.ok(owner.params.includes("failed"));
+      assert.ok(owner.params.includes(failure.message));
     } else {
-      for (const row of unpublished.filter(row => row.collection === "candidates")) {
-        assert.equal(row.value.record.status, "failed"); assert.equal(row.value.record.lastError, failure.message);
+      for (const row of unpublished.filter(statement => /^UPDATE "candidates" /.test(statement.sql))) {
+        assert.ok(row.params.includes("failed")); assert.ok(row.params.includes(failure.message));
       }
     }
   }
@@ -163,9 +163,9 @@ test("controlled Chat/AI: rebuild and candidate execution plus state-publication
 /** Verifies a genuine nonzero selected fixture revision through main's registered persistence hook and interval. */
 test("controlled Chat/AI: persistence hook maps Core selectedVariantIndex to the saved nonzero candidate revision", async t => {
   const harness = await createMemoryJobsHarness(t), runtime = harness.openRuntime(); await runtime.initialize(); await runtime.bind();
-  const timestamp = harness.message(31).timestamp; harness.selectNewVariant(timestamp); harness.selectNewVariant(timestamp);
+  const timestamp = harness.message(31).timestamp; await harness.selectNewVariant(timestamp); await harness.selectNewVariant(timestamp);
   const selected = harness.message(31); assert.equal(selected.variantIndex, 2);
-  harness.removeChatMarker(); const sources = await runtime.enqueueReplies();
+  await harness.removeChatMarker(); const sources = await runtime.enqueueReplies();
   const saved = await readOwner(harness), matches = saved.candidates.filter(
     /** Selects the exact persisted timestamp without conflating other queued replies. */
     candidate => candidate.triggerMessageTimestamp === timestamp,
@@ -216,7 +216,7 @@ test("controlled Chat/AI: registered candidate provider and interval use exact s
   assert.equal(before.candidates.length, 5);
   for (const candidate of before.candidates) assert.equal(candidate.triggerVariantIndex, 0);
   assert.equal(Object.hasOwn(await harness.readState(), "chatBindings"), false);
-  harness.removeChatMarker(); const readCount = harness.extensionCalls.length; await runtime.makeDue();
+  await harness.removeChatMarker(); const readCount = harness.extensionCalls.length; await runtime.makeDue();
   harness.queueAnalysis({ main: { title: "Snapshot ownership", content: "Original owner remains the only destination", tags: ["Snapshot"], folder_path: "Projects" }, new: [], update: [], merge: [], links: [] });
   await runtime.interval(); harness.assertOutputsConsumed();
   const saved = await readOwner(harness); assert.equal(saved.candidates.length, 0); assert.equal(saved.memories.length, 1);
@@ -230,14 +230,14 @@ test("controlled Chat/AI: candidate provider rejects missing snapshots or absent
   const source = harness.message(31), before = await harness.readStateText(); harness.disk.clearCalls();
   await assert.rejects(() => runtime.api("memory.candidate.enqueue", { chatId: CONTROLLED_CHAT_ID, timestamp: source.timestamp, sourceType: "reply_finalized_auto", ownerKey: null }), /variantIndex is required/);
   harness.removeMessageMarker(source.timestamp, source.variantIndex);
-  await assert.rejects(() => runtime.api("memory.candidate.enqueue", { chatId: CONTROLLED_CHAT_ID, timestamp: source.timestamp, variantIndex: source.variantIndex, sourceType: "reply_finalized_auto", ownerKey: null }), /no saved character identity/);
+  await assert.rejects(() => runtime.api("memory.candidate.enqueue", { chatId: CONTROLLED_CHAT_ID, timestamp: source.timestamp, variantIndex: source.variantIndex, sourceType: "reply_finalized_auto", ownerKey: null }), /no saved configuration reference/);
   assert.equal(await harness.readStateText(), before); assert.equal(mutations(harness.disk).length, 0); assert.equal(harness.modelCalls.length, 0);
 });
 
 /** Revalidates the exact persisted candidate revision after a real selected-variant change and never retries the failed batch. */
 test("controlled Chat/AI: changing a candidate's selected revision records terminal failure before AI and survives restart without retry", async t => {
   const harness = await createMemoryJobsHarness(t), runtime = harness.openRuntime(); await runtime.initialize(); await runtime.bind();
-  const sources = await enqueueProviderReplies(runtime, harness); harness.selectNewVariant(sources[0].timestamp); await runtime.makeDue();
+  const sources = await enqueueProviderReplies(runtime, harness); await harness.selectNewVariant(sources[0].timestamp); await runtime.makeDue();
   await assert.rejects(runtime.interval(), /claimed candidate source no longer identifies exactly one message/);
   const failed = await readOwner(harness); assert.equal(failed.candidates.length, 5); assert.equal(harness.modelCalls.length, 0);
   for (const candidate of failed.candidates) { assert.equal(candidate.triggerVariantIndex, 0); assert.equal(candidate.status, "failed"); assert.equal(candidate.attemptCount, 1); }

@@ -41,7 +41,7 @@ test("executor: one full submit, ordered opaque participants/receipts and local 
     assert.equal(Object.hasOwn(call.input, "attachments"), false); assert.equal(Object.hasOwn(call.input, "replyTo"), false);
   }
   assert.deepEqual(result.receipts[0].assistant, { messageTimestamp: 1700000000300, variantIndex: 7 });
-  assert.equal(env.modelCalls.length, 1); assert.ok(env.extensionCalls.length > 0);
+  assert.equal(env.modelCalls.length, 1); assert.equal(env.extensionCalls.length, 0);
 });
 
 /** The submission token retains one execution Promise and rejects a changed payload or competing live sequence. */

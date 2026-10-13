@@ -10,9 +10,11 @@ import '../../../common/components/PageActivityMixin.dart';
 import '../../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
+import '../../../../data/preferences/UserPreferencesManager.dart';
 import '../../../../l10n/generated/app_localizations.dart';
 import '../../../common/components/AnimatedLazyIndexedStack.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
+import '../../../common/contributions/ChatSidebarTabHost.dart';
 import '../../../main/navigation/AppNavigationModels.dart';
 import '../../../main/navigation/ToolPkgCatalogChangeBus.dart';
 import '../../../main/screens/OperitScreens.dart';
@@ -237,6 +239,19 @@ class _PackageManagerScreenState extends State<PackageManagerScreen>
         await _packageManager.disableToolPkgContainer(
           containerPackageName: plugin.packageName,
         );
+        final preferences = UserPreferencesManager(clients: widget.clients);
+        final selectedTab = await preferences.loadChatSidebarTab();
+        final ownsSelectedTab = plugin.navigationEntries.any(
+          (entry) =>
+              entry.surface == 'chat_sidebar_tabs' &&
+              chatSidebarTabIdentity(plugin.packageName, entry.id) ==
+                  selectedTab,
+        );
+        if (ownsSelectedTab) {
+          await preferences.saveChatSidebarTab(
+            UserPreferencesManager.CHAT_SIDEBAR_WORKSPACE_TAB,
+          );
+        }
       }
       ToolPkgCatalogChangeBus.notifyCatalogChanged();
       await _loadSnapshot();

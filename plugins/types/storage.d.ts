@@ -27,7 +27,7 @@ export namespace Storage {
     /** Pages through atomic changes after an opaque decimal cursor; limit is 1..1000. */
     changes(after?: string, limit?: number): Promise<ChangePageEntry[]>;
   }
-  export interface Statement { sql: string; params?: SqlValue[]; }
+  export interface Statement { sql: string; params?: SqlValue[]; expectedAffectedRows?: number; }
   export interface SqlReceipt { affectedRows: number; lastInsertId: string; }
   export interface SqliteDatabase extends Handle {
     /** Queries caller-selected columns; all SQLite integers are returned as bigint. */

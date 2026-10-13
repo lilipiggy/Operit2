@@ -45,7 +45,8 @@ export function mountRegisteredComposeRoute(plugin, presentation, routeId, hostS
   if (webViewCommands !== null) {
     context.__operitNativeComposeWebViewControllerCommand = request => ({ success: true, data: webViewCommands(request) ?? null });
     context.__operitNativeComposeWebViewControllerCommandSuspend = async request => ({ success: true, data: await webViewCommands(request) ?? null });
-    context.__operitInvokeHostAsync = async (command, args, decode) => decode(await command(...args));
+    /** Uses the documented optional decoder in the host Promise ABI. */
+    context.__operitInvokeHostAsync = async (command, args, decode = value => value) => decode(await command(...args));
   }
   if (!context.OperitComposeDslRuntime) {
     vm.runInContext(sdkScript("ToolPkgComposeDslBridge.rs", "buildComposeDslContextBridgeDefinition"), context);

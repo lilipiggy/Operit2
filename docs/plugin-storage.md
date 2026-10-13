@@ -139,24 +139,44 @@ behavior. Persistent data has a separate lifetime and is retained on uninstall.
 
 ## Adoption And Verification
 
-The character/memory plugin uses `Tools.Storage.objects` at
-`ToolPkg.getSpaceDataDir() + "/characters.sqlite"`. Cards, groups, tags, shared
-stores, owners, memories, links, chunks, extraction candidates and embedding-cache
-entries are separate records. Normal domain mutations commit only changed records
-and an exact-version metadata guard. Collection reads use bounded pages; the
-current domain session still assembles an operation snapshot in memory.
+The character/memory plugin owns `Tools.Storage.sqlite` at
+`ToolPkg.getSpaceDataDir() + "/characters-relational.sqlite"`. Cards, groups, tags,
+shared stores, owners, memories, links, chunks, candidates, embeddings, chat
+bindings, creation drafts and immutable message snapshots use declared tables.
+Scalar fields have typed columns; arrays and maps use ordered child tables;
+embedding vectors use little-endian float64 BLOBs. The TypeScript repository and
+Rust migration writer share `src/storage/schema.json`.
+
+Mutations update only changed records and an exact-version metadata guard.
+SQL transaction statements can specify `expectedAffectedRows`; a mismatch aborts
+the complete transaction and its journal. Queries reject that mutation precondition.
+Settings and USER document lookups select one owner's metadata. Sidebar reads load
+role records and batch bindings. Memory chat directories filter bindings in SQL,
+then request Core metadata in batches of at most 200 chat IDs. General domain edit
+sessions still assemble an operation snapshot in memory.
+
+Core conversations contain generic chat/message data. Current character bindings
+reside in the plugin. Core message revisions store only the plugin namespace and
+`{recordId, schemaVersion}` reference to an immutable plugin snapshot.
 
 `USER.md` remains a real file for editing and attachment through `Tools.Files`.
 Writes stage a sibling file before the record commit and publish it afterwards.
 SQLite records commit atomically; SQLite and external files do not share a
 transaction. A publication error remains visible and stops that repository instance.
 
-Released Core v27 data is adopted by `CharacterPluginMigration` before plugin
-startup. The same writer handles Operit1 imports. Migration writes an in-progress
-marker, bounded transactions, verified documents/resources and a completion marker.
-The plugin refuses to open an incomplete migration. Old owners and the four dedicated
-preference files are deleted only after Core chat and historical sync bindings are
-resolved. Cleanup validates every target before deleting and resumes after interruption.
+Core's physical database version remains 28. `CharacterPluginMigration` adopts
+v27 sources and the bindings staged by 27→28 before plugin startup. Already-upgraded
+v28 Objects records are copied to the typed tables, verified and removed once;
+`characters.sqlite` retains migration provenance. Old Core chat markers become
+plugin bindings, and frozen message/variant markers become plugin snapshots and
+Core references. Migrated chat synchronization operations use schema version 8.
+
+Operit1 imports use the same writer and create plugin binding drafts. Reconciliation
+publishes a draft only when the imported Core chat carries its matching reference;
+an existing chat with the same ID is insufficient. Source import writes an
+in-progress marker and completion marker. The plugin rejects incomplete imports.
+Old owners and dedicated preferences are removed after verification; cleanup checks
+every target and compares the obsolete memory policy with its migrated value.
 The removed unreleased plugin `state.json` format has no compatibility reader.
 
 Coverage includes real SQLite rollback/CAS, null-versus-delete, int64/blob fidelity,

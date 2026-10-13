@@ -6,6 +6,23 @@ import { installScopedHostRuntime, installGeneratedToolsRuntime, domainToolResul
 
 const source=readFileSync(new URL("../../core/crates/plugin/sdk/src/js_sdk/storage_runtime.js",import.meta.url),"utf8");
 
+/** Preserves exact mutation-count conditions across the real SDK and structured Host boundary. */
+test("SQLite transaction forwards affected-row preconditions and rejects invalid counts", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.sqlite.open({path:'runtime/owned/sqlite.db'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"sql",path:"runtime/owned/sqlite.db"});
+  await opening;
+  const transaction = f.run("db.transaction([{sql:'UPDATE cards SET name=? WHERE id=?',params:['new','one'],expectedAffectedRows:1},{sql:'DELETE FROM children WHERE parent=?',params:['one'],expectedAffectedRows:0}])");
+  assert.deepEqual(f.request().statements.map(statement => statement.expectedAffectedRows), [1, 0]);
+  f.reply([{affectedRows:1,lastInsertId:null},{affectedRows:0,lastInsertId:null}]);
+  await transaction;
+  for (const count of [-1, 0.5, NaN, 9007199254740992, "1"]) {
+    f.sandbox.invalidCount = count;
+    assert.throws(() => f.run("db.transaction([{sql:'DELETE FROM cards',expectedAffectedRows:invalidCount}])"), /nonnegative safe integer/);
+    assert.equal(f.pending.length, 0);
+  }
+});
+
 /** Runs production SDK and host Promise registry, with only storage operations supplied by the test. */
 function fixture() {
   const pending=[];

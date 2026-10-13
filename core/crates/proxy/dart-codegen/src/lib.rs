@@ -184,6 +184,7 @@ fn render_core_proxy_error_details() -> String {
     output
 }
 
+/// Emits Dart proxy clients using the shared request-id allocator.
 fn render_dart_clients(
     objects: &[SourceObject],
     serializable_types: &HashMap<String, SerializableType>,
@@ -193,9 +194,10 @@ fn render_dart_clients(
     output.push_str("import '../../bridge/OperitRuntimeBridge.dart';\n");
     output.push_str("import '../../link/CoreLinkCodec.dart';\n");
     output.push_str("import '../../link/CoreLinkProtocol.dart';\n");
+    output.push_str("import '../../link/CoreLinkRequestId.dart';\n");
     output.push_str("import 'CoreProxyModels.g.dart';\n\n");
     output.push_str(
-        "String _coreProxyRequestId() => 'flutter-${DateTime.now().microsecondsSinceEpoch}';\nMap<String, Object?> _coreProxyArgs(Map<String, Object?> args, Map<String, Object?> objectArgs) => <String, Object?>{...objectArgs, ...args};\n\n",
+        "/// Allocates one request id independently of the platform clock resolution.\nString _coreProxyRequestId() => nextCoreLinkRequestId();\nMap<String, Object?> _coreProxyArgs(Map<String, Object?> args, Map<String, Object?> objectArgs) => <String, Object?>{...objectArgs, ...args};\n\n",
     );
     output.push_str("class GeneratedCoreProxyClients {\n");
     output.push_str("  const GeneratedCoreProxyClients(this.bridge);\n\n");

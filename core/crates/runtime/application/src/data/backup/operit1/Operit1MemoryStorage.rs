@@ -168,7 +168,9 @@ fn buildOperit1PluginMemoryRecords(
     plan: &SnapshotFileImportPlan,
     archive: &OperitChatArchive,
 ) -> Result<(Vec<(String, String, Value)>, i32, i32), String> {
-    use crate::data::backup::CharacterPluginMigration::{migrateCandidateTrigger, ownerRecord};
+    use crate::data::backup::CharacterPluginMigration::{
+        migrateCandidateTrigger, ownerRecord, CandidateSourceState,
+    };
     let mut memories = BTreeMap::<i64, Value>::new();
     let mut links = Vec::new();
     let mut tags = BTreeMap::<i64, Value>::new();
@@ -177,6 +179,7 @@ fn buildOperit1PluginMemoryRecords(
     let mut candidates = Vec::new();
     let mut tag_relations = BTreeSet::new();
     let mut property_relations = BTreeSet::new();
+    let mut dropped_candidates = 0usize;
     // Prefixes follow the checked-in Operit1 ObjectBox model entity and relation identifiers.
     visitLmdbRecords(storage, path, length, &mut |key, bytes| {
         if key.len() < 4 {
@@ -244,8 +247,15 @@ fn buildOperit1PluginMemoryRecords(
                     .collect::<Vec<_>>();
                 let mut candidate = serde_json::json!({"id":table.requiredI64(0,"MemoryAutoSaveCandidate.id")?,"chatId":chat,"triggerMessageTimestamp":timestamp,
                     "createdAt":table.requiredI64(3,"MemoryAutoSaveCandidate.createdAt")?,"updatedAt":table.requiredI64(4,"MemoryAutoSaveCandidate.updatedAt")?,"status":table.requiredString(5,"MemoryAutoSaveCandidate.status")?,"attemptCount":table.scalarI32(6,"MemoryAutoSaveCandidate.attemptCount")?,"lastError":table.requiredString(7,"MemoryAutoSaveCandidate.lastError")?,"sourceType":table.requiredString(8,"MemoryAutoSaveCandidate.sourceType")?});
-                migrateCandidateTrigger(&mut candidate, &messages)?;
-                candidates.push(candidate);
+                // The retired app deleted chats without clearing their queued extractions, and the
+                // plugin requires a resolvable source revision, so stale queue records are dropped.
+                if migrateCandidateTrigger(&mut candidate, &messages)?
+                    == CandidateSourceState::Unresolvable
+                {
+                    dropped_candidates += 1;
+                } else {
+                    candidates.push(candidate);
+                }
             }
             (16, OPERIT1_OBJECTBOX_KEY_MEMORY_TAG_RELATION) if bytes.is_empty() => {
                 tag_relations.insert((
@@ -288,8 +298,10 @@ fn buildOperit1PluginMemoryRecords(
             .push(property.clone());
     }
     let memory_count = i32::try_from(memories.len()).map_err(|error| error.to_string())?;
-    let link_count = i32::try_from(links.len()).map_err(|error| error.to_string())?;
     let mut records = Vec::new();
+    let mut link_count = 0i32;
+    let mut dropped_relationships = 0usize;
+    let mut dropped_chunks = 0usize;
     for link in links {
         let source = link["sourceMemoryId"]
             .as_i64()
@@ -297,20 +309,37 @@ fn buildOperit1PluginMemoryRecords(
         let target = link["targetMemoryId"]
             .as_i64()
             .ok_or("Invalid target memory identity")?;
+        // The retired app deleted memories without clearing their references, and the plugin rejects
+        // unresolvable endpoints, so stale relationships are dropped rather than failing the import.
         if !memories.contains_key(&source) || !memories.contains_key(&target) {
-            return Err("Operit1 relationship references missing memory".to_string());
+            dropped_relationships += 1;
+            continue;
         }
         records.push(ownerRecord("links", owner, link)?);
+        link_count = link_count
+            .checked_add(1)
+            .ok_or("Operit1 relationship count overflow")?;
     }
     for (memory_id, mut chunk) in chunks {
-        let memory = memories
-            .get(&memory_id)
-            .ok_or("Operit1 chunk references missing memory")?;
+        let Some(memory) = memories.get(&memory_id) else {
+            dropped_chunks += 1;
+            continue;
+        };
         if memory["isDocumentNode"] != true {
-            return Err("Operit1 chunk references a non-document memory".to_string());
+            dropped_chunks += 1;
+            continue;
         }
         chunk["memoryUuid"] = memory["uuid"].clone();
         records.push(ownerRecord("chunks", owner, chunk)?);
+    }
+    if dropped_relationships > 0 || dropped_chunks > 0 || dropped_candidates > 0 {
+        use operit_util::AppLogger::AppLogger;
+        AppLogger::w(
+            "Operit1SnapshotImport",
+            &format!(
+                "owner={owner} dropped {dropped_relationships} relationships, {dropped_chunks} document chunks and {dropped_candidates} queued memory extractions whose legacy source was deleted"
+            ),
+        );
     }
     for candidate in candidates {
         records.push(ownerRecord("candidates", owner, candidate)?);

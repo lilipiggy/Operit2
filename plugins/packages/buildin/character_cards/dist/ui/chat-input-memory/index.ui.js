@@ -320,6 +320,944 @@ function parseChatConfigurationRequest(value) {
   return request2;
 }
 
+// src/storage/schema.json
+var collections = {
+  cards: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      characterSetting: {
+        kind: "text"
+      },
+      openingStatement: {
+        kind: "text"
+      },
+      otherContentChat: {
+        kind: "text"
+      },
+      otherContentVoice: {
+        kind: "text"
+      },
+      avatarUri: {
+        kind: "text",
+        nullable: true
+      },
+      attachedTagIds: {
+        kind: "array",
+        item: {
+          kind: "text"
+        }
+      },
+      advancedCustomPrompt: {
+        kind: "text"
+      },
+      marks: {
+        kind: "text"
+      },
+      chatModelBindingMode: {
+        kind: "text"
+      },
+      chatModelId: {
+        kind: "text",
+        nullable: true
+      },
+      ttsConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      themeConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      memoryBindingMode: {
+        kind: "text"
+      },
+      sharedMemoryId: {
+        kind: "text",
+        nullable: true
+      },
+      sharedMemoryMounts: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            sharedMemoryId: {
+              kind: "text"
+            },
+            readable: {
+              kind: "boolean"
+            },
+            writable: {
+              kind: "boolean"
+            }
+          }
+        }
+      },
+      toolAccessConfig: {
+        kind: "object",
+        fields: {
+          enabled: {
+            kind: "boolean"
+          },
+          allowedBuiltinTools: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedPackages: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedSkills: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          },
+          allowedMcpServers: {
+            kind: "array",
+            item: {
+              kind: "text"
+            }
+          }
+        }
+      },
+      isDefault: {
+        kind: "boolean"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  groups: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      members: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            characterCardId: {
+              kind: "text"
+            },
+            orderIndex: {
+              kind: "integer"
+            }
+          }
+        }
+      },
+      themeConfigId: {
+        kind: "text",
+        nullable: true
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  tags: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      description: {
+        kind: "text"
+      },
+      promptContent: {
+        kind: "text"
+      },
+      tagType: {
+        kind: "text"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  stores: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      name: {
+        kind: "text"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  conversationGroups: {
+    kind: "object",
+    fields: {
+      id: {
+        kind: "text"
+      },
+      ownerSelection: {
+        kind: "text",
+        nullable: true
+      },
+      name: {
+        kind: "text"
+      },
+      chatIds: {
+        kind: "array",
+        item: {
+          kind: "text"
+        }
+      },
+      displayOrder: {
+        kind: "integer"
+      },
+      pinned: {
+        kind: "boolean"
+      },
+      createdAt: {
+        kind: "integer"
+      },
+      updatedAt: {
+        kind: "integer"
+      }
+    }
+  },
+  owners: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      settings: {
+        kind: "object",
+        fields: {
+          autoSaveIntervalMinutes: {
+            kind: "integer"
+          },
+          nextAutoSaveRunAtMs: {
+            kind: "integer"
+          },
+          memoryExtractionCustomRules: {
+            kind: "text"
+          },
+          profileAutoUpdateEnabled: {
+            kind: "boolean"
+          },
+          profileAutoUpdateLocked: {
+            kind: "boolean"
+          },
+          cloudEmbeddingEnabled: {
+            kind: "boolean"
+          },
+          cloudEmbeddingEndpoint: {
+            kind: "text"
+          },
+          cloudEmbeddingApiKey: {
+            kind: "text"
+          },
+          cloudEmbeddingModel: {
+            kind: "text"
+          }
+        }
+      },
+      searchConfig: {
+        kind: "object",
+        fields: {
+          scoreMode: {
+            kind: "text"
+          },
+          keywordWeight: {
+            kind: "number"
+          },
+          tagWeight: {
+            kind: "number"
+          },
+          vectorWeight: {
+            kind: "number"
+          },
+          edgeWeight: {
+            kind: "number"
+          }
+        }
+      },
+      userDocumentPath: {
+        kind: "text"
+      },
+      rebuildProgress: {
+        kind: "object",
+        fields: {
+          status: {
+            kind: "text"
+          },
+          totalChats: {
+            kind: "integer"
+          },
+          completedChats: {
+            kind: "integer"
+          },
+          totalWindows: {
+            kind: "integer"
+          },
+          completedWindows: {
+            kind: "integer"
+          },
+          totalSourceMessages: {
+            kind: "integer"
+          },
+          processedSourceMessages: {
+            kind: "integer"
+          },
+          failedWindows: {
+            kind: "integer"
+          },
+          currentChatTitle: {
+            kind: "text"
+          },
+          lastError: {
+            kind: "text"
+          }
+        }
+      },
+      rebuildTask: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          windows: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                chatId: {
+                  kind: "text"
+                },
+                chatTitle: {
+                  kind: "text"
+                },
+                messages: {
+                  kind: "array",
+                  item: {
+                    kind: "object",
+                    fields: {
+                      sender: {
+                        kind: "text"
+                      },
+                      content: {
+                        kind: "text"
+                      },
+                      timestamp: {
+                        kind: "integer"
+                      },
+                      variantIndex: {
+                        kind: "integer"
+                      },
+                      variantCount: {
+                        kind: "integer"
+                      },
+                      provider: {
+                        kind: "text"
+                      },
+                      modelName: {
+                        kind: "text"
+                      }
+                    }
+                  }
+                },
+                sourceMessageCount: {
+                  kind: "integer"
+                }
+              }
+            }
+          },
+          nextWindow: {
+            kind: "integer"
+          }
+        },
+        nullable: true
+      }
+    }
+  },
+  memories: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          uuid: {
+            kind: "text"
+          },
+          title: {
+            kind: "text"
+          },
+          content: {
+            kind: "text"
+          },
+          contentType: {
+            kind: "text"
+          },
+          source: {
+            kind: "text"
+          },
+          credibility: {
+            kind: "number"
+          },
+          importance: {
+            kind: "number"
+          },
+          documentPath: {
+            kind: "text",
+            nullable: true
+          },
+          isDocumentNode: {
+            kind: "boolean"
+          },
+          chunkIndexFilePath: {
+            kind: "text",
+            nullable: true
+          },
+          folderPath: {
+            kind: "text",
+            nullable: true
+          },
+          createdAt: {
+            kind: "integer"
+          },
+          updatedAt: {
+            kind: "integer"
+          },
+          lastAccessedAt: {
+            kind: "integer"
+          },
+          tags: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                id: {
+                  kind: "text"
+                },
+                name: {
+                  kind: "text"
+                }
+              }
+            }
+          },
+          properties: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                id: {
+                  kind: "text"
+                },
+                key: {
+                  kind: "text"
+                },
+                value: {
+                  kind: "text"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  links: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          sourceMemoryId: {
+            kind: "text"
+          },
+          targetMemoryId: {
+            kind: "text"
+          },
+          type_: {
+            kind: "text"
+          },
+          weight: {
+            kind: "number"
+          },
+          description: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  chunks: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          memoryUuid: {
+            kind: "text"
+          },
+          chunkIndex: {
+            kind: "integer"
+          },
+          content: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  candidates: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          chatId: {
+            kind: "text"
+          },
+          triggerMessageTimestamp: {
+            kind: "integer"
+          },
+          triggerVariantIndex: {
+            kind: "integer"
+          },
+          createdAt: {
+            kind: "integer"
+          },
+          updatedAt: {
+            kind: "integer"
+          },
+          status: {
+            kind: "text"
+          },
+          attemptCount: {
+            kind: "integer"
+          },
+          lastError: {
+            kind: "text"
+          },
+          sourceType: {
+            kind: "text"
+          }
+        }
+      }
+    }
+  },
+  embeddings: {
+    kind: "object",
+    fields: {
+      ownerKey: {
+        kind: "text"
+      },
+      record: {
+        kind: "object",
+        fields: {
+          endpoint: {
+            kind: "text"
+          },
+          model: {
+            kind: "text"
+          },
+          text: {
+            kind: "text"
+          },
+          vector: {
+            kind: "vector"
+          },
+          updatedAt: {
+            kind: "integer"
+          }
+        }
+      }
+    }
+  },
+  meta: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      nextId: {
+        kind: "text"
+      },
+      active: {
+        kind: "object",
+        nullable: true,
+        fields: {
+          CharacterCard: {
+            kind: "object",
+            optional: true,
+            fields: {
+              id: {
+                kind: "text"
+              }
+            }
+          },
+          CharacterGroup: {
+            kind: "object",
+            optional: true,
+            fields: {
+              id: {
+                kind: "text"
+              }
+            }
+          }
+        }
+      },
+      memoryPreferences: {
+        kind: "object",
+        fields: {
+          userDescriptionEnabled: {
+            kind: "boolean"
+          },
+          autoUpdateEnabled: {
+            kind: "boolean"
+          }
+        },
+        optional: true
+      },
+      migrationStatus: {
+        kind: "text",
+        optional: true
+      },
+      migrationSource: {
+        kind: "text",
+        optional: true
+      }
+    }
+  },
+  chat_bindings: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      }
+    }
+  },
+  chat_drafts: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      }
+    }
+  },
+  message_snapshots: {
+    kind: "object",
+    fields: {
+      version: {
+        kind: "integer"
+      },
+      selection: {
+        kind: "text"
+      },
+      promptFunctionType: {
+        kind: "text"
+      },
+      primaryOwnerKey: {
+        kind: "text"
+      },
+      profile: {
+        kind: "object",
+        fields: {
+          id: {
+            kind: "text"
+          },
+          name: {
+            kind: "text"
+          },
+          avatarUri: {
+            kind: "text",
+            nullable: true
+          },
+          introPrompt: {
+            kind: "text"
+          },
+          userPreferencesText: {
+            kind: "text"
+          },
+          openingStatement: {
+            kind: "text"
+          },
+          modelBinding: {
+            kind: "object",
+            fields: {
+              providerId: {
+                kind: "text"
+              },
+              modelId: {
+                kind: "text"
+              }
+            }
+          },
+          ttsConfigId: {
+            kind: "text"
+          },
+          toolAccess: {
+            kind: "object",
+            fields: {
+              enabled: {
+                kind: "boolean"
+              },
+              allowedBuiltinTools: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedPackages: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedSkills: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              },
+              allowedMcpServers: {
+                kind: "array",
+                item: {
+                  kind: "text"
+                }
+              }
+            }
+          },
+          resources: {
+            kind: "array",
+            item: {
+              kind: "object",
+              fields: {
+                key: {
+                  kind: "text"
+                },
+                readable: {
+                  kind: "boolean"
+                },
+                writable: {
+                  kind: "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
+      participants: {
+        kind: "array",
+        item: {
+          kind: "object",
+          fields: {
+            id: {
+              kind: "text"
+            },
+            name: {
+              kind: "text"
+            },
+            avatarUri: {
+              kind: "text",
+              nullable: true
+            },
+            introPrompt: {
+              kind: "text"
+            },
+            userPreferencesText: {
+              kind: "text"
+            },
+            openingStatement: {
+              kind: "text"
+            },
+            modelBinding: {
+              kind: "object",
+              fields: {
+                providerId: {
+                  kind: "text"
+                },
+                modelId: {
+                  kind: "text"
+                }
+              }
+            },
+            ttsConfigId: {
+              kind: "text"
+            },
+            toolAccess: {
+              kind: "object",
+              fields: {
+                enabled: {
+                  kind: "boolean"
+                },
+                allowedBuiltinTools: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedPackages: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedSkills: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                },
+                allowedMcpServers: {
+                  kind: "array",
+                  item: {
+                    kind: "text"
+                  }
+                }
+              }
+            },
+            resources: {
+              kind: "array",
+              item: {
+                kind: "object",
+                fields: {
+                  key: {
+                    kind: "text"
+                  },
+                  readable: {
+                    kind: "boolean"
+                  },
+                  writable: {
+                    kind: "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
+// src/storage/relational.ts
+var schemas = collections;
+function field(path) {
+  return path === "" ? "_value" : path;
+}
+function layout(name, node, child = false) {
+  const columns = [
+    { name: "_key", affinity: "text", nullable: false },
+    { name: "_revision", affinity: "text", nullable: false }
+  ];
+  if (child)
+    columns.push(
+      { name: "_root", affinity: "text", nullable: false },
+      { name: "_parent", affinity: "text", nullable: false },
+      { name: "_position", affinity: "integer", nullable: false },
+      { name: "_map_key", affinity: "text", nullable: true }
+    );
+  const children = [];
+  function visit(schema, path, absent) {
+    if (schema.optional || schema.nullable)
+      columns.push({
+        name: field(path) + "__state",
+        affinity: "integer",
+        nullable: absent
+      });
+    const nullable2 = absent || schema.optional === true || schema.nullable === true;
+    if (schema.kind === "object") {
+      for (const [key, value] of Object.entries(schema.fields).sort(
+        ([left], [right]) => left < right ? -1 : left > right ? 1 : 0
+      ))
+        visit(value, path === "" ? key : path + "__" + key, nullable2);
+    } else if (schema.kind === "array" || schema.kind === "map") {
+      columns.push({
+        name: field(path) + "__count",
+        affinity: "integer",
+        nullable: nullable2
+      });
+      children.push(layout(name + "_" + field(path), schema.item, true));
+    } else
+      columns.push({
+        name: field(path),
+        affinity: schema.kind === "text" ? "text" : schema.kind === "vector" ? "blob" : schema.kind === "boolean" || schema.kind === "integer" ? "integer" : "real",
+        nullable: nullable2
+      });
+  }
+  visit(node, "", false);
+  return { name, node, table: { name, primaryKey: "_key", columns }, children };
+}
+var layouts = Object.fromEntries(
+  Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
+);
+
 // src/definition.ts
 var definition = { id: "com.operit.character_cards", title: "\u89D2\u8272\u5361", icon: "Badge", order: 150 };
 var chatUiRoutes = {
@@ -426,12 +1364,12 @@ function renderMemoryMenu(ctx) {
     });
   }
   function icon(name, color = colors.onSurfaceVariant) {
-    return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:20972",[name,color],()=>[{ name, size: 16, tint: color }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs));
+    return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:40725",[name,color],()=>[{ name, size: 16, tint: color }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs));
   }
   function switchRow(key, name, title) {
     if (preferences === null) throw new Error("Memory preferences are not loaded");
     const checked = preferences[key];
-    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21196",[{
+    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:40949",[{
       key: "memory-" + key,
       fillMaxWidth: true,
       paddingHorizontal: 12,
@@ -440,15 +1378,15 @@ function renderMemoryMenu(ctx) {
       onClick: () => toggle(key)
     },[
       icon(name, checked ? colors.primary : colors.onSurfaceVariant),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21503",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21539",[{ text: title, style: "bodySmall", color: colors.onSurface, maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21666",[{ text: checked ? "\u5F00" : "\u5173", style: "bodySmall", color: colors.primary, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21788",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21823",[{ checked, width: 40, height: 28, onCheckedChange: () => toggle(key) }],(...__operitArgs)=>ctx.UI.Switch(...__operitArgs))
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41256",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41292",[{ text: title, style: "bodySmall", color: colors.onSurface, maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41419",[{ text: checked ? "\u5F00" : "\u5173", style: "bodySmall", color: colors.primary, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41541",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41576",[{ checked, width: 40, height: 28, onCheckedChange: () => toggle(key) }],(...__operitArgs)=>ctx.UI.Switch(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
   }
-  if (preferences === null) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:21956",[load],()=>[{ key: "memory-menu-loading", onLoad: load }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
-  const children = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22034",[{
+  if (preferences === null) return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41709",[load],()=>[{ key: "memory-menu-loading", onLoad: load }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+  const children = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:41787",[{
     key: "memory-section-header",
     fillMaxWidth: true,
     paddingHorizontal: 12,
@@ -460,26 +1398,26 @@ function renderMemoryMenu(ctx) {
     }
   },[
     icon("DataObjectOutlined", colors.onSurfaceVariant.copy({ alpha: 0.7 })),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22388",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22422",[],()=>[{ text: "\u8BB0\u5FC6", style: "bodySmall" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22485",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22518",[{ text: memorySummary(preferences), style: "bodySmall", color: colors.primary, fontWeight: "600", textAlign: "end", maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22699",[{
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42141",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42175",[],()=>[{ text: "\u8BB0\u5FC6", style: "bodySmall" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42238",[],()=>[{ width: 8 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42271",[{ text: memorySummary(preferences), style: "bodySmall", color: colors.primary, fontWeight: "600", textAlign: "end", maxLines: 1, overflow: "ellipsis", weight: 1 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42452",[{
       key: "memory-info",
       tooltip: "\u8BB0\u5FC6\u72B6\u6001\u8BF4\u660E",
       width: 24,
       height: 28,
       contentPadding: { horizontal: 0, vertical: 0 },
       onClick: showInfo,
-      content: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:22929",[{ name: "InfoOutline", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.7 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+      content: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42682",[{ name: "InfoOutline", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.7 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
     }],(...__operitArgs)=>ctx.UI.IconButton(...__operitArgs)),
-    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23040",[],()=>[{ width: 6 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23073",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+    OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42793",[],()=>[{ width: 6 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42826",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))];
-  if (expanded) children.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23225",[{ key: "memory-section-children", modifier: ctx.Modifier.padding(12, 0, 8, 4) },[
+  if (expanded) children.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:42978",[{ key: "memory-section-children", modifier: ctx.Modifier.padding(12, 0, 8, 4) },[
     switchRow("userDescriptionEnabled", "AssignmentIndOutlined", "\u63D0\u4F9B\u7528\u6237\u8D44\u6599"),
     switchRow("autoUpdateEnabled", preferences.autoUpdateEnabled ? "Save" : "SaveOutlined", "\u81EA\u52A8\u66F4\u65B0\u8BB0\u5FC6\u5E93"),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23571",[{
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43324",[{
       key: "memory-manual",
       fillMaxWidth: true,
       paddingHorizontal: 12,
@@ -488,8 +1426,8 @@ function renderMemoryMenu(ctx) {
       onClick: !busy && chatId !== null ? manual : void 0
     },[
       icon("SaveOutlined"),
-      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23861",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:23897",[{
+      OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43614",[],()=>[{ width: 12 }],(...__operitArgs)=>ctx.UI.Spacer(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:43650",[{
         text: busy ? "\u6B63\u5728\u66F4\u65B0\u8BB0\u5FC6\u2026" : "\u624B\u52A8\u66F4\u65B0\u8BB0\u5FC6",
         style: "bodySmall",
         maxLines: 2,
@@ -499,7 +1437,7 @@ function renderMemoryMenu(ctx) {
       }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Column(...__operitArgs)));
-  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:24256",[children],()=>[{ key: "memory-section", fillMaxWidth: true },children],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
+  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-input-memory/index.ui.js:44009",[children],()=>[{ key: "memory-section", fillMaxWidth: true },children],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
 }
 
 // src/ui/chat-input-memory/index.ui.ts

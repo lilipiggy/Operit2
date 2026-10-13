@@ -736,6 +736,7 @@ impl Operit1SnapshotImportManager {
                     }
                 })
                 .map_err(|error| error.to_string())?;
+            crate::data::backup::CharacterPluginMigration::migrateLegacyCharacters(self.paths.clone())?;
             if chatCount == 0 {
                 publishOperit1SnapshotCountedProgress(
                     "chats",

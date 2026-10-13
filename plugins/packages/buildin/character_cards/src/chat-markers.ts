@@ -1,4 +1,5 @@
 import type { ToolPkg as ToolPkgTypes } from "../../../../types/toolpkg";
+import type { Storage } from "../../../../types/storage";
 import type { ChatParticipantProfile } from "./api";
 import { parseChatSelection } from "./chat-bindings";
 import { assertBoolean, assertNullableString, assertObject, assertString, requireId } from "./validation";
@@ -16,7 +17,7 @@ export interface MessageMarker {
 }
 
 /** Copies validated JSON without coercing undefined, non-finite values or unsupported objects. */
-function markerValue(value: unknown, path: string): ToolPkgTypes.JsonValue {
+function markerValue(value: unknown, path: string): Storage.Value {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error(path + " must be a finite JSON number");
@@ -29,9 +30,9 @@ function markerValue(value: unknown, path: string): ToolPkgTypes.JsonValue {
   return markerObject(value, path);
 }
 /** Requires an actual JSON object and preserves every explicitly present namespace field. */
-export function markerObject(value: unknown, path: string): ToolPkgTypes.JsonObject {
+export function markerObject(value: unknown, path: string): Record<string, Storage.Value> {
   assertObject(value, path);
-  const result: ToolPkgTypes.JsonObject = {};
+  const result: Record<string, Storage.Value> = {};
   for (const [key, item] of Object.entries(value)) Object.defineProperty(result, key, { value: markerValue(item, path + "." + key), enumerable: true, configurable: true, writable: true });
   return result;
 }

@@ -5,7 +5,7 @@ import { clone } from "./storage/records";
 import { createDefaultCharacter, createMemorySpace, assertMemorySpace } from "./storage/state";
 import { searchMemorySpace, searchMemorySpaceDebug } from "./memory-search";
 import { requireChatSelection } from "./chat-bindings";
-import { deleteChatExtensionBinding, listChatExtensionBindings, readChatExtensionBinding, writeChatExtensionBinding } from "./chat-extensions";
+import { deleteChatBinding, listChatBindings, readChatBinding, writeChatBinding } from "./chat-storage";
 
 /** Copies structured domain records so consumers cannot mutate the in-flight snapshot outside this repository. */
 function copy<T>(value: T): T { return clone(value); }
@@ -264,19 +264,19 @@ export class RepositorySession implements CharacterRepository {
     for (const binding of await this.listChatBindings()) if (binding.selection === selection) throw new Error("Rebind or delete the chat extension before deleting its selection: " + binding.chatId);
   }
   /** Enumerates only real host records and their authenticated plugin extension markers. */
-  async listChatBindings(): Promise<ChatBinding[]> { return listChatExtensionBindings(); }
+  async listChatBindings(): Promise<ChatBinding[]> { return listChatBindings(); }
   /** Reads the sole record-extension source and validates its actual stored domain reference. */
   async readChatBinding(chatId: string): Promise<ChatBinding> {
-    const binding = await readChatExtensionBinding(chatId);
+    const binding = await readChatBinding(chatId);
     requireChatSelection(binding.selection, this.state.cards, this.state.groups); return binding;
   }
   /** Writes an explicit selector submission solely to the authenticated host record namespace. */
   async writeChatBinding(binding: ChatBinding): Promise<ChatBinding> {
     requireChatSelection(binding.selection, this.state.cards, this.state.groups);
-    return writeChatExtensionBinding(binding);
+    return writeChatBinding(binding);
   }
   /** Deletes only the authenticated record namespace without touching manual membership or file state. */
-  async deleteChatBinding(chatId: string): Promise<{ chatId: string; deleted: boolean }> { return deleteChatExtensionBinding(chatId); }
+  async deleteChatBinding(chatId: string): Promise<{ chatId: string; deleted: boolean }> { return deleteChatBinding(chatId); }
   /** Reads the actual owner USER.md file or the edit staged within this same operation. */
   async readUser(ownerKey: string): Promise<UserDocument> {
     const path = await this.readUserPath(ownerKey), document = this.documents.get(ownerKey);

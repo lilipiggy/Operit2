@@ -535,12 +535,39 @@ impl ChatHistoryManager {
         Ok(self.messageDao.getTotalMessageCount()?)
     }
 
+    /// Counts messages across the complete chat directory.
     pub fn getMessageCountsByChatId(&self) -> ChatHistoryManagerResult<HashMap<String, i32>> {
         Ok(self
             .messageDao
             .getMessageCountsByChatId()?
             .into_iter()
             .map(|count| (count.chatId, count.count))
+            .collect())
+    }
+
+    /// Loads only explicitly selected metadata records without materializing message histories.
+    pub fn getMessageCountsForChats(
+        &self,
+        ids: &[String],
+    ) -> ChatHistoryManagerResult<HashMap<String, i32>> {
+        Ok(self
+            .messageDao
+            .getMessageCountsForChats(ids)?
+            .into_iter()
+            .map(|count| (count.chatId, count.count))
+            .collect())
+    }
+
+    /// Loads only explicitly selected metadata records without materializing message histories.
+    pub fn loadChatHistoriesByIds(
+        &self,
+        ids: &[String],
+    ) -> ChatHistoryManagerResult<Vec<ChatHistory>> {
+        Ok(self
+            .chatDao
+            .getChatsByIds(ids)?
+            .into_iter()
+            .map(|chat| chat.toChatHistory(Vec::new()))
             .collect())
     }
 

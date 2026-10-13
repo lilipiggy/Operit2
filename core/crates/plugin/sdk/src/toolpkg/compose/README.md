@@ -33,7 +33,10 @@ A screen must keep the original SDK context. Local modal drafts use distinct hoo
 not cloned context objects. Generation rejects a copied context at the boundary.
 
 A command owns its response sink and final revision. Intermediate delivery must finish before
-the final response is built. Detached asynchronous work may keep its listener only while the
+the final response is built. Synchronous callbacks render once in their final response;
+asynchronous callbacks can publish intermediate revisions. Node transport IDs are compact
+session-owned handles; keyed occurrence matching and ancestor paths stay inside the runtime.
+Detached asynchronous work may keep its listener only while the
 host still owns its pending references. Render and state-flush failures propagate to that
 command; detached failures report through its host sink. They do not become successful empty
 responses.

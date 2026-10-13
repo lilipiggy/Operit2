@@ -15,7 +15,7 @@ interface EntityState {
   editing: boolean; tab: number; previewConfigurationExpanded: boolean; loading: boolean; busy: boolean; error: string;
   fullscreen: boolean; deleting: boolean; finished: boolean;
   tags: TagEdit[]; tagChanges: TagChanges; tagDraft: TagEdit | null; tagDeleting: boolean; nextTag: number;
-  expanded: ExpandedField | null; picker: NativePicker | null; tagManaging: boolean; toolDraft: ToolAccessConfig | null; toolTab: number; toolQuery: string; exporting: boolean; exportContent: string; exportPath: string;
+  expanded: ExpandedField | null; picker: NativePicker | null; tagManaging: boolean; toolDraft: ToolAccessConfig | null; toolTab: number; toolQuery: string; exporting: boolean; exportContent: string; exportName: string;
   avatar: string | null; themes: ThemeChoice[] | null; themeError: string;
 }
 /** Copies complete persisted records without introducing another storage contract. */
@@ -71,7 +71,7 @@ function renderNativeEntity(ctx: ComposeDslContext, input: NativeEntityInput, li
     snapshot: null, card: null, group: null, editing: input.mode !== "preview", tab: 0,
     previewConfigurationExpanded: false, loading: true, busy: false, error: "", fullscreen: false, deleting: false, finished: false,
     tags: [], tagChanges: { created: [], updated: [], deleted: [] }, tagDraft: null, tagDeleting: false, nextTag: 0,
-    expanded: null, picker: null, tagManaging: false, toolDraft: null, toolTab: 0, toolQuery: "", exporting: false, exportContent: "", exportPath: "",
+    expanded: null, picker: null, tagManaging: false, toolDraft: null, toolTab: 0, toolQuery: "", exporting: false, exportContent: "", exportName: "",
     avatar: null, themes: null, themeError: "",
   });
   const live = ctx.useRef(statePrefix + "native-entity-live", state); live.current = state;
@@ -323,15 +323,21 @@ function renderNativeEntity(ctx: ComposeDslContext, input: NativeEntityInput, li
       ctx.UI.Box({ weight: 1, fillMaxWidth: true }, body("entity-tool-list", children)),
     ]), [cancel, standardButton("entity-primary", "确定", () => { assertOwner(); if (live.current.toolDraft !== null) changeCard({ toolAccessConfig: copy(live.current.toolDraft) }); update({ toolDraft: null }); }, true)], 760, 620, true);
   } else if (state.exporting) {
-    const exportFile = async (format: "operit" | "tavern"): Promise<void> => { await act(async () => { const content = input.entity === "card" ? await request({ action: "exportCharacter", id: input.id, format }) : await request({ action: "exportGroup", id: input.id }); assertOwner(); update({ exportContent: content }); }); };
-    const writeExport = async (): Promise<void> => { await act(async () => {
-      const path = live.current.exportPath.trim();
-      if (path === "") throw new Error("请输入导出文件 VFS 路径");
-      const saved = await Tools.Files.write(path, live.current.exportContent, false);
-      if (!saved.successful) throw new Error(saved.details); assertOwner();
-      update({ exporting: false, exportContent: "", exportPath: "" });
+    /** Serializes saved entity data and suggests a portable export file name. */
+    const exportFile = async (format: "operit" | "tavern"): Promise<void> => { await act(async () => {
+      const content = input.entity === "card" ? await request({ action: "exportCharacter", id: input.id, format }) : await request({ action: "exportGroup", id: input.id });
+      assertOwner();
+      const name = input.entity === "card" ? card().name : group().name;
+      update({ exportContent: content, exportName: name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_") + "-" + format + ".json" });
     }); };
-    panel = shell("导出", state.exportContent === "" ? ctx.UI.Column({ fillMaxWidth: true, spacing: 8 }, [standardButton("entity-export-json", "导出 JSON", () => exportFile("operit")), ...(input.entity === "card" ? [standardButton("entity-export-tavern", "导出酒馆 JSON", () => exportFile("tavern"))] : [])]) : body("entity-export-body", [field("export-path", "导出文件 VFS 路径", state.exportPath, exportPath => update({ exportPath })), section("JSON", state.exportContent)]), [cancel, ...(state.exportContent === "" ? [] : [standardButton("entity-export-save", "保存文件", writeExport, true)])], state.exportContent === "" ? 420 : 760, state.exportContent === "" ? 240 : 620);
+    /** Opens the host save selector and retains the export preview on cancellation or error. */
+    const writeExport = async (): Promise<void> => { await act(async () => {
+      const result = await ctx.saveFile({ suggestedName: live.current.exportName, content: live.current.exportContent, mimeType: "application/json", extensions: ["json"] });
+      assertOwner();
+      if (result.cancelled) return;
+      update({ exporting: false, exportContent: "", exportName: "" });
+    }); };
+    panel = shell("导出", state.exportContent === "" ? ctx.UI.Column({ fillMaxWidth: true, spacing: 8 }, [standardButton("entity-export-json", "导出 JSON", () => exportFile("operit")), ...(input.entity === "card" ? [standardButton("entity-export-tavern", "导出酒馆 JSON", () => exportFile("tavern"))] : [])]) : body("entity-export-body", [caption("点击保存文件选择保存位置。"), section("JSON", state.exportContent)]), [cancel, ...(state.exportContent === "" ? [] : [standardButton("entity-export-save", "保存文件", writeExport, true)])], state.exportContent === "" ? 420 : 760, state.exportContent === "" ? 240 : 620);
   } else if (state.tagDraft !== null) {
     const draft = state.tagDraft;
     const children = state.tagDeleting ? [text(`确定删除标签“${draft.name}”？`)] : ([ ["name", "标签名称", 1], ["description", "描述", 1], ["promptContent", "提示词内容", 6] ] as const).map(([key, label, lines]) => field("tag-" + key, label, draft[key], value => { assertOwner(); if (live.current.tagDraft !== null) update({ tagDraft: { ...live.current.tagDraft, [key]: value } }); }, lines));

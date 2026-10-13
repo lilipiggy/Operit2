@@ -90,7 +90,7 @@ async function environment(t) {
     /** Invokes the actual main-registered provider instead of injecting domain responses or directory defaults. */
     dispatchDomain(operation, input) { return entry.api(operation, input); },
     /** Supplies the generic native resolver's actual owner-scoped input from the controlled host record. */
-    async readChatExtension(chatId) { return (await Chat.readExtension({ kind: "chat", chatId })).extension; },
+    async readChatExtension(chatId) { const binding = await entry.api("chat.configuration.binding.read", { chatId }); return { version: 1, selection: binding.selection }; },
     /** Schedules an exact original generic-host error for the next explicit invocation, never an automatic retry. */
     failNextHost(method, error) { assert.equal(hostFaults.has(method), false); hostFaults.set(method, error); },
   };
@@ -116,7 +116,8 @@ async function bind(environment, chatId = "policy-chat") {
     enabled: true, allowedBuiltinTools: ["read_file", "use_package"], allowedPackages: ["approved_package"], allowedSkills: ["approved_skill"], allowedMcpServers: ["approved_server"],
   } } });
   const chat = environment.chats.get(chatId); assert.ok(chat);
-  assert.deepEqual(chat.extensions.get(authenticatedOwner), { version: 1, selection: "card:default" });
+  assert.equal(chat.extensions.has(authenticatedOwner), false);
+  assert.equal((await environment.dispatchDomain("chat.configuration.binding.read", { chatId })).selection, "card:default");
   assert.deepEqual(chat.extensions.get(siblingOwner), { version: 1, selection: "card:sibling-only", private: { retained: chatId } });
   const state = JSON.parse(await environment.disk.stateBytes().toString("utf8"));
   assert.equal(state.version, 3); assert.equal(Object.hasOwn(state, "chatBindings"), false);
@@ -278,10 +279,10 @@ test("concurrent snapshot policy evaluation does not leak the next turn's permis
 /** Keeps existing real IO failures explicit in their actual service while proving policy does not reread that service. */
 test("queued repository and host errors remain unconsumed by frozen policy and propagate on the real dependency read", async t => {
   const runtime = await environment(t), context = await bind(runtime), before = ioCounts(runtime);
-  const diskFailure = new Error("snapshot-must-not-reread-disk"); runtime.disk.failNext("storage.list", diskFailure);
-  const hostFailure = new Error("snapshot-must-not-reread-binding"); runtime.failNextHost("readExtension", hostFailure);
+  const diskFailure = new Error("snapshot-must-not-reread-disk"); runtime.disk.failNext("storage.query", diskFailure);
+  const hostFailure = new Error("snapshot-must-not-reread-binding"); runtime.failNextHost("findChat", hostFailure);
   assert.equal((await runtime.toolCallPolicy(event("read_file", context))).action, "allow");
   assert.deepEqual(ioCounts(runtime), before);
   await assert.rejects(runtime.dispatchDomain("character.get", { id: "default" }), error => error === diskFailure);
-  await assert.rejects(runtime.dispatchDomain("chat.configuration.binding.read", { chatId: context.chatId }), error => error === hostFailure);
+  await assert.rejects(runtime.dispatchDomain("chat.configuration.binding.write", { chatId: context.chatId, selection: "card:default" }), error => error === hostFailure);
 });

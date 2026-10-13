@@ -6,17 +6,17 @@ use serde_json::Value;
 use operit_model::FunctionType::FunctionType;
 use operit_model::ModelConfigData::{ProviderProfile, ResolvedModelConfig};
 use operit_plugin_sdk::toolpkg::ToolPkgHooks::{
-    decodeToolPkgHookResult, ToolPkgAiProviderRegistration,
+    ToolPkgAiProviderRegistration, decodeToolPkgHookResult,
 };
 use operit_providers::runtime_support::{
     ChatConfigurationDisplayResult, ChatConfigurationPurpose, ChatConfigurationRequest,
-    ChatConfigurationResult, ProviderFunctionModelBinding,
-    ProviderMessageTiming, ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
+    ChatConfigurationResult, ProviderFunctionModelBinding, ProviderMessageTiming,
+    ProviderPackageInfo, ProviderRuntimeContext, ProviderRuntimeSupport,
     ProviderRuntimeSupportFuture, ProviderToolPkgAiProviderRegistration,
 };
+use operit_tools::tools::AIToolHandler::AIToolHandler;
 use operit_tools::tools::packTool::RuntimePackageManager::RuntimePackageManager;
 use operit_tools::tools::skill_runtime::SkillRepository::SkillRepository;
-use operit_tools::tools::AIToolHandler::AIToolHandler;
 
 use crate::data::preferences::ApiPreferences::ApiPreferences;
 use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
@@ -40,7 +40,6 @@ impl ProviderRuntimeSupportService {
 pub struct ChatConfigurationApi {
     manager: RuntimePackageManager,
     ownerPackage: String,
-    recordSupport: Arc<dyn operit_tools::runtime_support::ToolRuntimeSupport>,
 }
 
 impl ChatConfigurationApi {
@@ -59,7 +58,6 @@ impl ChatConfigurationApi {
         Ok(Self {
             ownerPackage: selectChatConfigurationOwner(candidates)?,
             manager,
-            recordSupport: toolHandler.runtimeSupport(),
         })
     }
 
@@ -71,38 +69,67 @@ impl ChatConfigurationApi {
     /// Resolves presentation from a real conversation without requiring an executable profile or snapshot.
     pub async fn resolveDisplay(
         &self,
-        mut request: ChatConfigurationRequest,
+        request: ChatConfigurationRequest,
     ) -> Result<ChatConfigurationDisplayResult, String> {
         request.requirePurpose(ChatConfigurationPurpose::Display)?;
-        self.readConversationExtension(&mut request)?;
-        decodeDisplayConfigurationResult(self.invokeRegisteredResolve(request).await?, &self.ownerPackage)
+        decodeDisplayConfigurationResult(
+            self.invokeRegisteredResolve(request).await?,
+            &self.ownerPackage,
+        )
     }
 
-    /// Resolves an existing execution after reading only this owner's canonical extension.
+    /// Resolves an existing execution through the selected owner's plugin datastore.
     pub async fn resolve(
         &self,
-        mut request: ChatConfigurationRequest,
+        request: ChatConfigurationRequest,
     ) -> Result<ChatConfigurationResult, String> {
         request.requirePurpose(ChatConfigurationPurpose::Execution)?;
-        self.readConversationExtension(&mut request)?;
         self.invokeResolve(request).await
     }
 
-    /// Reads only the exact authenticated owner's extension from the canonical persisted chat record.
-    fn readConversationExtension(&self, request: &mut ChatConfigurationRequest) -> Result<(), String> {
-        let chatId = request
-            .chatId
-            .as_deref()
-            .ok_or("Persisted configuration resolve requires chatId")?;
-        requireChatId(chatId)?;
-        let target = operit_plugin_sdk::js_sdk::chat::ChatExtensionTarget::Chat {
-            chatId: chatId.to_string(),
-        };
-        request.chatExtension = self
-            .recordSupport
-            .readChatExtension(&self.ownerPackage, &target)?
-            .map(|value| value.into_iter().collect());
-        Ok(())
+    /// Persists frozen configuration in the authenticated plugin before committing a Core reference.
+    pub async fn storeSnapshot(
+        &self,
+        snapshot: operit_providers::runtime_support::JsonObject,
+    ) -> Result<operit_providers::runtime_support::JsonObject, String> {
+        let value = self
+            .manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.snapshot.store",
+                Value::Object(snapshot),
+            )
+            .await?;
+        let reference = value
+            .as_object()
+            .ok_or("Plugin snapshot storage did not return a reference")?;
+        if reference.len() != 2
+            || reference.get("schemaVersion") != Some(&serde_json::json!(1))
+            || !reference
+                .get("recordId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err("Invalid plugin snapshot reference".into());
+        }
+        Ok(reference.clone())
+    }
+
+    /// Resolves an immutable plugin reference without interpreting business fields in Core.
+    pub async fn readSnapshot(
+        &self,
+        reference: operit_providers::runtime_support::JsonObject,
+    ) -> Result<operit_providers::runtime_support::JsonObject, String> {
+        self.manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.snapshot.read",
+                Value::Object(reference),
+            )
+            .await?
+            .as_object()
+            .cloned()
+            .ok_or("Plugin snapshot reader did not return an object".into())
     }
 
     /// Resolves display data for a creation draft without requiring a nonexistent conversation or execution participant.
@@ -116,7 +143,59 @@ impl ChatConfigurationApi {
             requireChatId(chatId)?;
         }
         request.chatExtension = chatExtension;
-        decodeDisplayConfigurationResult(self.invokeRegisteredResolve(request).await?, &self.ownerPackage)
+        let value = self
+            .manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.draft.resolve",
+                serde_json::to_value(request).map_err(|error| error.to_string())?,
+            )
+            .await?;
+        decodeDisplayConfigurationResult(value, &self.ownerPackage)
+    }
+
+    /// Publishes a prepared plugin binding only after the Core chat transaction succeeds.
+    pub async fn commitDraft(&self, chatId: &str) -> Result<(), String> {
+        let value = self
+            .manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.draft.commit",
+                serde_json::json!({"chatId":chatId}),
+            )
+            .await?;
+        if value != serde_json::json!({"committed":true}) {
+            return Err("Plugin did not acknowledge draft commit".into());
+        }
+        Ok(())
+    }
+
+    /// Discards an explicit prepared draft when an existing empty chat is reused.
+    pub async fn abortDraft(&self, chatId: &str) -> Result<(), String> {
+        let value = self
+            .manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.draft.abort",
+                serde_json::json!({"chatId":chatId}),
+            )
+            .await?;
+        if value != serde_json::json!({"aborted":true}) {
+            return Err("Plugin did not acknowledge draft abort".into());
+        }
+        Ok(())
+    }
+
+    /// Removes the plugin-owned binding as part of a requested Core chat deletion.
+    pub async fn deleteBinding(&self, chatId: &str) -> Result<(), String> {
+        self.manager
+            .invokeToolPkgPublicApi(
+                &self.ownerPackage,
+                "chat.configuration.binding.delete",
+                serde_json::json!({"chatId":chatId}),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Invokes the exact selected declaration and injects its authenticated owner after successful decoding.
@@ -125,13 +204,18 @@ impl ChatConfigurationApi {
         request: ChatConfigurationRequest,
     ) -> Result<ChatConfigurationResult, String> {
         request.requirePurpose(ChatConfigurationPurpose::Execution)?;
-        decodeConfigurationResult(self.invokeRegisteredResolve(request).await?, &self.ownerPackage)
+        decodeConfigurationResult(
+            self.invokeRegisteredResolve(request).await?,
+            &self.ownerPackage,
+        )
     }
 
     /// Invokes one immutable selected registration without choosing a second owner or reinterpreting its result.
-    async fn invokeRegisteredResolve(&self, request: ChatConfigurationRequest) -> Result<Value, String> {
-        self
-            .manager
+    async fn invokeRegisteredResolve(
+        &self,
+        request: ChatConfigurationRequest,
+    ) -> Result<Value, String> {
+        self.manager
             .invokeToolPkgPublicApi(
                 &self.ownerPackage,
                 "chat.configuration.resolve",
@@ -142,15 +226,24 @@ impl ChatConfigurationApi {
 }
 
 /// Rejects plugin-supplied runtime identity and validates display JSON without any execution-profile interpretation.
-fn decodeDisplayConfigurationResult(raw: Value, owner: &str) -> Result<ChatConfigurationDisplayResult, String> {
+fn decodeDisplayConfigurationResult(
+    raw: Value,
+    owner: &str,
+) -> Result<ChatConfigurationDisplayResult, String> {
     if owner.trim().is_empty() {
         return Err("Display configuration owner is not authenticated".to_string());
     }
-    if raw.as_object().is_some_and(|object| object.contains_key("extensionOwner")) {
-        return Err("Display configuration extensionOwner is assigned only by the runtime".to_string());
+    if raw
+        .as_object()
+        .is_some_and(|object| object.contains_key("extensionOwner"))
+    {
+        return Err(
+            "Display configuration extensionOwner is assigned only by the runtime".to_string(),
+        );
     }
-    let mut result: ChatConfigurationDisplayResult = serde_json::from_value(raw).map_err(|error| error.to_string())?;
-    result.extensionOwner=owner.to_string();
+    let mut result: ChatConfigurationDisplayResult =
+        serde_json::from_value(raw).map_err(|error| error.to_string())?;
+    result.extensionOwner = owner.to_string();
     result.validate()?;
     Ok(result)
 }
@@ -267,18 +360,24 @@ impl ProviderRuntimeSupport for RuntimeProviderSupport {
         let tool_handler = self.tool_handler.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let scheduled = operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost()
-            .scheduleHostRuntimeAsyncTask("resolve-chat-configuration", Box::new(move || {
-                Box::pin(async move {
-                    let result = async {
-                        let api = ChatConfigurationApi::ready(&tool_handler).await?;
-                        api.resolve(request).await
-                    }.await;
-                    let _ = sender.send(result);
-                })
-            }));
+            .scheduleHostRuntimeAsyncTask(
+                "resolve-chat-configuration",
+                Box::new(move || {
+                    Box::pin(async move {
+                        let result = async {
+                            let api = ChatConfigurationApi::ready(&tool_handler).await?;
+                            api.resolve(request).await
+                        }
+                        .await;
+                        let _ = sender.send(result);
+                    })
+                }),
+            );
         Box::pin(async move {
             scheduled.map_err(|error| format!("Chat configuration scheduling failed: {error}"))?;
-            receiver.await.map_err(|error| format!("Chat configuration execution ended without a result: {error}"))?
+            receiver.await.map_err(|error| {
+                format!("Chat configuration execution ended without a result: {error}")
+            })?
         })
     }
 
@@ -449,7 +548,10 @@ fn providerRegistrationToProvider(
 
 #[cfg(test)]
 mod chat_configuration_contract_tests {
-    use super::{decodeConfigurationResult, decodeDisplayConfigurationResult, requireChatId, selectChatConfigurationOwner};
+    use super::{
+        decodeConfigurationResult, decodeDisplayConfigurationResult, requireChatId,
+        selectChatConfigurationOwner,
+    };
 
     /// Selects arbitrary uniquely registered owners without a built-in identity whitelist.
     #[test]
@@ -512,14 +614,14 @@ mod chat_configuration_contract_tests {
     /// Authenticates a presentation descriptor independently of every execution binding.
     #[test]
     fn display_decode_authenticates_owner_and_never_accepts_execution_profile() {
-        let raw=serde_json::json!({"contextKey":"opaque","identity":{"title":"Display","avatarUri":null},"participants":[],"initialMessages":[]});
-        let display=decodeDisplayConfigurationResult(raw.clone(),"arbitrary.owner").unwrap();
-        assert_eq!(display.extensionOwner,"arbitrary.owner");
-        assert_eq!(serde_json::to_value(display).unwrap(),raw);
-        assert!(decodeConfigurationResult(raw.clone(),"arbitrary.owner").is_err());
-        let mut forged=raw.clone();forged["extensionOwner"]=serde_json::json!("forged.owner");
-        assert!(decodeDisplayConfigurationResult(forged,"arbitrary.owner").is_err());
-        assert!(decodeDisplayConfigurationResult(raw," ").is_err());
+        let raw = serde_json::json!({"contextKey":"opaque","identity":{"title":"Display","avatarUri":null},"participants":[],"initialMessages":[]});
+        let display = decodeDisplayConfigurationResult(raw.clone(), "arbitrary.owner").unwrap();
+        assert_eq!(display.extensionOwner, "arbitrary.owner");
+        assert_eq!(serde_json::to_value(display).unwrap(), raw);
+        assert!(decodeConfigurationResult(raw.clone(), "arbitrary.owner").is_err());
+        let mut forged = raw.clone();
+        forged["extensionOwner"] = serde_json::json!("forged.owner");
+        assert!(decodeDisplayConfigurationResult(forged, "arbitrary.owner").is_err());
+        assert!(decodeDisplayConfigurationResult(raw, " ").is_err());
     }
-
 }

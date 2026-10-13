@@ -106,10 +106,16 @@ class _ComposeDragTarget extends StatelessWidget {
   final ComposeDslWebViewActionDispatcher onAction;
   final Widget child;
 
+  /// Applies declarative type, exclusion, and inclusion filters to a generic payload.
   bool _accepts(_ComposeDragPayload payload) {
     if (props['enabled'] == false) return false;
     final types = props['acceptedTypes'];
     if (types is List && !types.contains(payload.type)) return false;
+    final excluded = props['excludedData'];
+    if (excluded is List &&
+        excluded.any((value) => _composeInputEquals(value, payload.data))) {
+      return false;
+    }
     final values = props['acceptedData'];
     return values is! List ||
         values.any((value) => _composeInputEquals(value, payload.data));
