@@ -1270,8 +1270,11 @@ impl JsExecutionHost for AIToolHandler {
             }
             let host = self.clone();
             let tool = crate::tools::DeviceTools::tool_from_request(&request);
+            // Mirrors the AI path: interception hooks read the invocation scope, so the
+            // device path must capture and install one before the JS host awaits it.
+            let context = ToolInvocationContext::capture(self.clone());
             let preflight = Box::pin(async move {
-                match host.checkToolInterception(&tool).await? {
+                match context.scope(host.checkToolInterception(&tool)).await? {
                     AIToolHookDecision::Block(reason) => Err(reason),
                     _ => Ok(()),
                 }

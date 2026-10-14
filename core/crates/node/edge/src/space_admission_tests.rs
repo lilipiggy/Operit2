@@ -43,8 +43,8 @@ impl Storage {
         self.update(|files| { files.insert(path.into(),bytes.into()); })
     }
 }
-impl RuntimeStorageHost for Storage {
-    fn runtimeRootDir(&self) -> Option<std::path::PathBuf> { None }
+impl RuntimeStorageHost for Storage {    fn runtimeRootDir(&self) -> Option<std::path::PathBuf> { None }
+
     fn workspaceRootDir(&self) -> Option<std::path::PathBuf> { None }
     fn readBytes(&self, path: &str) -> HostResult<Vec<u8>> { self.0.lock().unwrap().get(path).cloned().ok_or_else(|| HostError::new("missing")) }
     fn writeBytes(&self, path: &str, bytes: &[u8]) -> HostResult<()> { self.write(path, bytes) }
@@ -58,6 +58,29 @@ impl RuntimeStorageHost for Storage {
     }
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>> { Ok(self.0.lock().unwrap().iter().filter(|(path, _)| path.starts_with(prefix)).map(|(path, bytes)| RuntimeStorageEntry { path: path.clone(), isDirectory: false, size: bytes.len() as i64 }).collect()) }
 }
+
+/// Reads one peer state preferences file the way the product store does after
+/// the native JSON migration: structured JSON entries keyed by record id, not
+/// the pre-migration `{id: "<record json string>"}` blobs.
+fn storedRecords(
+    storage: &Arc<Storage>,
+    path: &str,
+) -> BTreeMap<String, serde_json::Value> {
+    let preferences = operit_store::PreferencesDataStore::CoreNodeStateStore::newWithStorage(
+        storage.clone(),
+        path,
+    )
+    .data()
+    .expect("peer state preferences must parse");
+    preferences
+        .iterEntries()
+        .filter(|(name, _)| {
+            *name != operit_store::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME
+        })
+        .map(|(name, value)| (name.to_owned(), value.clone()))
+        .collect()
+}
+
 fn node(bounded: bool) -> (Arc<Storage>, Arc<EdgePeerRouter>, Arc<HostRuntimePeerService>, Arc<NodeSpaceService>) {
     node_from_storage(Arc::new(Storage(Mutex::default(), bounded, Mutex::default(), Mutex::default())))
 }
@@ -135,9 +158,7 @@ async fn paired_edge_requires_explicit_approval_and_restores_space() {
         assert!(!a_space.networkControlStore().nodeHasCapability(&a_id, "network.approval", None).unwrap());
         print_size("approved", &b_store);
         assert!(b_store.list("runtime/sync").unwrap().is_empty(), "endpoint approval must not create replica clocks or logs");
-        let receipt: serde_json::Value = serde_json::from_slice(&b_store.readBytes("runtime/link_access/space_merge_inbound.preferences.json").unwrap()).unwrap();
-        for value in receipt.as_object().unwrap().values() {
-            let record: serde_json::Value = serde_json::from_str(value.as_str().unwrap()).unwrap();
+        for record in storedRecords(&b_store, "runtime/link_access/space_merge_inbound.preferences.json").into_values() {
             if !record["accepted"].is_null() { assert_eq!(record["accepted"]["controlOperations"].as_array().unwrap().len(), 0); }
         }
         let restored = NodeSpaceService::new(b_store.clone(), b_peer.clone()).unwrap();
@@ -172,18 +193,16 @@ async fn failed_local_cancellation_preserves_pending_request_and_can_retry() {
     *storage.3.lock().unwrap() = Some(0);
     let error = applicant.cancelDeviceSpaceJoin(request.requestId.clone()).await.unwrap_err();
     assert!(error.contains("injected approval persistence failure"), "{error}");
-    let saved: BTreeMap<String, String> = serde_json::from_slice(&storage.readBytes(
-        "runtime/link_access/space_merge_outbound.preferences.json").unwrap()).unwrap();
-    let record: serde_json::Value = serde_json::from_str(&saved[&request.requestId]).unwrap();
+    let saved = storedRecords(&storage, "runtime/link_access/space_merge_outbound.preferences.json");
+    let record = saved[&request.requestId].clone();
     assert_eq!(record["request"]["status"], "pending");
     assert_eq!(gateway.incomingDeviceSpaceJoins().await.unwrap()[0].status, SpaceJoinStatus::Pending);
     assert_eq!(applicant.spaceStore().space().unwrap(), before);
 
     let cancelled = applicant.cancelDeviceSpaceJoin(request.requestId.clone()).await.unwrap();
     assert_eq!(cancelled.status, SpaceJoinStatus::Cancelled);
-    let saved: BTreeMap<String, String> = serde_json::from_slice(&storage.readBytes(
-        "runtime/link_access/space_merge_outbound.preferences.json").unwrap()).unwrap();
-    let record: serde_json::Value = serde_json::from_str(&saved[&request.requestId]).unwrap();
+    let saved = storedRecords(&storage, "runtime/link_access/space_merge_outbound.preferences.json");
+    let record = saved[&request.requestId].clone();
     assert_eq!(record["request"]["status"], "cancelled");
     assert!(gateway.incomingDeviceSpaceJoins().await.unwrap().is_empty());
     assert_eq!(applicant.spaceStore().space().unwrap(), before);
@@ -821,9 +840,9 @@ mod core_edge {
                 operit_link::toCoreValue(serde_json::json!({"requestId": request.requestId,
                     "assignmentVersion": request.assignmentVersion, "approve": true})).unwrap(),
             )).await.unwrap();
-            let records: BTreeMap<String, String> = serde_json::from_slice(&edge.storage.readBytes(
-                "runtime/link_access/space_merge_inbound.preferences.json").unwrap()).unwrap();
-            let record: serde_json::Value = serde_json::from_str(&records[&request.requestId]).unwrap();
+            let records = storedRecords(&edge.storage,
+                "runtime/link_access/space_merge_inbound.preferences.json");
+            let record = records[&request.requestId].clone();
             let source_space: operit_store::CoreSpaceStore::CoreSpace = serde_json::from_value(record["source"]["space"].clone()).unwrap();
             let profiles: Vec<CoreSpaceDeviceProfile> = serde_json::from_value(record["source"]["deviceProfiles"].clone()).unwrap();
             edge.service.spaceStore().importDeviceProfiles(profiles).unwrap();
@@ -895,9 +914,9 @@ mod core_edge {
             edge.peers.stop().await.unwrap();
             wait_for_peer_availability(&core.peers, &edge_id, false).await;
             assert!(core.service.cancelDeviceSpaceJoin(request.requestId.clone()).await.is_err());
-            let records: BTreeMap<String, String> = serde_json::from_slice(&core.storage.readBytes(
-                "runtime/link_access/space_merge_outbound.preferences.json").unwrap()).unwrap();
-            let saved: serde_json::Value = serde_json::from_str(&records[&request.requestId]).unwrap();
+            let records = storedRecords(&core.storage,
+                "runtime/link_access/space_merge_outbound.preferences.json");
+            let saved = records[&request.requestId].clone();
             assert_eq!(saved["cancelRequested"], true, "lost cancellation must retain durable intent");
             assert_eq!(core.service.outgoingDeviceSpaceJoins().unwrap().into_iter()
                 .find(|saved| saved.requestId == request.requestId).unwrap().status, SpaceJoinStatus::Pending);
@@ -1004,9 +1023,8 @@ mod core_edge {
             assert_eq!(stuck.reviewerDeviceId, None, "the offline old administrator cannot review");
             assert!(edge.service.incomingDeviceSpaceJoins().await.unwrap().is_empty());
             assert_eq!(new.service.cancelDeviceSpaceJoin(stuck.requestId).await.unwrap().status, SpaceJoinStatus::Cancelled);
-            let saved: BTreeMap<String, String> = serde_json::from_slice(&edge.storage.readBytes(
-                "runtime/link_access/space_merge_inbound.preferences.json").unwrap()).unwrap();
-            let receipt: serde_json::Value = serde_json::from_str(saved.values().next().unwrap()).unwrap();
+            let receipt = storedRecords(&edge.storage,
+                "runtime/link_access/space_merge_inbound.preferences.json").into_values().next().unwrap();
             for field in ["deviceProfiles", "topology", "controlOperations"] {
                 assert!(receipt["source"][field].as_array().unwrap().is_empty(), "cancelled request retained a complete source snapshot: {field}");
             }
@@ -1055,9 +1073,9 @@ mod core_edge {
             let request = new.service.requestDeviceSpaceJoin(edge_id.clone()).await.unwrap();
             assert_eq!(request.status, SpaceJoinStatus::Pending);
             assert_eq!(request.reviewerDeviceId, Some(edge_id.clone()));
-            let saved: BTreeMap<String, String> = serde_json::from_slice(&new.storage.readBytes(
-                "runtime/link_access/space_merge_outbound.preferences.json").unwrap()).unwrap();
-            let record: serde_json::Value = serde_json::from_str(&saved[&request.requestId]).unwrap();
+            let saved = storedRecords(&new.storage,
+                "runtime/link_access/space_merge_outbound.preferences.json");
+            let record = saved[&request.requestId].clone();
             assert_eq!(record["source"]["deviceProfiles"].as_array().unwrap().len(), 1, "unrelated historical profiles entered the admission wire snapshot");
             let core_policy = new.service.networkControlStore().currentSpaceOperations().unwrap();
             let core_files = new.storage.0.lock().unwrap().clone();

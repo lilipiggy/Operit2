@@ -181,7 +181,7 @@ async fn device_tools_runtime_executes_permissions_hooks_binary_cancellation_and
     handler.registerAsyncTool(
         "delayed_probe".into(),
         Box::new(AsyncFnToolExecutor {
-            invoke: Arc::new(move |tool| {
+            invoke: Arc::new(move |tool, _context| {
                 let started = started.clone();
                 let dropped = dropped.clone();
                 Box::pin(async move {
