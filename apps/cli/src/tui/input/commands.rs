@@ -207,12 +207,6 @@ const COMMAND_SPECS: &[TuiCommandSpec] = &[
         options: &[],
     },
     TuiCommandSpec {
-        name: "network token",
-        usage: "/network token",
-        description_key: TuiTextKey::CommandNetworkTokenDescription,
-        options: &[],
-    },
-    TuiCommandSpec {
         name: "network prompts",
         usage: "/network prompts",
         description_key: TuiTextKey::CommandNetworkPromptsDescription,
@@ -244,7 +238,7 @@ const COMMAND_SPECS: &[TuiCommandSpec] = &[
     },
     TuiCommandSpec {
         name: "network pair",
-        usage: "/network pair <address> <http|ws|tcp|serial|bluetooth> [--token <token>]",
+        usage: "/network pair <address> <http|ws|tcp|serial|bluetooth>",
         description_key: TuiTextKey::CommandNetworkPairDescription,
         options: &[],
     },

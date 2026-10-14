@@ -1120,18 +1120,17 @@
   "settingsRuntimeRemoteDescription": "Directly paired devices. Pairing establishes a connection; joining a device space enables shared data and routing.",
   "settingsRuntimePairRemote": "Connect another device",
   "settingsRuntimeDiscoveredEdges": "ESP32 devices",
-  "settingsRuntimeEdgeEndpointTokenRequired": "Edge endpoint and token are required",
   "settingsRuntimeEdgeEndpointRequired": "Edge endpoint is required",
   "settingsRuntimePairingCodeRequired": "Pairing code is required",
   "settingsRuntimeNoPairedRemote": "No connected devices yet.",
   "settingsRuntimeConnectionInitiatedByOtherDevice": "Connection initiated by the other device",
-  "settingsRuntimePairToken": "Connection token",
-  "settingsRuntimePairTokenHint": "Required off-LAN; leave empty for devices on the same network",
   "settingsRuntimePairCode": "Pairing code",
   "settingsRuntimeStartPairing": "Start connection",
   "settingsRuntimeFinishPairing": "Finish connection",
   "settingsRuntimeBaseUrl": "Device address",
   "settingsRuntimeTcpAddressHint": "host:port, for example 192.168.1.10:37195",
+  "settingsRuntimeTransportAuto": "Auto (recommended)",
+  "settingsRuntimeTransportAutoHint": "Enter host:port; the carrier (HTTP/WebSocket/TCP) is detected automatically",
   "settingsRuntimeConnectionFailed": "Device connection failed: {error}",
   "@settingsRuntimeConnectionFailed": {
     "placeholders": {
@@ -1167,7 +1166,7 @@
   "settingsRuntimeDeviceInCurrentSpace": "In the current device space",
   "settingsRuntimeDiscoverSpaces": "Discover device spaces",
   "settingsRuntimeDiscoverSpacesDescription": "Nearby devices are grouped by device space. Expand a device space to connect directly to one of its devices.",
-  "settingsRuntimeWebPairDescription": "Enter another device's address and pairing token to connect this browser as an active pairing client.",
+  "settingsRuntimeWebPairDescription": "Enter another device's address and confirm the pairing code to connect this browser as an active pairing client.",
   "settingsRuntimeDiscoveredSpaceSummary": "{memberCount} devices total · {nearbyCount} nearby",
   "@settingsRuntimeDiscoveredSpaceSummary": {
     "placeholders": {
@@ -2006,12 +2005,6 @@
     }
   },
 
-  "settingsPeerToken": "Connection token",
-  "settingsPeerTokenHelp": "Remote connections require this token.",
-  "settingsPeerCopyToken": "Copy token",
-  "settingsPeerRefreshToken": "Refresh token",
-  "settingsPeerTokenCopied": "Connection token copied.",
-  "settingsPeerTokenRequired": "Enter or refresh a connection token.",
   "settingsPeerPortModeHelp": "Fixed mode keeps the entered IP and port for tunnels and port forwarding. A busy fixed port reports an error without changing the address.",
   "settingsPeerPortMode": "Port allocation",
   "settingsPeerPortModeFixed": "Fixed address and port",

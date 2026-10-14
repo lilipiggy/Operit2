@@ -161,7 +161,16 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     return chat;
   }
   function renameChat(id: string): void { dialog("renameChat", id, chatFor(id).title); }
-  function deleteChat(id: string): void { dialog("deleteChat", id, chatFor(id).title); }
+  /** Stages confirmation only for a conversation deletion requested by swiping. */
+  function confirmSwipeDelete(id: string): void { dialog("deleteChat", id, chatFor(id).title); }
+  /** Deletes an explicitly selected conversation without another confirmation dialog. */
+  async function deleteChat(id: string): Promise<void> {
+    await run(async () => {
+      chatFor(id);
+      await Tools.Chat.deleteChat(id);
+      update({ dialog: null }); await refresh();
+    });
+  }
   function longPress(id: string): void { dialog("chatActions", id, chatFor(id).title); }
   async function changeFlag(id: string, pinned: boolean): Promise<void> {
     await run(async () => {
@@ -206,7 +215,7 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
           if (index === 0) renameChat(id);
           else if (index === 1) await changeFlag(id, true);
           else if (index === 2) await changeFlag(id, false);
-          else if (index === 3) deleteChat(id);
+          else if (index === 3) await deleteChat(id);
         },
       }, ctx.UI.Icon({ name: "MoreHoriz", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }));
     }
@@ -317,7 +326,7 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
   if (data !== null) rows.push(...nativeSidebarRows(ctx, current.current, { data, query: state.query,
     collapsed: state.collapsed, expandedGroups: state.expandedGroups }, {
       activate, toggleSection, toggleGroup,
-      menu, longPress, rename: renameChat, deleteChat, drop,
+      menu, longPress, rename: renameChat, confirmSwipeDelete, drop,
     }, state.defaultAvatar));
   else if (state.loading) rows.push(ctx.UI.Box({ fillMaxWidth: true, height: 80, contentAlignment: "center" },
     ctx.UI.LoadingIndicator({ size: 24 })));

@@ -108,6 +108,60 @@ fn workspace_preferences_do_not_restore_an_unbound_chat() {
     histories.unsubscribe(subscription);
 }
 
+/// Deletes an unlocked orphaned workspace chat, its messages, selection, and binding without resolving the workspace.
+#[test]
+fn missing_workspace_chat_deletion_preserves_lock_policy_and_removes_history() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (manager, database, workspace) = workspaceMetadataFixture("workspace-metadata-delete");
+    manager.bindingStore.createLocal(CHAT_ID).unwrap();
+    manager.setCurrentChatId(CHAT_ID.to_string()).unwrap();
+    let message = ChatMessage::new_with_markdown_timestamp(
+        "user".to_string(),
+        "Orphaned conversation".to_string(),
+        MESSAGE_TIMESTAMP,
+    );
+    database
+        .messageDao()
+        .insertMessage(MessageEntity::fromChatMessage(
+            CHAT_ID.to_string(),
+            message,
+            1,
+            0,
+        ))
+        .unwrap();
+    let histories = manager.chatHistoriesFlow().unwrap();
+    assert_eq!(
+        histories.value()[0].workspaceId.as_deref(),
+        Some(workspace.id.as_str())
+    );
+    assert_eq!(histories.value()[0].workspaceName, None);
+    assert!(manager
+        .workspaceStore
+        .getById(&workspace.id)
+        .unwrap()
+        .is_none());
+
+    manager.updateChatLocked(CHAT_ID.to_string(), true).unwrap();
+    assert!(!manager.deleteChatHistory(CHAT_ID.to_string()).unwrap());
+    assert!(database.chatDao().getChatById(CHAT_ID).unwrap().is_some());
+    assert!(manager.bindingStore.contains(CHAT_ID).unwrap());
+
+    manager
+        .updateChatLocked(CHAT_ID.to_string(), false)
+        .unwrap();
+    assert!(manager.deleteChatHistory(CHAT_ID.to_string()).unwrap());
+    assert!(database.chatDao().getChatById(CHAT_ID).unwrap().is_none());
+    assert!(database
+        .messageDao()
+        .getMessagesForChat(CHAT_ID)
+        .unwrap()
+        .is_empty());
+    assert!(histories.value().is_empty());
+    assert_eq!(manager.currentChatIdFlow().unwrap(), None);
+    assert!(!manager.bindingStore.contains(CHAT_ID).unwrap());
+    assert!(manager.workspaceStore.getAll().unwrap().is_empty());
+}
+
 /// Creates one original reply and ordered variants with colliding part identities.
 fn variantFixture(name: &str, alternateCount: i32) -> Arc<AppDatabase> {
     let (_, database, _) = openTestStore(name);

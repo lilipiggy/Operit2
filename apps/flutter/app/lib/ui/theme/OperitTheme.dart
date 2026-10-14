@@ -389,7 +389,7 @@ class OperitThemeController {
   final VoidCallback _onChanged;
   final Future<void> Function(ThemeMode) _saveStartupThemeMode;
   final UserPreferencesManager _preferencesManager;
-  StreamSubscription<Map<String, String>>? _themePreferencesSubscription;
+  StreamSubscription<Map<String, Object?>>? _themePreferencesSubscription;
   ThemePreferenceSnapshot _themePreferenceSnapshot =
       UserPreferencesManager.defaultThemePreferenceSnapshot;
   int _themePreferenceRevision = 0;

@@ -138,7 +138,7 @@ fn version27_selected_unbound_history_starts_and_remains_browsable() {
             .first()
             .unwrap()
             .get(&currentKey)
-            .map(String::as_str),
+            .and_then(serde_json::Value::as_str),
         Some("v27-chat")
     );
     assert_eq!(
@@ -147,7 +147,7 @@ fn version27_selected_unbound_history_starts_and_remains_browsable() {
             .first()
             .unwrap()
             .get(&untouchedKey)
-            .map(String::as_str),
+            .and_then(serde_json::Value::as_str),
         Some("kept-user-setting")
     );
     let beforeInvalid = fs::read(paths.current_chat_id_preferences_path()).unwrap();

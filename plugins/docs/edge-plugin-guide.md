@@ -84,7 +84,7 @@ main 导出 `on_edge_event(event)`，其 `event.eventPayload` 是
 
 1. 从仓库根目录运行 `npm run build --prefix tools/esp32-editor` 生成 C/Wasm 预览，
    再运行 `npm start --prefix tools/esp32-editor`，打开本地 8766 端口的页面。
-2. 网页自动启动 Rust 模拟设备。用面板 TCP/Token 在 Core 配对，在设备屏幕读取
+2. 网页自动启动 Rust 模拟设备。用面板 TCP 地址 在 Core 配对，在设备屏幕读取
    配对码，并批准 Core 发起的设备空间申请。配对本身不代表 Binding 就绪。
 3. 在 Core 的「内置更多包」导入并启用 `com.operit.edge_pixel_pet`。
    配置 `EDGE_SCENE_NODE_ID`，或在工具参数中显式传 `node_id`。

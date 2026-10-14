@@ -95,7 +95,6 @@ export interface SimulatorStatus {
     ready?: boolean;
     running?: boolean;
     output?: string;
-    token?: string;
     device?: DeviceState | null;
 }
 

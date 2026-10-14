@@ -11,7 +11,7 @@ class SwipeActions extends StatefulWidget {
     this.onStartAction,
     this.onEndAction,
     this.enabled = true,
-    this.actionThreshold = 0.40,
+    this.actionThreshold = 0.50,
     required this.background,
     required this.secondaryBackground,
     required this.child,
@@ -20,6 +20,8 @@ class SwipeActions extends StatefulWidget {
   final VoidCallback? onStartAction;
   final VoidCallback? onEndAction;
   final bool enabled;
+
+  /// Fraction of the row width required at release to invoke an action.
   final double actionThreshold;
   final Widget background;
   final Widget secondaryBackground;
@@ -146,9 +148,14 @@ class _SwipeActionsState extends State<SwipeActions>
               children: <Widget>[
                 if (_offset.value != 0)
                   Positioned.fill(
-                    child: renameSide
-                        ? widget.background
-                        : widget.secondaryBackground,
+                    child: IgnorePointer(
+                      child: ClipRect(
+                        clipper: _SwipeBackgroundClipper(_offset.value),
+                        child: renameSide
+                            ? widget.background
+                            : widget.secondaryBackground,
+                      ),
+                    ),
                   ),
                 Transform.translate(
                   offset: Offset(_offset.value, 0),
@@ -161,6 +168,31 @@ class _SwipeActionsState extends State<SwipeActions>
       ),
     );
   }
+}
+
+/// Paints the action background only where the translated row exposes it.
+class _SwipeBackgroundClipper extends CustomClipper<Rect> {
+  /// Creates a clip from the physical horizontal displacement of the row.
+  const _SwipeBackgroundClipper(this.offset);
+
+  final double offset;
+
+  /// Clips the full-width background to the strip uncovered by the foreground.
+  @override
+  Rect getClip(Size size) {
+    final revealedWidth = offset.abs().clamp(0.0, size.width);
+    return Rect.fromLTWH(
+      offset > 0 ? 0 : size.width - revealedWidth,
+      0,
+      revealedWidth,
+      size.height,
+    );
+  }
+
+  /// Updates the painted strip when the drag or settling animation advances.
+  @override
+  bool shouldReclip(_SwipeBackgroundClipper oldClipper) =>
+      offset != oldClipper.offset;
 }
 
 /// Arbitrates deliberate horizontal pointer drags within the original row.
@@ -200,7 +232,7 @@ class _SwipeRecognizer extends HorizontalDragGestureRecognizer {
     super.addAllowedPointer(event);
   }
 
-  /// Rejects out-of-bounds or predominantly vertical motion permanently.
+  /// Rejects leaving the row, while allowing a half-width swipe to end on its edge.
   @override
   void handleEvent(PointerEvent event) {
     if (event.pointer != _pointer) {
@@ -211,7 +243,12 @@ class _SwipeRecognizer extends HorizontalDragGestureRecognizer {
       final verticalIntent =
           _movement.dy.abs() >= kTouchSlop &&
           _movement.dx.abs() < _movement.dy.abs() * _horizontalDominance;
-      if (!_bounds.contains(event.position) || verticalIntent) {
+      final outside =
+          event.position.dx < _bounds.left ||
+          event.position.dx > _bounds.right ||
+          event.position.dy < _bounds.top ||
+          event.position.dy >= _bounds.bottom;
+      if (outside || verticalIntent) {
         onLeaveBounds();
         super.rejectGesture(event.pointer);
         return;

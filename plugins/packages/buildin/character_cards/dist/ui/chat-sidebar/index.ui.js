@@ -1452,13 +1452,13 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
           gap(2),
           OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:44399",[{ weight: 1, hoverBackground: colors.onSurfaceVariant.copy({ alpha: 0.07 }), shape: { cornerRadius: m.chatRadius } },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:44561",[{
               key: "sidebar-chat-swipe-" + chat.id,
-              actionThreshold: 0.4,
+              actionThreshold: 0.5,
               height: 31,
               modifier: ctx.Modifier.clip({ cornerRadius: m.chatRadius }),
               onStartAction: () => actions.rename(chat.id),
-              onEndAction: () => actions.deleteChat(chat.id),
-              startBackground: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:44925",[{ fillMaxSize: true, paddingStart: 12, background: colors.primary, contentAlignment: "start" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45065",[{ name: "Edit", size: m.swipeIconSize, width: m.swipeIconSize, height: m.swipeIconSize, tint: colors.onPrimary }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)),
-              endBackground: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45237",[{ fillMaxSize: true, paddingEnd: 12, background: colors.error, contentAlignment: "end" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45371",[{ name: "Delete", size: m.swipeIconSize, width: m.swipeIconSize, height: m.swipeIconSize, tint: colors.onError }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs))
+              onEndAction: () => actions.confirmSwipeDelete(chat.id),
+              startBackground: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:44933",[{ fillMaxSize: true, paddingStart: 12, background: colors.primary, contentAlignment: "start" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45073",[{ name: "Edit", size: m.swipeIconSize, width: m.swipeIconSize, height: m.swipeIconSize, tint: colors.onPrimary }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)),
+              endBackground: OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45245",[{ fillMaxSize: true, paddingEnd: 12, background: colors.error, contentAlignment: "end" },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:45379",[{ name: "Delete", size: m.swipeIconSize, width: m.swipeIconSize, height: m.swipeIconSize, tint: colors.onError }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs))
             },surface],(...__operitArgs)=>ctx.UI.SwipeActions(...__operitArgs))],(...__operitArgs)=>ctx.UI.HoverRegion(...__operitArgs))
         ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))],(...__operitArgs)=>ctx.UI.HoverRegion(...__operitArgs))],(...__operitArgs)=>ctx.UI.DragTarget(...__operitArgs));
   }
@@ -1468,7 +1468,7 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
     const preview = query !== "" || expanded ? matches : matches.filter((chat, index) => index < m.previewLimit || chat.pinned || current.chatSidebar.currentChatId === chat.id || current.chatSidebar.activeStreamingChatIds.includes(chat.id));
     const result = preview.map((chat) => chatRow(chat, section, groupId));
     const hidden = matches.filter((chat) => !preview.includes(chat)).length;
-    if (query === "" && (hidden > 0 || expanded && matches.length > m.previewLimit)) result.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46337",[{
+    if (query === "" && (hidden > 0 || expanded && matches.length > m.previewLimit)) result.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46345",[{
       key: "sidebar-preview-" + id2,
       fillMaxWidth: true,
       paddingStart: m.chatStart,
@@ -1479,14 +1479,14 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
       spacing: 8,
       onClick: () => actions.toggleGroup("preview:" + id2)
     },[
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46641",[{ name: expanded ? "ExpandLess" : "ExpandMore", size: 18, tint: colors.onSurfaceVariant.copy({ alpha: 0.72 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46773",[{ text: expanded ? "\u6536\u8D77" : "\u5C55\u5F00\u66F4\u591A " + hidden, style: "labelMedium", fontWeight: "600", color: colors.onSurfaceVariant.copy({ alpha: 0.72 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46649",[{ name: expanded ? "ExpandLess" : "ExpandMore", size: 18, tint: colors.onSurfaceVariant.copy({ alpha: 0.72 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:46781",[{ text: expanded ? "\u6536\u8D77" : "\u5C55\u5F00\u66F4\u591A " + hidden, style: "labelMedium", fontWeight: "600", color: colors.onSurfaceVariant.copy({ alpha: 0.72 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs)));
     return result;
   }
   function category(section) {
     const collapsed = state.collapsed.includes(section.id);
-    const avatar = section.kind === "card" ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47124",[{
+    const avatar = section.kind === "card" ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47132",[{
       key: "sidebar-avatar-" + section.id,
       uri: section.avatarUri ?? defaultAvatar ?? "",
       width: m.categoryAvatar,
@@ -1494,25 +1494,25 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
       contentScale: "crop",
       contentDescription: section.title,
       modifier: ctx.Modifier.clip({ type: "circle" })
-    }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47430",[{
+    }],(...__operitArgs)=>ctx.UI.Image(...__operitArgs)) : OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47438",[{
         width: m.categoryAvatar,
         height: m.categoryAvatar,
         contentAlignment: "center",
         background: colors.surfaceContainerLow.copy({ alpha: 0.72 }),
         backgroundShape: { type: "circle" }
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47682",[{ name: section.kind === "group" ? "Groups" : "AccountTree", size: 14, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
-    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47816",[{
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47690",[{ name: section.kind === "group" ? "Groups" : "AccountTree", size: 14, tint: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs));
+    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:47824",[{
         key: "sidebar-section-" + section.id,
         fillMaxWidth: true,
         paddingStart: m.categoryStart,
         paddingEnd: m.categoryEnd,
         paddingTop: 10,
         paddingBottom: 5
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48051",[{
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48059",[{
           key: "sidebar-category-drop-" + section.id,
           acceptedTypes: [dragType(section)],
           onDrop: (id2) => actions.drop(String(id2), section.id, null)
-        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48270",[{
+        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48278",[{
           fillMaxWidth: true,
           verticalAlignment: "center",
           height: 24,
@@ -1521,7 +1521,7 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
         },[
           avatar,
           gap(8),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48567",[{
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48575",[{
             text: section.title,
             style: "titleSmall",
             fontWeight: "700",
@@ -1531,14 +1531,14 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
             color: colors.onSurface
           }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
           gap(8),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48873",[{ text: String(section.chats.length), style: "labelSmall", fontWeight: "700", color: colors.onSurfaceVariant.copy({ alpha: 0.64 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49030",[{ weight: 1, paddingHorizontal: 10, height: 2, startColor: colors.outlineVariant.copy({ alpha: 0.62 }), endColor: colors.outlineVariant.copy({ alpha: 0 }) }],(...__operitArgs)=>ctx.UI.GradientRule(...__operitArgs)),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49219",[{ name: collapsed ? "KeyboardArrowDown" : "KeyboardArrowUp", size: 23, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:48881",[{ text: String(section.chats.length), style: "labelSmall", fontWeight: "700", color: colors.onSurfaceVariant.copy({ alpha: 0.64 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49038",[{ weight: 1, paddingHorizontal: 10, height: 2, startColor: colors.outlineVariant.copy({ alpha: 0.62 }), endColor: colors.outlineVariant.copy({ alpha: 0 }) }],(...__operitArgs)=>ctx.UI.GradientRule(...__operitArgs)),
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49227",[{ name: collapsed ? "KeyboardArrowDown" : "KeyboardArrowUp", size: 23, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
         ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))],(...__operitArgs)=>ctx.UI.DragTarget(...__operitArgs))],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
   }
   function groupRow(group, section, ungrouped = false) {
     const expanded = !state.collapsed.includes("group:" + group.id);
-    const groupBody = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49535",[{
+    const groupBody = OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:49543",[{
       fillMaxWidth: true,
       verticalAlignment: "center",
       paddingStart: 12,
@@ -1548,29 +1548,29 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
       ...{ background: colors.surfaceContainerLow.copy({ alpha: 0.72 }), backgroundShape: { cornerRadius: m.groupRadius }, modifier: ctx.Modifier.border(1, colors.outlineVariant.copy({ alpha: 0.24 }), { cornerRadius: m.groupRadius }) },
       onClick: () => actions.toggleSection("group:" + group.id)
     },[
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50015",[{ name: "FolderOutlined", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.76 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50023",[{ name: "FolderOutlined", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.76 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
       gap(7),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50139",[{ text: group.name, weight: 1, style: "labelLarge", fontWeight: "700", maxLines: 1, overflow: "ellipsis", color: colors.onSurface.copy({ alpha: 1 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
-      ...group.pinned ? [gap(4), OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50337",[{ name: "PushPinRounded", size: 12, tint: colors.onSurfaceVariant.copy({ alpha: 0.65 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))] : [],
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50147",[{ text: group.name, weight: 1, style: "labelLarge", fontWeight: "700", maxLines: 1, overflow: "ellipsis", color: colors.onSurface.copy({ alpha: 1 }) }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)),
+      ...group.pinned ? [gap(4), OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50345",[{ name: "PushPinRounded", size: 12, tint: colors.onSurfaceVariant.copy({ alpha: 0.65 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))] : [],
       gap(2),
-      ungrouped ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50479",[{ width: 24, height: 24 },actions.menu("ungrouped", section.id)],(...__operitArgs)=>ctx.UI.HoverOnly(...__operitArgs)) : more("group", group.id),
+      ungrouped ? OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50487",[{ width: 24, height: 24 },actions.menu("ungrouped", section.id)],(...__operitArgs)=>ctx.UI.HoverOnly(...__operitArgs)) : more("group", group.id),
       gap(2),
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50609",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant.copy({ alpha: 0.62 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50617",[{ name: expanded ? "KeyboardArrowUp" : "KeyboardArrowDown", size: 20, tint: colors.onSurfaceVariant.copy({ alpha: 0.62 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs));
-    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50765",[{
+    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:50773",[{
         key: "sidebar-group-" + group.id,
         fillMaxWidth: true,
         paddingStart: m.groupStart,
         paddingEnd: m.groupEnd,
         paddingTop: 4,
         paddingBottom: expanded ? 2 : 0
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:51004",[{
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:51012",[{
           key: "sidebar-group-drop-" + group.id,
           acceptedTypes: [dragType(section)],
           hoverBorderColor: colors.primary.copy({ alpha: 0.55 }),
           shape: { cornerRadius: m.groupRadius },
           onDrop: (id2) => actions.drop(String(id2), section.id, ungrouped ? null : group.id)
-        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:51357",[{ shape: { cornerRadius: m.groupRadius } },groupBody],(...__operitArgs)=>ctx.UI.HoverRegion(...__operitArgs))],(...__operitArgs)=>ctx.UI.DragTarget(...__operitArgs))],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
+        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:51365",[{ shape: { cornerRadius: m.groupRadius } },groupBody],(...__operitArgs)=>ctx.UI.HoverRegion(...__operitArgs))],(...__operitArgs)=>ctx.UI.DragTarget(...__operitArgs))],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
   }
   const sections = state.data.view === "characters" ? state.data.sections : state.data.scopes.map((scope) => ({
     id: scope.id,
@@ -1600,7 +1600,7 @@ function nativeSidebarRows(ctx, current, state, actions, defaultAvatar) {
       if (!state.collapsed.includes("group:" + id2)) rows.push(...chats(ungrouped, id2, section, null, categoryMatches || "\u672A\u5206\u7EC4".includes(query)));
     }
   }
-  if (rows.length === 0) rows.push(OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53480",[query,muted],()=>[{ text: query === "" ? "\u6682\u65E0\u4F1A\u8BDD" : "\u6CA1\u6709\u5339\u914D\u7684\u4F1A\u8BDD", color: muted, fontSize: 12, paddingHorizontal: 20, paddingVertical: 12 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
+  if (rows.length === 0) rows.push(OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:53488",[query,muted],()=>[{ text: query === "" ? "\u6682\u65E0\u4F1A\u8BDD" : "\u6CA1\u6709\u5339\u914D\u7684\u4F1A\u8BDD", color: muted, fontSize: 12, paddingHorizontal: 20, paddingVertical: 12 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
   return rows;
 }
 
@@ -1828,8 +1828,18 @@ function renderSidebarScreen(ctx) {
   function renameChat(id2) {
     dialog("renameChat", id2, chatFor(id2).title);
   }
-  function deleteChat(id2) {
+  function confirmSwipeDelete(id2) {
     dialog("deleteChat", id2, chatFor(id2).title);
+  }
+  function deleteChat(id2) {
+    return __async(this, null, function* () {
+      yield run(() => __async(null, null, function* () {
+        chatFor(id2);
+        yield Tools.Chat.deleteChat(id2);
+        update({ dialog: null });
+        yield refresh();
+      }));
+    });
   }
   function longPress(id2) {
     dialog("chatActions", id2, chatFor(id2).title);
@@ -1879,7 +1889,7 @@ function renderSidebarScreen(ctx) {
   function menu(kind, id2) {
     if (kind === "chat") {
       const chat = chatFor(id2);
-      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:65469",[{
+      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:65763",[{
         key: "sidebar-chat-menu-" + id2,
         width: 22,
         height: 22,
@@ -1895,14 +1905,14 @@ function renderSidebarScreen(ctx) {
           if (index === 0) renameChat(id2);
           else if (index === 1) yield changeFlag(id2, true);
           else if (index === 2) yield changeFlag(id2, false);
-          else if (index === 3) deleteChat(id2);
+          else if (index === 3) yield deleteChat(id2);
         })
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:66315",[{ name: "MoreHoriz", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:66615",[{ name: "MoreHoriz", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
     }
     if (kind === "ungrouped") {
       const scope = scopeFor(id2);
       const pinned = scope.ungrouped.length > 0 && scope.ungrouped.every((chat) => chat.pinned);
-      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:66598",[{
+      return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:66898",[{
         key: "sidebar-ungrouped-menu-" + id2,
         width: 22,
         height: 22,
@@ -1925,7 +1935,7 @@ function renderSidebarScreen(ctx) {
           if (index === 3) dialog("deleteUngrouped", id2, "\u672A\u5206\u7EC4");
           return null;
         })
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:67802",[{ name: "MoreHorizRounded", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:68102",[{ name: "MoreHorizRounded", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
     }
     const group = scopeFor(id2).groups.find((value) => value.id === id2);
     const items = [
@@ -1934,7 +1944,7 @@ function renderSidebarScreen(ctx) {
       { label: group.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876", icon: group.pinned ? "PushPinOutlined" : "PushPinRounded" },
       { label: "\u5220\u9664", icon: "DeleteOutlineRounded", danger: true, dividerBefore: true }
     ];
-    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:68400",[{
+    return OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:68700",[{
       key: "sidebar-group-menu-" + id2,
       width: 22,
       height: 22,
@@ -1954,7 +1964,7 @@ function renderSidebarScreen(ctx) {
         else if (index === 3) dialog("delete", id2, group.name);
         return null;
       })
-    },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:69184",[{ name: "MoreHorizRounded", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
+    },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:69484",[{ name: "MoreHorizRounded", size: 16, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }) }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.PopupMenu(...__operitArgs));
   }
   function drop(chatId, scopeId, groupId, targetId) {
     return __async(this, null, function* () {
@@ -1987,7 +1997,7 @@ function renderSidebarScreen(ctx) {
   const data = visibleCatalog();
   const toggleSection = (id2) => update({ collapsed: state.collapsed.includes(id2) ? state.collapsed.filter((key) => key !== id2) : [...state.collapsed, id2] });
   const toggleGroup = (id2) => update({ expandedGroups: state.expandedGroups.includes(id2) ? state.expandedGroups.filter((key) => key !== id2) : [...state.expandedGroups, id2] });
-  const rows = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71199",[{
+  const rows = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71499",[{
     key: "sidebar-toolbar",
     fillMaxWidth: true,
     verticalAlignment: "center",
@@ -1996,15 +2006,15 @@ function renderSidebarScreen(ctx) {
     paddingEnd: 12,
     paddingBottom: 8
   },[
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71387",[{
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71687",[{
         key: "sidebar-create-bar",
         weight: 1,
         height: 34,
         containerColor: colors.primaryContainer,
         contentColor: colors.onPrimaryContainer,
         shape: { type: "pill" }
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71630",[{ fillMaxSize: true, verticalAlignment: "center" },[
-        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71703",[{
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:71930",[{ fillMaxSize: true, verticalAlignment: "center" },[
+        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72003",[{
           key: "sidebar-new-chat",
           weight: 1,
           height: 34,
@@ -2016,11 +2026,11 @@ function renderSidebarScreen(ctx) {
           }),
           spacing: 6
         },[
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72129",[{ name: "AddRounded", size: 17, tint: colors.onPrimaryContainer }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72219",[{ text: "\u65B0\u5EFA\u5BF9\u8BDD", fontSize: 13, fontWeight: "600", color: colors.onPrimaryContainer, ...{ letterSpacing: -0.1 } }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72429",[{ name: "AddRounded", size: 17, tint: colors.onPrimaryContainer }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72519",[{ text: "\u65B0\u5EFA\u5BF9\u8BDD", fontSize: 13, fontWeight: "600", color: colors.onPrimaryContainer, ...{ letterSpacing: -0.1 } }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
         ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs)),
-        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72384",[{ width: 1, height: 16, background: colors.onPrimaryContainer.copy({ alpha: 0.16 }) }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)),
-        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72491",[{
+        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72684",[{ width: 1, height: 16, background: colors.onPrimaryContainer.copy({ alpha: 0.16 }) }],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)),
+        OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:72791",[{
           key: "sidebar-new-group",
           width: 38,
           height: 34,
@@ -2035,9 +2045,9 @@ function renderSidebarScreen(ctx) {
             if (scope === void 0) throw new Error("The active owner is absent from the actual sidebar catalog");
             dialog("create", scope.id);
           })
-        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:73351",[{ name: "CreateNewFolderOutlined", size: 16, tint: colors.onPrimaryContainer, contentDescription: "\u65B0\u5EFA\u5206\u7EC4" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
+        },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:73651",[{ name: "CreateNewFolderOutlined", size: 16, tint: colors.onPrimaryContainer, contentDescription: "\u65B0\u5EFA\u5206\u7EC4" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
       ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))],(...__operitArgs)=>ctx.UI.Surface(...__operitArgs)),
-    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:73512",[{
+    OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:73812",[{
         key: "sidebar-search-toggle",
         width: 34,
         height: 34,
@@ -2046,9 +2056,9 @@ function renderSidebarScreen(ctx) {
         onClick: () => update({ search: !state.search }),
         modifier: ctx.Modifier.clip({ cornerRadius: 6 }),
         background: state.search ? colors.secondaryContainer.copy({ alpha: 0.35 }) : colors.surface.copy({ alpha: 0 })
-      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:73937",[{ name: state.search ? "SearchOff" : "Search", size: 17, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }), contentDescription: state.search ? "\u6536\u8D77\u641C\u7D22" : "\u641C\u7D22\u5BF9\u8BDD" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
+      },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:74237",[{ name: state.search ? "SearchOff" : "Search", size: 17, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }), contentDescription: state.search ? "\u6536\u8D77\u641C\u7D22" : "\u641C\u7D22\u5BF9\u8BDD" }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs))],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))
   ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))];
-  if (state.search) rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:74196",[{
+  if (state.search) rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:74496",[{
     key: "sidebar-search",
     value: state.query,
     onValueChange: (query) => update({ query }),
@@ -2059,7 +2069,7 @@ function renderSidebarScreen(ctx) {
     paddingBottom: 12,
     ...{ shape: { cornerRadius: 14 } }
   }],(...__operitArgs)=>ctx.UI.TextField(...__operitArgs)));
-  if (state.error !== "") rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:74538",[{ key: "sidebar-error", text: state.error, fontSize: 11, color: colors.error, paddingHorizontal: 20, paddingVertical: 6 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
+  if (state.error !== "") rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:74838",[{ key: "sidebar-error", text: state.error, fontSize: 11, color: colors.error, paddingHorizontal: 20, paddingVertical: 6 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
   if (data !== null) rows.push(...nativeSidebarRows(ctx, current.current, {
     data,
     query: state.query,
@@ -2072,21 +2082,21 @@ function renderSidebarScreen(ctx) {
     menu,
     longPress,
     rename: renameChat,
-    deleteChat,
+    confirmSwipeDelete,
     drop
   }, state.defaultAvatar));
-  else if (state.loading) rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75064",[{ fillMaxWidth: true, height: 80, contentAlignment: "center" },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75148",[],()=>[{ size: 24 }],(...__operitArgs)=>ctx.UI.LoadingIndicator(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)));
-  const content = [OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75211",[rows],()=>[{ key: "native-sidebar-history", fillMaxWidth: true, paddingBottom: 16, spacing: 0 },rows],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))];
+  else if (state.loading) rows.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75372",[{ fillMaxWidth: true, height: 80, contentAlignment: "center" },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75456",[],()=>[{ size: 24 }],(...__operitArgs)=>ctx.UI.LoadingIndicator(...__operitArgs))],(...__operitArgs)=>ctx.UI.Box(...__operitArgs)));
+  const content = [OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75519",[rows],()=>[{ key: "native-sidebar-history", fillMaxWidth: true, paddingBottom: 16, spacing: 0 },rows],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))];
   if (state.dialog !== null) {
-    const staged = state.dialog, body = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75391",[{ text: { create: "\u65B0\u5EFA\u5206\u7EC4", rename: "\u91CD\u547D\u540D\u5206\u7EC4", delete: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameUngrouped: "\u91CD\u547D\u540D\u5206\u7EC4", deleteUngrouped: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameChat: "\u7F16\u8F91\u5BF9\u8BDD\u540D\u79F0", deleteChat: "\u5220\u9664\u5BF9\u8BDD", chatActions: "\u804A\u5929\u8BB0\u5F55" }[staged.kind], fontSize: 16, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))];
-    if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75997",[{ key: "sidebar-group-name", value: staged.name, label: staged.kind === "renameChat" ? "\u5BF9\u8BDD\u540D\u79F0" : "\u5206\u7EC4\u540D\u79F0", onValueChange: (name) => update({ dialog: { ...staged, name } }), enabled: !state.busy }],(...__operitArgs)=>ctx.UI.TextField(...__operitArgs)));
-    if (staged.kind === "delete" || staged.kind === "deleteUngrouped" || staged.kind === "deleteChat") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:76363",[{ text: staged.kind === "deleteChat" ? `\u786E\u8BA4\u5220\u9664\u5BF9\u8BDD\u201C${staged.name}\u201D\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002` : `\u786E\u8BA4\u5220\u9664\u201C${staged.name}\u201D\u53CA\u5176\u4E2D\u7684\u5168\u90E8\u5BF9\u8BDD\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002`, fontSize: 12 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
+    const staged = state.dialog, body = [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:75699",[{ text: { create: "\u65B0\u5EFA\u5206\u7EC4", rename: "\u91CD\u547D\u540D\u5206\u7EC4", delete: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameUngrouped: "\u91CD\u547D\u540D\u5206\u7EC4", deleteUngrouped: "\u5220\u9664\u5206\u7EC4\u53CA\u5176\u5BF9\u8BDD", renameChat: "\u7F16\u8F91\u5BF9\u8BDD\u540D\u79F0", deleteChat: "\u5220\u9664\u5BF9\u8BDD", chatActions: "\u804A\u5929\u8BB0\u5F55" }[staged.kind], fontSize: 16, fontWeight: "600" }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))];
+    if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:76305",[{ key: "sidebar-group-name", value: staged.name, label: staged.kind === "renameChat" ? "\u5BF9\u8BDD\u540D\u79F0" : "\u5206\u7EC4\u540D\u79F0", onValueChange: (name) => update({ dialog: { ...staged, name } }), enabled: !state.busy }],(...__operitArgs)=>ctx.UI.TextField(...__operitArgs)));
+    if (staged.kind === "delete" || staged.kind === "deleteUngrouped" || staged.kind === "deleteChat") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:76671",[{ text: staged.kind === "deleteChat" ? `\u786E\u8BA4\u5220\u9664\u5BF9\u8BDD\u201C${staged.name}\u201D\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002` : `\u786E\u8BA4\u5220\u9664\u201C${staged.name}\u201D\u53CA\u5176\u4E2D\u7684\u5168\u90E8\u5BF9\u8BDD\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002`, fontSize: 12 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
     if (staged.kind === "chatActions") {
       const chat = chatFor(staged.id), ids = orderNeighbours(staged.id), index = ids.indexOf(staged.id);
-      body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:76871",[{ text: chat.title, fillMaxWidth: true, maxLines: 2, style: "titleMedium", color: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
-      const tile = (label, icon, callback, enabled = true, danger = false) => OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77072",[{ fillMaxWidth: true, onClick: enabled ? callback : void 0, shape: { cornerRadius: 12 }, color: colors.surface },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77218",[{ fillMaxWidth: true, paddingHorizontal: 16, paddingVertical: 10, verticalAlignment: "center", spacing: 12 },[
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77351",[{ name: icon, size: 20, tint: danger ? colors.error : colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
-          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77455",[{ text: label, weight: 1, fontSize: 14, color: danger ? colors.error : colors.onSurface }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
+      body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77179",[{ text: chat.title, fillMaxWidth: true, maxLines: 2, style: "titleMedium", color: colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
+      const tile = (label, icon, callback, enabled = true, danger = false) => OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77380",[{ fillMaxWidth: true, onClick: enabled ? callback : void 0, shape: { cornerRadius: 12 }, color: colors.surface },OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77526",[{ fillMaxWidth: true, paddingHorizontal: 16, paddingVertical: 10, verticalAlignment: "center", spacing: 12 },[
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77659",[{ name: icon, size: 20, tint: danger ? colors.error : colors.onSurfaceVariant }],(...__operitArgs)=>ctx.UI.Icon(...__operitArgs)),
+          OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:77763",[{ text: label, weight: 1, fontSize: 14, color: danger ? colors.error : colors.onSurface }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs))
         ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs))],(...__operitArgs)=>ctx.UI.Surface(...__operitArgs));
       body.push(
         tile("\u7F16\u8F91\u540D\u79F0", "Edit", () => renameChat(chat.id)),
@@ -2097,18 +2107,18 @@ function renderSidebarScreen(ctx) {
         tile("\u5220\u9664", "DeleteOutline", () => deleteChat(chat.id), true, true)
       );
     }
-    if (staged.progress !== null) body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78277",[{ key: "sidebar-delete-result", text: `\u5DF2\u5220\u9664 ${staged.progress.deletedChatIds.length} \u6761\u5BF9\u8BDD
+    if (staged.progress !== null) body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78585",[{ key: "sidebar-delete-result", text: `\u5DF2\u5220\u9664 ${staged.progress.deletedChatIds.length} \u6761\u5BF9\u8BDD
 ` + staged.progress.failedChatIds.map((value) => value.chatId + ": " + value.error).join("\n"), fontSize: 11, color: staged.progress.failedChatIds.length === 0 ? colors.onSurface : colors.error }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
-    if (state.error !== "") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78644",[{ text: state.error, color: colors.error, fontSize: 11 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
-    body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78730",[{ spacing: 8 },[
-      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78765",[{ text: "\u53D6\u6D88", enabled: !state.busy, onClick: () => update({ dialog: null }) }],(...__operitArgs)=>ctx.UI.TextButton(...__operitArgs)),
-      ...staged.progress === null && staged.kind !== "chatActions" ? [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78943",[{ text: "\u786E\u8BA4", enabled: !state.busy, onClick: () => run(submit) }],(...__operitArgs)=>ctx.UI.Button(...__operitArgs))] : []
+    if (state.error !== "") body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:78952",[{ text: state.error, color: colors.error, fontSize: 11 }],(...__operitArgs)=>ctx.UI.Text(...__operitArgs)));
+    body.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79038",[{ spacing: 8 },[
+      OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79073",[{ text: "\u53D6\u6D88", enabled: !state.busy, onClick: () => update({ dialog: null }) }],(...__operitArgs)=>ctx.UI.TextButton(...__operitArgs)),
+      ...staged.progress === null && staged.kind !== "chatActions" ? [OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79251",[{ text: "\u786E\u8BA4", enabled: !state.busy, onClick: () => run(submit) }],(...__operitArgs)=>ctx.UI.Button(...__operitArgs))] : []
     ]],(...__operitArgs)=>ctx.UI.Row(...__operitArgs)));
-    content.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79065",[{ key: "sidebar-edit-dialog", closeOnDismissRequest: !state.busy, onDismissRequest: () => {
+    content.push(OperitComposeGeneration.node(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79373",[{ key: "sidebar-edit-dialog", closeOnDismissRequest: !state.busy, onDismissRequest: () => {
       if (!state.busy) update({ dialog: null });
-    } },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79229",[body],()=>[{ padding: 20, spacing: 12, width: 320 },body],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))],(...__operitArgs)=>ctx.UI.Dialog(...__operitArgs)));
+    } },OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79537",[body],()=>[{ padding: 20, spacing: 12, width: 320 },body],(...__operitArgs)=>ctx.UI.Column(...__operitArgs))],(...__operitArgs)=>ctx.UI.Dialog(...__operitArgs)));
   }
-  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79307",[refresh,refreshInputs,content],()=>[{ key: "native-character-sidebar", fillMaxWidth: true, onLoad: refresh, onInputsChanged: refreshInputs },content],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
+  return OperitComposeGeneration.leaf(ctx,"com.operit.character_cards:dist/ui/chat-sidebar/index.ui.js:79615",[refresh,refreshInputs,content],()=>[{ key: "native-character-sidebar", fillMaxWidth: true, onLoad: refresh, onInputsChanged: refreshInputs },content],(...__operitArgs)=>ctx.UI.Column(...__operitArgs));
 }
 
 // src/ui-sidebar.ts

@@ -48,10 +48,7 @@ impl ThemeConfigManager {
     /// Opens ordinary user preferences through the owning runtime's actual storage host.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>) -> Self {
         Self {
-            dataStore: PreferencesDataStore::newWithStorage(
-                storageHost,
-                OperitPaths::USER_PREFERENCES_PATH,
-            ),
+            dataStore: super::UserPreferencesManager::UserPreferencesManager::store(storageHost),
         }
     }
 
@@ -246,7 +243,7 @@ impl ThemeConfigManager {
     pub fn patchAppearance(
         &self,
         initialSnapshot: BTreeMap<String, Value>,
-        values: BTreeMap<String, String>,
+        values: BTreeMap<String, Value>,
         removeKeys: Vec<String>,
     ) -> Result<Option<ThemeConfig>, PreferencesDataStoreError> {
         validateThemePreferenceSnapshot(&initialSnapshot)?;
@@ -322,12 +319,12 @@ fn readState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesD
     // Absent new-domain keys mean an untouched, genuinely empty catalog and custom appearance.
     // Malformed stored values never enter these initial-state branches.
     let configs = match preferences.get(&stringPreferencesKey(THEME_CONFIGS_KEY)) {
-        Some(value) => serde_json::from_str::<Vec<ThemeConfig>>(value)?,
+        Some(value) => serde_json::from_value::<Vec<ThemeConfig>>(value.clone())?,
         None => Vec::new(),
     };
     let activeThemeConfigId =
         match preferences.get(&stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY)) {
-            Some(value) => serde_json::from_str::<Option<String>>(value)?,
+            Some(value) => serde_json::from_value::<Option<String>>(value.clone())?,
             None => None,
         };
     let state = ThemeConfigState {
@@ -352,11 +349,11 @@ fn writeState(
     }
     preferences.set(
         &stringPreferencesKey(THEME_CONFIGS_KEY),
-        serde_json::to_string(&state.configs)?,
+        serde_json::to_value(&state.configs)?,
     );
     preferences.set(
         &stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY),
-        serde_json::to_string(&state.activeThemeConfigId)?,
+        serde_json::to_value(&state.activeThemeConfigId)?,
     );
     Ok(())
 }

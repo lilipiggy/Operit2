@@ -286,7 +286,7 @@ test('Core and rendered simulator complete pairing, rejoin, cancellation and res
     const edgePortArgs={node_id:node,interface_info:{pluginId:'device.status',action:'read'},args:{}};
     await assert.rejects(()=>core.command(['core','tool','exec','edge_execute',JSON.stringify(edgePortArgs)]),
       'plugin port API must not pair, route to a guessed address, or grant access to an unadmitted node');
-    const pairing = await core.command(['pair-start', node, first.device.address, 'tcp', '--token', first.token]);
+    const pairing = await core.command(['pair-start', node, first.device.address, 'tcp']);
     await update();
     assert.equal(screen().page, 'Pairing');
     const code = screen().nodes.find(node => node.id === 'pairing_code')?.text;
@@ -593,7 +593,7 @@ ${JSON.stringify(fixtureMetadata)}
     await update(); assert.equal(screen().page, 'Space');
     await core.stop(); await post('/api/simulator/stop');
     await startCore();
-    const restarted = await startEdge(); assert.equal(restarted.token, first.token);
+    const restarted = await startEdge(); assert.equal(Object.hasOwn(restarted, 'token'), false);
     await update(); assert.equal(screen().page, 'Space', 'approval prompt survives process restart');
     assert.equal((await core.command(['space', 'cancel', pending.requestId])).status, 'cancelled');
     await update(); assert.equal(screen().nodes.some(node => node.id === 'edge_space_approve'), false);

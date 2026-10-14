@@ -43,7 +43,7 @@ pub(super) fn proof(key: &[u8], context: &[u8], role: &[u8]) -> Vec<u8> {
 pub(super) fn verify(key: &[u8], context: &[u8], role: &[u8], supplied: &[u8]) -> Result<(), CoreLinkError> {
     let mut message = context.to_vec(); message.extend_from_slice(role);
     hmac::verify(&hmac::Key::new(hmac::HMAC_SHA256, key), &message, supplied)
-        .map_err(|_| error("Key/token proof rejected"))
+        .map_err(|_| error("Key proof rejected"))
 }
 /// A receiver-only, fixed-width code; leading zeroes are significant.
 pub(super) fn pairingCode() -> Result<String, CoreLinkError> {

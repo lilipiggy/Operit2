@@ -74,7 +74,6 @@ pub struct CoreSpaceDevicePresence {
     pub nodeId: String,
     pub active: bool,
     pub baseUrl: String,
-    pub tokenHash: String,
     pub version: String,
     pub updatedAt: i64,
 }
@@ -617,14 +616,14 @@ impl CoreSpaceStore {
                 continue;
             }
             let preferences =
-                PreferencesDataStore::newWithStorage(self.storage.clone(), entry.path.clone())
+                self.recordStore(entry.path.clone())
                     .data()
                     .map_err(|error| error.to_string())?;
             let encoded = preferences
                 .get(&stringPreferencesKey(CORE_SPACE_RECORD_KEY))
                 .ok_or_else(|| format!("Device space profile record is empty: {}", entry.path))?;
             let profile: CoreSpaceDeviceProfile =
-                serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+                serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
             validateDeviceProfile(&profile)?;
             profiles.insert(profile.nodeId.clone(), profile);
         }
@@ -687,7 +686,6 @@ impl CoreSpaceStore {
         &self,
         active: bool,
         baseUrl: String,
-        tokenHash: String,
         version: String,
     ) -> Result<CoreSpaceDevicePresence, String> {
         let identity = CoreNodeIdentityStore::new(self.storage.clone()).initialize()?;
@@ -695,7 +693,6 @@ impl CoreSpaceStore {
             nodeId: identity.nodeId,
             active,
             baseUrl,
-            tokenHash,
             version,
             updatedAt: currentTimeMillis(),
         };
@@ -725,14 +722,14 @@ impl CoreSpaceStore {
                 continue;
             }
             let preferences =
-                PreferencesDataStore::newWithStorage(self.storage.clone(), entry.path.clone())
+                self.recordStore(entry.path.clone())
                     .data()
                     .map_err(|error| error.to_string())?;
             let encoded = preferences
                 .get(&stringPreferencesKey(CORE_SPACE_RECORD_KEY))
                 .ok_or_else(|| format!("Device space presence record is empty: {}", entry.path))?;
             let presence: CoreSpaceDevicePresence =
-                serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+                serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
             validateDevicePresence(&presence)?;
             presences.insert(presence.nodeId.clone(), presence);
         }
@@ -1101,14 +1098,14 @@ impl CoreSpaceStore {
                 continue;
             }
             let preferences =
-                PreferencesDataStore::newWithStorage(self.storage.clone(), entry.path.clone())
+                self.recordStore(entry.path.clone())
                     .data()
                     .map_err(|error| error.to_string())?;
             let encoded = preferences
                 .get(&stringPreferencesKey(CORE_SPACE_RECORD_KEY))
                 .ok_or_else(|| format!("Device space member record is empty: {}", entry.path))?;
             let record: CoreSpaceMemberRecord =
-                serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+                serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
             validateMemberRecord(&record)?;
             records.insert(record.nodeId.clone(), record);
         }
@@ -1121,7 +1118,7 @@ impl CoreSpaceStore {
         let mut preferences = emptyPreferences();
         preferences.set(
             &stringPreferencesKey(CORE_SPACE_RECORD_KEY),
-            serde_json::to_string(record).map_err(|error| error.to_string())?,
+            serde_json::to_value(record).map_err(|error| error.to_string())?,
         );
         self.syncedMemberStore(&record.nodeId)
             .replaceRecoverably(preferences)
@@ -1199,7 +1196,7 @@ impl CoreSpaceStore {
                 continue;
             }
             let preferences =
-                PreferencesDataStore::newWithStorage(self.storage.clone(), entry.path.clone())
+                self.recordStore(entry.path.clone())
                     .data()
                     .map_err(|error| error.to_string())?;
             let encoded = preferences
@@ -1208,7 +1205,7 @@ impl CoreSpaceStore {
                     format!("Device space connection record is empty: {}", entry.path)
                 })?;
             let record: CoreSpaceTopologyRecord =
-                serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+                serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
             validateTopologyRecord(&record)?;
             records.insert(record.nodeId.clone(), record);
         }
@@ -1221,7 +1218,7 @@ impl CoreSpaceStore {
         let mut preferences = emptyPreferences();
         preferences.set(
             &stringPreferencesKey(CORE_SPACE_RECORD_KEY),
-            serde_json::to_string(record).map_err(|error| error.to_string())?,
+            serde_json::to_value(record).map_err(|error| error.to_string())?,
         );
         self.recordStore(
             format!(
@@ -1240,7 +1237,7 @@ impl CoreSpaceStore {
         let mut preferences = emptyPreferences();
         preferences.set(
             &stringPreferencesKey(CORE_SPACE_RECORD_KEY),
-            serde_json::to_string(presence).map_err(|error| error.to_string())?,
+            serde_json::to_value(presence).map_err(|error| error.to_string())?,
         );
         self.recordStore(
             format!(
@@ -1259,7 +1256,7 @@ impl CoreSpaceStore {
         let mut preferences = emptyPreferences();
         preferences.set(
             &stringPreferencesKey(CORE_SPACE_RECORD_KEY),
-            serde_json::to_string(profile).map_err(|error| error.to_string())?,
+            serde_json::to_value(profile).map_err(|error| error.to_string())?,
         );
         self.recordStore(
             format!(
@@ -1278,12 +1275,25 @@ impl CoreSpaceStore {
         )
     }
 
+    /// Opens versioned complete Space records using the declared storage scope.
     fn recordStore(&self, path: impl Into<String>) -> PreferencesDataStore {
-        if self.recordSyncOperations {
+        let store = if self.recordSyncOperations {
             PreferencesDataStore::newWithStorage(self.storage.clone(), path)
         } else {
             (*CoreNodeStateStore::newWithStorage(self.storage.clone(), path)).clone()
-        }
+        };
+        store.withSchema(2, |version, preferences| match version {
+            0 => Ok(()),
+            1 => {
+                let key = stringPreferencesKey(CORE_SPACE_RECORD_KEY);
+                if let Some(encoded) = preferences.getTyped::<String>(&key)? {
+                    let record: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&encoded)?;
+                    preferences.set(&key, serde_json::Value::Object(record));
+                }
+                Ok(())
+            }
+            from => Err(crate::PreferencesDataStore::PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
+        })
     }
 
 }
@@ -1377,7 +1387,6 @@ fn validateDevicePresence(presence: &CoreSpaceDevicePresence) -> Result<(), Stri
     validateNodeId(&presence.nodeId)?;
     if presence.active {
         validateDevicePresenceField("base URL", &presence.baseUrl)?;
-        validateDevicePresenceField("token hash", &presence.tokenHash)?;
         validateDevicePresenceField("version", &presence.version)?;
     }
     if presence.updatedAt <= 0 {

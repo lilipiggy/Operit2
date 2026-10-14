@@ -192,12 +192,6 @@ impl CoreApplication {
         self.nodeRouter.nodeServices().cloned()
     }
 
-    /// 本机管理入口，不能注册为远端 Link Call，也不能出现在普通状态快照中。
-    pub fn localPairingToken(&self) -> Result<String, String> {
-        operit_node_runtime::PeerStateStore::PeerStateStore::new(self.nodeRuntime.runtimeStorageHost())
-            .localPairingToken()
-    }
-
     /// Returns the generated local Core client entry point.
     pub fn localClient(&self) -> Arc<LocalCoreProxy> {
         self.localClient.clone()

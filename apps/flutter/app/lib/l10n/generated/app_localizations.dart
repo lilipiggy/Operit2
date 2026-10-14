@@ -4169,12 +4169,6 @@ abstract class AppLocalizations {
   /// **'ESP32 devices'**
   String get settingsRuntimeDiscoveredEdges;
 
-  /// No description provided for @settingsRuntimeEdgeEndpointTokenRequired.
-  ///
-  /// In en, this message translates to:
-  /// **'Edge endpoint and token are required'**
-  String get settingsRuntimeEdgeEndpointTokenRequired;
-
   /// No description provided for @settingsRuntimeEdgeEndpointRequired.
   ///
   /// In en, this message translates to:
@@ -4198,18 +4192,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Connection initiated by the other device'**
   String get settingsRuntimeConnectionInitiatedByOtherDevice;
-
-  /// No description provided for @settingsRuntimePairToken.
-  ///
-  /// In en, this message translates to:
-  /// **'Connection token'**
-  String get settingsRuntimePairToken;
-
-  /// No description provided for @settingsRuntimePairTokenHint.
-  ///
-  /// In en, this message translates to:
-  /// **'Required off-LAN; leave empty for devices on the same network'**
-  String get settingsRuntimePairTokenHint;
 
   /// No description provided for @settingsRuntimePairCode.
   ///
@@ -4240,6 +4222,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'host:port, for example 192.168.1.10:37195'**
   String get settingsRuntimeTcpAddressHint;
+
+  /// No description provided for @settingsRuntimeTransportAuto.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto (recommended)'**
+  String get settingsRuntimeTransportAuto;
+
+  /// No description provided for @settingsRuntimeTransportAutoHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter host:port; the carrier (HTTP/WebSocket/TCP) is detected automatically'**
+  String get settingsRuntimeTransportAutoHint;
 
   /// No description provided for @settingsRuntimeConnectionFailed.
   ///
@@ -4370,7 +4364,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsRuntimeWebPairDescription.
   ///
   /// In en, this message translates to:
-  /// **'Enter another device\'s address and pairing token to connect this browser as an active pairing client.'**
+  /// **'Enter another device\'s address and confirm the pairing code to connect this browser as an active pairing client.'**
   String get settingsRuntimeWebPairDescription;
 
   /// No description provided for @settingsRuntimeDiscoveredSpaceSummary.
@@ -6829,42 +6823,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Cache hit rate: {rate}'**
   String chatMessageCacheHitRate(String rate);
-
-  /// No description provided for @settingsPeerToken.
-  ///
-  /// In en, this message translates to:
-  /// **'Connection token'**
-  String get settingsPeerToken;
-
-  /// No description provided for @settingsPeerTokenHelp.
-  ///
-  /// In en, this message translates to:
-  /// **'Remote connections require this token.'**
-  String get settingsPeerTokenHelp;
-
-  /// No description provided for @settingsPeerCopyToken.
-  ///
-  /// In en, this message translates to:
-  /// **'Copy token'**
-  String get settingsPeerCopyToken;
-
-  /// No description provided for @settingsPeerRefreshToken.
-  ///
-  /// In en, this message translates to:
-  /// **'Refresh token'**
-  String get settingsPeerRefreshToken;
-
-  /// No description provided for @settingsPeerTokenCopied.
-  ///
-  /// In en, this message translates to:
-  /// **'Connection token copied.'**
-  String get settingsPeerTokenCopied;
-
-  /// No description provided for @settingsPeerTokenRequired.
-  ///
-  /// In en, this message translates to:
-  /// **'Enter or refresh a connection token.'**
-  String get settingsPeerTokenRequired;
 
   /// No description provided for @settingsPeerPortModeHelp.
   ///

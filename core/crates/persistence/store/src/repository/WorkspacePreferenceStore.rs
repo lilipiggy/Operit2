@@ -13,7 +13,7 @@ pub struct WorkspacePreferenceStore {
 }
 
 impl WorkspacePreferenceStore {
-    const PREFERENCES_VERSION: u32 = 1;
+    const PREFERENCES_VERSION: u32 = 2;
 
     /// Creates a workspace preference store from explicit runtime paths.
     pub fn new(paths: RuntimeStorePaths) -> Self {
@@ -98,7 +98,7 @@ impl WorkspacePreferenceStore {
         self.dataStore.try_edit_result(|preferences| {
             preferences.set(
                 &Self::workspaceDataKey(&workspace.id),
-                serde_json::to_string(&workspace)
+                serde_json::to_value(&workspace)
                     .map_err(|error| PreferencesDataStoreError::Message(error.to_string()))?,
             );
             Ok::<(), PreferencesDataStoreError>(())
@@ -119,9 +119,9 @@ impl WorkspacePreferenceStore {
     /// Rejects invalid records and mismatches between their keys and embedded identities.
     fn decodeWorkspace(
         workspaceId: &str,
-        json: &str,
+        json: &serde_json::Value,
     ) -> Result<Workspace, PreferencesDataStoreError> {
-        let workspace: Workspace = serde_json::from_str(json)?;
+        let workspace: Workspace = serde_json::from_value(json.clone())?;
         workspace
             .validate()
             .map_err(PreferencesDataStoreError::Message)?;
@@ -137,10 +137,27 @@ impl WorkspacePreferenceStore {
     /// Keeps existing record keys readable without creating a separately synchronized index.
     fn migratePreferences(
         version: u32,
-        _preferences: &mut Preferences,
+        preferences: &mut Preferences,
     ) -> Result<(), PreferencesDataStoreError> {
         match version {
             0 => Ok(()),
+            1 => {
+                let records = preferences
+                    .iterEntries()
+                    .filter_map(|(key, value)| {
+                        let id = key.strip_prefix("workspace_")?.strip_suffix("_data")?;
+                        Some((key.to_owned(), id.to_owned(), value.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (key, id, value) in records {
+                    let encoded = serde_json::from_value::<String>(value)?;
+                    let value: serde_json::Value = serde_json::from_str(&encoded)?;
+                    Self::decodeWorkspace(&id, &value)?;
+                    preferences.set(&stringPreferencesKey(&key), value);
+                }
+                preferences.remove(&stringPreferencesKey("workspace_list"));
+                Ok(())
+            }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
         }
     }

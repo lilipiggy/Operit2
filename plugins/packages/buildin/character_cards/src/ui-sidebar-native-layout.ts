@@ -11,7 +11,8 @@ export interface SidebarLayoutActions {
   menu(kind: "group" | "chat" | "ungrouped", id: string): ComposeNode;
   longPress(id: string): void;
   rename(id: string): void;
-  deleteChat(id: string): void;
+  /** Requests confirmation for a conversation deletion initiated by a swipe. */
+  confirmSwipeDelete(id: string): void;
   drop(chatId: string, scopeId: string, groupId: string | null, targetId?: string): Promise<void>;
 }
 
@@ -85,9 +86,9 @@ export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSideba
     ctx.UI.Row({ key: 'sidebar-chat-' + chat.id, fillMaxWidth: true, height: m.chatHeight,
       paddingStart: m.chatStart, paddingEnd: m.chatEnd, verticalAlignment: 'center' }, [rail, gap(2),
       ctx.UI.HoverRegion({ weight: 1, hoverBackground: colors.onSurfaceVariant.copy({ alpha: 0.07 }), shape: { cornerRadius: m.chatRadius } },
-        ctx.UI.SwipeActions({ key: 'sidebar-chat-swipe-' + chat.id, actionThreshold: 0.4,
+        ctx.UI.SwipeActions({ key: 'sidebar-chat-swipe-' + chat.id, actionThreshold: 0.5,
           height: 31, modifier: ctx.Modifier.clip({ cornerRadius: m.chatRadius }),
-          onStartAction: () => actions.rename(chat.id), onEndAction: () => actions.deleteChat(chat.id),
+          onStartAction: () => actions.rename(chat.id), onEndAction: () => actions.confirmSwipeDelete(chat.id),
           startBackground: ctx.UI.Box({ fillMaxSize: true, paddingStart: 12, background: colors.primary, contentAlignment: 'start' },
             ctx.UI.Icon({ name: 'Edit', size: m.swipeIconSize, width: m.swipeIconSize, height: m.swipeIconSize, tint: colors.onPrimary })),
           endBackground: ctx.UI.Box({ fillMaxSize: true, paddingEnd: 12, background: colors.error, contentAlignment: 'end' },

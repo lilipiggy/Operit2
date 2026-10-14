@@ -78,7 +78,7 @@ fn node_from_storage(storage: Arc<Storage>) -> (Arc<Storage>, Arc<EdgePeerRouter
     router.installSpace(space.clone()).unwrap();
     router.install(Arc::new(EdgeNode::fromHostManager((*host).clone()).withNodeServices(NodeServices::new(peer.clone())))).unwrap();
     if configureListener {
-        PeerStateStore::new(storage.clone()).saveHostConfig(&PeerHostConfig { bindAddress: "127.0.0.1:0".into(), token: "test-token".into(), transports: vec![PeerTransport::Tcp], discoveryEnabled: false, portMode: PeerHostPortMode::Automatic, updatedAt: 1 }).unwrap();
+        PeerStateStore::new(storage.clone()).saveHostConfig(&PeerHostConfig { bindAddress: "127.0.0.1:0".into(), transports: vec![PeerTransport::Tcp], discoveryEnabled: false, portMode: PeerHostPortMode::Automatic, updatedAt: 1 }).unwrap();
     }
     (storage, router, peer, space)
 }
@@ -113,7 +113,7 @@ async fn paired_edge_requires_explicit_approval_and_restores_space() {
         b_peer.startListening(&[PeerTransport::Tcp]).await.unwrap();
         let address = PeerStateStore::new(b_store.clone()).hostConfig().unwrap().unwrap().bindAddress;
         let b_id = b_space.localNodeId(); let a_id = a_space.localNodeId();
-        let pairing = a_peer.startPairing(PeerEndpoint { nodeId: b_id.clone(), address }, PeerTransport::Tcp, Some("test-token")).await.unwrap();
+        let pairing = a_peer.startPairing(PeerEndpoint { nodeId: b_id.clone(), address }, Some(PeerTransport::Tcp)).await.unwrap();
         let code = b_peer.pairingPrompts().unwrap()[0].confirmationCode.clone();
         a_peer.finishPairing(&pairing.pairingId, &code).await.unwrap();
         print_size("paired", &b_store);
@@ -163,7 +163,7 @@ async fn failed_local_cancellation_preserves_pending_request_and_can_retry() {
     let address = PeerStateStore::new(gatewayStorage).hostConfig().unwrap().unwrap().bindAddress;
     let pairing = applicantPeer.startPairing(PeerEndpoint {
         nodeId: gateway.localNodeId(), address,
-    }, PeerTransport::Tcp, Some("test-token")).await.unwrap();
+    }, Some(PeerTransport::Tcp)).await.unwrap();
     let code = gatewayPeer.pairingPrompts().unwrap()[0].confirmationCode.clone();
     applicantPeer.finishPairing(&pairing.pairingId, &code).await.unwrap();
     let request = applicant.requestDeviceSpaceJoin(gateway.localNodeId()).await.unwrap();
@@ -225,7 +225,7 @@ async fn approval_retry_recovers_each_partial_write_without_duplicate_admission(
             let gateway_id = gateway.localNodeId();
             let applicant_id = applicant.localNodeId();
             let address = PeerStateStore::new(storage.clone()).hostConfig().unwrap().unwrap().bindAddress;
-            let pairing = applicant_peer.startPairing(PeerEndpoint { nodeId: gateway_id.clone(), address }, PeerTransport::Tcp, Some("test-token")).await.unwrap();
+            let pairing = applicant_peer.startPairing(PeerEndpoint { nodeId: gateway_id.clone(), address }, Some(PeerTransport::Tcp)).await.unwrap();
             let code = gateway_peer.pairingPrompts().unwrap()[0].confirmationCode.clone();
             applicant_peer.finishPairing(&pairing.pairingId, &code).await.unwrap();
             // Real hardware contains earlier declined/expired applications.
@@ -272,7 +272,6 @@ async fn approval_retry_recovers_each_partial_write_without_duplicate_admission(
         drop(gateway_router);
     }
 }
-
 
 // Cross-kind coverage: neither endpoint is a pretend desktop implemented by Edge.
 mod core_edge {
@@ -416,7 +415,7 @@ mod core_edge {
             PeerStateStore::new(storage.clone())
                 .saveHostConfig(&PeerHostConfig {
                     bindAddress: "127.0.0.1:0".into(),
-                    token: "test-token".into(),
+
                     transports: vec![PeerTransport::Tcp],
                     discoveryEnabled: false,
                     portMode: PeerHostPortMode::Automatic,
@@ -571,8 +570,7 @@ mod core_edge {
                     nodeId: target_id,
                     address,
                 },
-                PeerTransport::Tcp,
-                Some("test-token"),
+                Some(PeerTransport::Tcp),
             )
             .await
             .unwrap();

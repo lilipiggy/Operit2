@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -40,9 +39,9 @@ void main() {
       await _drainEvents();
       final beforeSync = changes;
 
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'theme_mode': 'dark',
-        'font_scale': '1.3',
+        'font_scale': 1.3,
         'input_style': 'classic',
       });
       await _drainEvents();
@@ -54,7 +53,7 @@ void main() {
       expect(savedModes.last, ThemeMode.dark);
       expect(bridge.preferenceWrites, 0);
 
-      bridge.applyPeerPreferences(_userFile, <String, String>{});
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{});
       await _drainEvents();
       expect(controller.themeMode, ThemeMode.system);
       expect(controller.themePreferenceSnapshot.fontScale, 1);
@@ -62,7 +61,7 @@ void main() {
       controller.dispose();
       await _drainEvents();
       final afterDispose = changes;
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'theme_mode': 'light',
       });
       await _drainEvents();
@@ -87,12 +86,12 @@ void main() {
 
       final releaseOldRead = Completer<void>();
       bridge.nextPreferenceRead = releaseOldRead.future;
-      bridge.applyPeerPreferences(_userFile, <String, String>{
-        'font_scale': '1.2',
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
+        'font_scale': 1.2,
       });
       await _drainEvents();
-      bridge.applyPeerPreferences(_userFile, <String, String>{
-        'font_scale': '1.5',
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
+        'font_scale': 1.5,
       });
       await _drainEvents();
       expect(controller.themePreferenceSnapshot.fontScale, 1.5);
@@ -132,8 +131,8 @@ void main() {
     );
     expect(await preferences.load(), 1);
     await preferences.save(1.1);
-    bridge.applyPeerPreferences(_zoomFile, <String, String>{'zoom': '1.3'});
-    bridge.applyPeerPreferences(_zoomFile, <String, String>{'zoom': 'broken'});
+    bridge.applyPeerPreferences(_zoomFile, <String, Object?>{'zoom': '1.3'});
+    bridge.applyPeerPreferences(_zoomFile, <String, Object?>{'zoom': 'broken'});
     await _drainEvents();
     expect(await preferences.load(), 1.1);
     expect(bridge.preferenceWrites, 0);
@@ -144,7 +143,7 @@ void main() {
     'ordinary appearance never queries a plugin-owned prompt or card',
     () async {
       final bridge = _PreferenceBridge();
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'theme_mode': 'light',
         'character_theme_retired_theme_mode': 'dark',
         'character_group_theme_retired_font_scale': '2.0',
@@ -178,7 +177,7 @@ void main() {
     'malformed ordinary theme fails startup without committing a substitute',
     () async {
       final bridge = _PreferenceBridge();
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'theme_mode': 'invalid-mode',
       });
       final savedModes = <ThemeMode>[];
@@ -204,7 +203,7 @@ void main() {
     'ordinary appearance writes and resets preserve independent avatar and retired data',
     () async {
       final bridge = _PreferenceBridge();
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'custom_user_avatar_uri': 'host:///avatars/user.png',
         'character_theme_retired_theme_mode': 'dark',
       });
@@ -222,10 +221,10 @@ void main() {
         'initialSnapshot': UserPreferencesManager.defaultThemePreferenceSnapshot
             .toJson(),
         'removeKeys': <String>[],
-        'values': <String, String>{
+        'values': <String, Object?>{
           'theme_mode': 'light',
-          'font_scale': '1.2',
-          'bubble_rounded_corners_enabled': 'false',
+          'font_scale': 1.2,
+          'bubble_rounded_corners_enabled': false,
         },
       });
       await preferences.resetThemeSettings();
@@ -234,7 +233,7 @@ void main() {
       expect(snapshot.themeMode, ThemeMode.system);
       expect(snapshot.fontScale, 1);
       expect(snapshot.customUserAvatarUri, 'host:///avatars/user.png');
-      expect(bridge._values[_userFile], <String, String>{
+      expect(bridge._values[_userFile], <String, Object?>{
         'custom_user_avatar_uri': 'host:///avatars/user.png',
         'character_theme_retired_theme_mode': 'dark',
       });
@@ -242,7 +241,6 @@ void main() {
       expect(bridge.preferenceRemovals, 0);
     },
   );
-
 
   test(
     'long-paste cache receives sync updates without unrelated notifications',
@@ -258,23 +256,23 @@ void main() {
         onError: errors.add,
       );
       await _drainEvents();
-      bridge.applyPeerPreferences(_userFile, <String, String>{
-        'long_pasted_text_input_enabled': 'false',
-        'long_pasted_text_input_threshold': '5000',
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
+        'long_pasted_text_input_enabled': false,
+        'long_pasted_text_input_threshold': 5000,
       });
-      bridge.applyPeerPreferences(_userFile, <String, String>{
-        'long_pasted_text_input_enabled': 'false',
-        'long_pasted_text_input_threshold': '5000',
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
+        'long_pasted_text_input_enabled': false,
+        'long_pasted_text_input_threshold': 5000,
         'theme_mode': 'dark',
       });
-      bridge.applyPeerPreferences(_userFile, <String, String>{
+      bridge.applyPeerPreferences(_userFile, <String, Object?>{
         'long_pasted_text_input_threshold': 'broken',
       });
       await _drainEvents();
       expect(values.length, 2);
       expect(values.last.enabled, isFalse);
       expect(values.last.threshold, 5000);
-      expect(errors.single, isA<FormatException>());
+      expect(errors.single, isA<TypeError>());
       await subscription.cancel();
       expect(bridge.activeWatches, 0);
     },
@@ -310,21 +308,19 @@ void main() {
         },
       );
       await controller.loadPreferences();
-      bridge.applyPeerPreferences(_dockFile, <String, String>{
-        'layout': jsonEncode(
-          const SidebarDockLayout(
-            primaryEntryIds: <String>[],
-            secondaryEntryIds: <String>['plugin.entry'],
-            selectedSecondaryViewId: 'plugin.entry',
-          ).toJson(),
-        ),
+      bridge.applyPeerPreferences(_dockFile, <String, Object?>{
+        'layout': const SidebarDockLayout(
+          primaryEntryIds: <String>[],
+          secondaryEntryIds: <String>['plugin.entry'],
+          selectedSecondaryViewId: 'plugin.entry',
+        ).toJson(),
       });
       await _drainEvents();
       expect(controller.primaryEntries, isEmpty);
       expect(controller.secondaryViews.single.entry.entryId, 'plugin.entry');
       expect(controller.selectedSecondaryViewId, 'plugin.entry');
 
-      bridge.applyPeerPreferences(_dockFile, <String, String>{});
+      bridge.applyPeerPreferences(_dockFile, <String, Object?>{});
       await _drainEvents();
       expect(controller.primaryEntries.single.entryId, 'plugin.entry');
       expect(controller.secondaryViews, isEmpty);
@@ -364,11 +360,11 @@ Future<void> _drainEvents() async {
 
 /// Supplies exact Core calls and real encoded watch events for preference consumers.
 class _PreferenceBridge extends OperitRuntimeBridge {
-  final Map<String, Map<String, String>> _values =
-      <String, Map<String, String>>{
-        _userFile: <String, String>{},
-        _zoomFile: <String, String>{},
-        _dockFile: <String, String>{},
+  final Map<String, Map<String, Object?>> _values =
+      <String, Map<String, Object?>>{
+        _userFile: <String, Object?>{},
+        _zoomFile: <String, Object?>{},
+        _dockFile: <String, Object?>{},
       };
   final List<CoreCallRequest> calls = <CoreCallRequest>[];
   final List<CoreWatchRequest> watchRequests = <CoreWatchRequest>[];
@@ -383,8 +379,8 @@ class _PreferenceBridge extends OperitRuntimeBridge {
   int get activeWatches => _watches.length;
 
   /// Publishes a committed peer snapshot without invoking a local preference setter.
-  void applyPeerPreferences(String fileName, Map<String, String> values) {
-    _values[fileName] = Map<String, String>.of(values);
+  void applyPeerPreferences(String fileName, Map<String, Object?> values) {
+    _values[fileName] = Map<String, Object?>.of(values);
     for (final entry in _watches.entries) {
       if (entry.key.propertyName == 'preferencesFlow' &&
           (entry.key.args as Map)['fileName'] == fileName) {
@@ -416,9 +412,9 @@ class _PreferenceBridge extends OperitRuntimeBridge {
         return encodeCoreLink(<Object?>[0, null]);
       case 'getPreferences':
         final values = _values[args['fileName']]!;
-        final selected = <String, String>{
+        final selected = <String, Object?>{
           for (final key in (args['keys'] as List).cast<String>())
-            if (values[key] case final String value) key: value,
+            if (values.containsKey(key)) key: values[key],
         };
         final wait = nextPreferenceRead;
         nextPreferenceRead = null;
@@ -430,7 +426,7 @@ class _PreferenceBridge extends OperitRuntimeBridge {
           _values[_userFile]!.remove(key);
         }
         _values[_userFile]!.addAll(
-          (args['values'] as Map).cast<String, String>(),
+          (args['values'] as Map).cast<String, Object?>(),
         );
         return encodeCoreLink(<Object?>[0, null]);
       case 'removePreferences':
@@ -442,7 +438,7 @@ class _PreferenceBridge extends OperitRuntimeBridge {
       case 'setPreferences':
         preferenceWrites++;
         _values[args['fileName']]!.addAll(
-          (args['values'] as Map).cast<String, String>(),
+          (args['values'] as Map).cast<String, Object?>(),
         );
         return encodeCoreLink(<Object?>[0, null]);
       default:
@@ -460,7 +456,7 @@ class _PreferenceBridge extends OperitRuntimeBridge {
       return Stream<CoreEvent>.error(error);
     }
     final value = switch (request.propertyName) {
-      'preferencesFlow' => Map<String, String>.of(
+      'preferencesFlow' => Map<String, Object?>.of(
         _values[(request.args as Map)['fileName']]!,
       ),
 

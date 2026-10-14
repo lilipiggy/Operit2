@@ -94,7 +94,7 @@ impl StoreFixture {
 
     /// Opens the ordinary preference reader over the same actual host and canonical path.
     fn preferences(&self) -> PreferencesDataStore {
-        PreferencesDataStore::newWithStorage(self.host.clone(), OperitPaths::USER_PREFERENCES_PATH)
+        super::super::UserPreferencesManager::UserPreferencesManager::store(self.host.clone())
     }
 
     /// Reads the actual persisted ordinary preference bytes.
@@ -137,19 +137,19 @@ fn complete_snapshot_round_trips_all_ordinary_keys() {
     assertThemePreferenceSnapshot(&preferences, &value).unwrap();
     assert_eq!(
         preferences.get(&stringPreferencesKey("bubble_rounded_corners_enabled")),
-        Some(&"true".to_string())
+        Some(&json!(true))
     );
     assert_eq!(
         preferences.get(&stringPreferencesKey("bubble_content_padding_left")),
-        Some(&"12".to_string())
+        Some(&json!(12))
     );
     assert_eq!(
         preferences.get(&stringPreferencesKey("bubble_ai_content_padding_right")),
-        Some(&"12".to_string())
+        Some(&json!(12))
     );
     assert_eq!(
         preferences.get(&stringPreferencesKey("unrelated_setting")),
-        Some(&"untouched".to_string())
+        Some(&json!("untouched"))
     );
 }
 
@@ -227,9 +227,9 @@ fn repeat_ordering_and_nullable_colors_are_strict() {
         .unwrap();
 }
 
-/// Keeps a new catalog genuinely empty without writing or binding an implicit default theme.
+/// Initializes only schema metadata while leaving a new catalog and selection empty.
 #[test]
-fn initial_catalog_is_empty_and_read_only() {
+fn initial_catalog_initializes_only_schema_metadata() {
     let fixture = StoreFixture::new();
     let manager = fixture.manager();
     assert!(manager.list().unwrap().is_empty());
@@ -241,11 +241,15 @@ fn initial_catalog_is_empty_and_read_only() {
             activeThemeConfigId: None
         }
     );
-    assert_eq!(fixture.writes(), 0);
-    assert!(!fixture
-        .host
-        .exists(OperitPaths::USER_PREFERENCES_PATH)
-        .unwrap());
+    assert_eq!(fixture.writes(), 1);
+    let values = fixture.preferences().data().unwrap();
+    assert_eq!(values.entries().len(), 1);
+    assert_eq!(
+        values.get(&stringPreferencesKey(
+            operit_store::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME
+        )),
+        Some(&json!(2))
+    );
 }
 
 /// Runs real persisted CRUD without implicitly applying newly created configurations.
@@ -278,7 +282,7 @@ fn independent_crud_preserves_custom_appearance() {
             .data()
             .unwrap()
             .get(&stringPreferencesKey("theme_mode")),
-        Some(&"dark".to_string())
+        Some(&json!("dark"))
     );
     manager.delete(config.id.clone()).unwrap();
     assert!(manager.list().unwrap().is_empty());
@@ -302,10 +306,11 @@ fn apply_commits_snapshot_and_selection_once() {
     let ordinary = fixture.preferences().data().unwrap();
     assertThemePreferenceSnapshot(&ordinary, &config.snapshot).unwrap();
     assert_eq!(
-        serde_json::from_str::<Option<String>>(
+        serde_json::from_value::<Option<String>>(
             ordinary
                 .get(&stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY))
                 .unwrap()
+                .clone()
         )
         .unwrap(),
         Some(config.id.clone())
@@ -459,10 +464,7 @@ fn invalid_saved_records_and_selections_are_not_repaired() {
         fixture
             .preferences()
             .edit(|preferences| {
-                preferences.set(
-                    &stringPreferencesKey(THEME_CONFIGS_KEY),
-                    catalog.to_string(),
-                )
+                preferences.set(&stringPreferencesKey(THEME_CONFIGS_KEY), catalog.clone())
             })
             .unwrap();
         let before = fixture.bytes();
@@ -477,11 +479,11 @@ fn invalid_saved_records_and_selections_are_not_repaired() {
             .edit(|preferences| {
                 preferences.set(
                     &stringPreferencesKey(THEME_CONFIGS_KEY),
-                    json!([valid.clone()]).to_string(),
+                    json!([valid.clone()]),
                 );
                 preferences.set(
                     &stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY),
-                    active.to_string(),
+                    active.clone(),
                 );
             })
             .unwrap();
@@ -506,7 +508,7 @@ fn active_ordinary_divergence_is_reported() {
         manager.apply(named.id).unwrap();
         fixture
             .preferences()
-            .edit(|preferences| preferences.set(&stringPreferencesKey(key), value.to_string()))
+            .edit(|preferences| preferences.set(&stringPreferencesKey(key), value.clone()))
             .unwrap();
         let before = fixture.bytes();
         assert!(manager.getActive().is_err(), "{key}");
@@ -553,7 +555,7 @@ fn actual_runtime_hosts_isolate_catalogs_and_selection() {
     assert!(second.manager().list().unwrap().is_empty());
     assert_eq!(second.manager().getActive().unwrap(), None);
     assert!(second.manager().get(named.id).is_err());
-    assert_eq!(second.writes(), 0);
+    assert_eq!(second.writes(), 1);
 }
 
 /// Emits one coherent state per shared commit and no state for rejected mutations.
@@ -603,10 +605,7 @@ fn apply_clears_only_obsolete_ordinary_theme_override() {
     fixture
         .preferences()
         .edit(|preferences| {
-            preferences.set(
-                &stringPreferencesKey("use_system_theme"),
-                "true".to_string(),
-            );
+            preferences.set(&stringPreferencesKey("use_system_theme"), json!(true));
             preferences.set(&stringPreferencesKey("app_language"), "en".to_string());
         })
         .unwrap();
@@ -626,11 +625,11 @@ fn apply_clears_only_obsolete_ordinary_theme_override() {
         .is_none());
     assert_eq!(
         ordinary.get(&stringPreferencesKey("theme_mode")),
-        Some(&"dark".to_string())
+        Some(&json!("dark"))
     );
     assert_eq!(
         ordinary.get(&stringPreferencesKey("app_language")),
-        Some(&"en".to_string())
+        Some(&json!("en"))
     );
 }
 
@@ -646,7 +645,7 @@ fn partial_appearance_edits_update_only_the_active_named_configuration() {
     let changed = manager
         .patchAppearance(
             snapshot(),
-            BTreeMap::from([("font_scale".to_string(), "1.2".to_string())]),
+            BTreeMap::from([("font_scale".to_string(), json!(1.2))]),
             vec![],
         )
         .unwrap()
@@ -658,7 +657,7 @@ fn partial_appearance_edits_update_only_the_active_named_configuration() {
         .manager()
         .patchAppearance(
             snapshot(),
-            BTreeMap::from([("theme_mode".to_string(), "dark".to_string())]),
+            BTreeMap::from([("theme_mode".to_string(), json!("dark"))]),
             vec![],
         )
         .unwrap();
@@ -682,10 +681,10 @@ fn partial_appearance_rejects_invalid_fields_and_values_without_writing() {
     manager.apply(config.id.clone()).unwrap();
     let before = fixture.bytes();
     for values in [
-        BTreeMap::from([("theme_configs".to_string(), "[]".to_string())]),
-        BTreeMap::from([("font_scale".to_string(), "broken".to_string())]),
-        BTreeMap::from([("font_scale".to_string(), "9".to_string())]),
-        BTreeMap::from([("theme_mode".to_string(), "unknown".to_string())]),
+        BTreeMap::from([("theme_configs".to_string(), json!("[]"))]),
+        BTreeMap::from([("font_scale".to_string(), json!("broken"))]),
+        BTreeMap::from([("font_scale".to_string(), json!(9))]),
+        BTreeMap::from([("theme_mode".to_string(), json!("unknown"))]),
     ] {
         assert!(manager.patchAppearance(snapshot(), values, vec![]).is_err());
         assert_eq!(fixture.bytes(), before);
@@ -693,7 +692,7 @@ fn partial_appearance_rejects_invalid_fields_and_values_without_writing() {
     assert!(manager
         .patchAppearance(
             snapshot(),
-            BTreeMap::from([("font_scale".to_string(), "1.1".to_string())]),
+            BTreeMap::from([("font_scale".to_string(), json!(1.1))]),
             vec!["font_scale".to_string()]
         )
         .is_err());
@@ -714,10 +713,10 @@ fn partial_appearance_reset_preserves_unrelated_values_and_renaming_preserves_ed
         .patchAppearance(
             initial.clone(),
             BTreeMap::from([
-                ("font_scale".to_string(), "1.2".to_string()),
+                ("font_scale".to_string(), json!(1.2)),
                 (
                     "custom_user_avatar_uri".to_string(),
-                    "host:///avatars/user.png".to_string(),
+                    json!("host:///avatars/user.png"),
                 ),
             ]),
             vec![],
@@ -752,7 +751,7 @@ fn partial_appearance_without_a_selected_configuration_keeps_an_empty_catalog() 
     assert!(manager
         .patchAppearance(
             snapshot(),
-            BTreeMap::from([("theme_mode".to_string(), "light".to_string())]),
+            BTreeMap::from([("theme_mode".to_string(), json!("light"))]),
             vec![]
         )
         .unwrap()
@@ -762,7 +761,7 @@ fn partial_appearance_without_a_selected_configuration_keeps_an_empty_catalog() 
     let preferences = fixture.preferences().data().unwrap();
     assert_eq!(
         preferences.get(&stringPreferencesKey("theme_mode")),
-        Some(&"light".to_string())
+        Some(&json!("light"))
     );
 }
 
@@ -826,4 +825,86 @@ impl operit_host_api::HostRuntimeTaskSchedulerHost for ThemeObserverScheduler {
     fn waitForHostRuntimeTaskTurn(&self) -> operit_host_api::HostRuntimeTurnFuture {
         Box::pin(async { Ok(()) })
     }
+}
+
+/// Migrates known user values in version one while preserving ordinary strings exactly.
+#[test]
+fn user_schema_one_migration_preserves_declared_native_types() {
+    let fixture = StoreFixture::new();
+    fixture.host.writeBytes(OperitPaths::USER_PREFERENCES_PATH,&serde_json::to_vec(&json!({
+        "__operit_preferences_schema_version":"1", "font_scale":"1.25", "use_custom_colors":"true", "custom_primary_color":"4278190080",
+        "long_pasted_text_input_enabled":"false", "long_pasted_text_input_threshold":"5000", "theme_configs":"[]", "active_theme_config_id":"null", "app_language":"true"
+    })).unwrap()).unwrap();
+    let preferences = fixture.preferences();
+    let values = preferences.data().unwrap();
+    assert_eq!(preferences.schemaVersion().unwrap(), 2);
+    assert_eq!(
+        values.get(&stringPreferencesKey("font_scale")),
+        Some(&json!(1.25))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("use_custom_colors")),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("custom_primary_color")),
+        Some(&json!(4278190080_u32))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("long_pasted_text_input_enabled")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("long_pasted_text_input_threshold")),
+        Some(&json!(5000))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("theme_configs")),
+        Some(&json!([]))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("active_theme_config_id")),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("app_language")),
+        Some(&json!("true"))
+    );
+}
+
+/// Migrates only API-owned boolean, counter, and map values without guessing text values.
+#[test]
+fn api_schema_one_migration_preserves_declared_native_types() {
+    let fixture = StoreFixture::new();
+    fixture.host.writeBytes(OperitPaths::API_PREFERENCES_PATH,&serde_json::to_vec(&json!({
+        "__operit_preferences_schema_version":"1", "enable_tools":"false", "token_input_test":"23", "mcp_startup_timeout_seconds":"15",
+        "feature_toggles_json":"{\"feature\":true}", "tool_prompt_visibility_json":"{\"tool\":false}", "api_key":"false"
+    })).unwrap()).unwrap();
+    let store = super::super::ApiPreferences::ApiPreferences::store(fixture.host.clone());
+    let values = store.data().unwrap();
+    assert_eq!(store.schemaVersion().unwrap(), 2);
+    assert_eq!(
+        values.get(&stringPreferencesKey("enable_tools")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("token_input_test")),
+        Some(&json!(23))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("mcp_startup_timeout_seconds")),
+        Some(&json!(15))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("feature_toggles_json")),
+        Some(&json!({"feature":true}))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("tool_prompt_visibility_json")),
+        Some(&json!({"tool":false}))
+    );
+    assert_eq!(
+        values.get(&stringPreferencesKey("api_key")),
+        Some(&json!("false"))
+    );
 }

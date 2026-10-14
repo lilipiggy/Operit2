@@ -100,6 +100,7 @@ test('native role sidebar restores rounded nested legacy layout without timestam
   assert.deepEqual(Array.from(target.props.excludedData), ['c1']);
   const swipe = keyedNode(tree, 'sidebar-chat-swipe-c1');
   assert.equal(swipe.type, 'SwipeActions');
+  assert.equal(swipe.props.actionThreshold, 0.5);
   assert.ok(swipe.props.onStartAction.__actionId); assert.ok(swipe.props.onEndAction.__actionId);
   assert.equal(keyedNode(tree, 'sidebar-group-menu-1').type, 'PopupMenu');
   assert.equal(keyedNode(tree, 'sidebar-group-drop-1').type, 'DragTarget');
@@ -263,6 +264,62 @@ test('generic long press and swipe callbacks render plugin-owned actions and con
   assert.equal(keyedNode(rename.tree, 'sidebar-group-name').props.value, '对话 c1');
   const deletion = await screen.dispatch(keyedNode(tree, 'sidebar-chat-swipe-c1').props.onEndAction);
   assert.ok(composeNodes(deletion.tree, node => node.type === 'Text' && node.props.text.includes('确认删除对话')).length > 0);
+});
+
+test('swipe delete waits for confirmation and cancellation leaves the conversation intact', async () => {
+  const chats = [summary('c1')], deleted = [];
+  const screen = mount(context(chats), catalog(chats), { chat: {
+    deleteChat: async id => { deleted.push(id); return { chatId: id, deletedAt: 1 }; },
+  }});
+  const { tree } = await screen.load();
+  const action = keyedNode(tree, 'sidebar-chat-swipe-c1').props.onEndAction;
+  const staged = await screen.dispatch(action);
+  assert.deepEqual(deleted, []);
+  const cancel = composeNodes(staged.tree, node => node.type === 'TextButton' && node.props.text === '取消')[0];
+  const cancelled = await screen.dispatch(cancel.props.onClick);
+  assert.equal(composeNodes(cancelled.tree, node => node.type === 'Dialog').length, 0);
+  assert.deepEqual(deleted, []);
+  const second = await screen.dispatch(action);
+  const confirm = composeNodes(second.tree, node => node.type === 'Button' && node.props.text === '确认')[0];
+  const confirmed = await screen.dispatch(confirm.props.onClick);
+  assert.deepEqual(deleted, ['c1']);
+  assert.equal(composeNodes(confirmed.tree, node => node.type === 'Dialog').length, 0);
+});
+
+for (const entry of ['popup', 'longPress']) {
+  test(entry + ' delete directly removes a conversation without another confirmation', async () => {
+    const chats = [summary('c1')], deleted = [];
+    const screen = mount(context(chats), catalog(chats), { chat: {
+      deleteChat: async id => { deleted.push(id); return { chatId: id, deletedAt: 1 }; },
+    }});
+    const { tree } = await screen.load();
+    let result;
+    if (entry === 'popup') {
+      result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+    } else {
+      const hit = keyedNode(tree, 'sidebar-chat-hit-c1');
+      const combined = hit.props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+      const pressed = await screen.dispatch(combined.onLongClick);
+      const tile = composeNodes(pressed.tree, node => node.type === 'Surface' && node.props.onClick
+        && composeNodes(node, child => child.type === 'Text' && child.props.text === '删除').length > 0)[0];
+      result = await screen.dispatch(tile.props.onClick);
+    }
+    assert.deepEqual(deleted, ['c1']);
+    assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
+  });
+}
+
+test('direct deletion keeps backend lock refusal visible', async () => {
+  const chats = [summary('c1', { locked: true })], calls = [];
+  const screen = mount(context(chats), catalog(chats), { chat: {
+    deleteChat: async id => { calls.push(id); throw new Error('Locked conversation cannot be deleted'); },
+  }});
+  const { tree } = await screen.load();
+  const result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+  assert.deepEqual(calls, ['c1']);
+  assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
+  assert.ok(composeNodes(result.tree, node => node.type === 'Text'
+    && node.props.text.includes('Locked conversation cannot be deleted')).length > 0);
 });
 
 test('plugin menu delegates pin and lock to the real SDK interface, not native business widgets', async () => {

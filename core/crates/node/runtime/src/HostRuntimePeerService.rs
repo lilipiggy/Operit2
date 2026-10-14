@@ -58,6 +58,38 @@ fn endpointWithHost(endpoint: &str, host: &str) -> Option<String> {
     Some(format!("{prefix}{host}:{port}{suffix}"))
 }
 
+/// Resolves the pairing carrier when the caller left it open: an explicit URL
+/// scheme implies its carrier, a bare `ip:port` is classified by one throwaway
+/// probe connection (see `operit_peer_link::detectTransport`).
+async fn resolvePairingTransport(
+    host: &std::sync::Arc<operit_host_api::HostManager::HostManager>,
+    address: &str,
+) -> Result<PeerTransport, String> {
+    if let Some((scheme, _)) = address.split_once("://") {
+        return match scheme {
+            "http" => Ok(PeerTransport::Http),
+            "ws" => Ok(PeerTransport::WebSocket),
+            "tcp" => Ok(PeerTransport::Tcp),
+            other => Err(format!("unsupported link address scheme: {other}")),
+        };
+    }
+    let socket = address.split('/').next().unwrap_or(address);
+    operit_peer_link::detectTransport(host.clone(), socket).await
+}
+
+/// Upgrades a bare socket address to the carrier's URL form; explicit URLs and
+/// non-network carriers (serial, bluetooth) pass through unchanged.
+fn pairingAddressFor(address: &str, transport: PeerTransport) -> String {
+    if address.contains("://") {
+        return address.to_string();
+    }
+    match transport {
+        PeerTransport::Http => format!("http://{address}/link"),
+        PeerTransport::WebSocket => format!("ws://{address}/link"),
+        _ => address.to_string(),
+    }
+}
+
 /// Last transport/session failure only; no credentials or message contents.
 pub fn peerSessionDiagnostic() -> Option<String> { duplex::diagnostic() }
 
@@ -75,9 +107,9 @@ struct Hello {
     #[serde(default)] duplex: bool,
 }
 #[derive(Serialize, Deserialize)]
-struct HelloReply { transcript: crypto::Transcript, info: LinkDeviceInfo, tokenRequired: bool, #[serde(default)] duplex: bool }
+struct HelloReply { transcript: crypto::Transcript, info: LinkDeviceInfo, #[serde(default)] duplex: bool }
 #[derive(Serialize, Deserialize)]
-struct Authorization { tokenProof: Vec<u8>, keyProof: Vec<u8> }
+struct Authorization { keyProof: Vec<u8> }
 #[derive(Serialize, Deserialize)]
 struct Authorized { proof: Vec<u8>, pairingId: String }
 
@@ -232,9 +264,9 @@ impl HostRuntimePeerService {
     async fn raw(&self, target: PeerEndpoint, transport: PeerTransport) -> Result<Arc<dyn PeerConnection>, CoreLinkError> {
         self.state.link.connect(self.state.host.clone(), PeerEndpoint { nodeId: self.state.nodeId.clone(), address: String::new() }, target, transport).await.map_err(error)
     }
-    /// 主动端与接收端共用握手，无论 HTTP/WS/TCP/串口/蓝牙。
+    /// Exchanges ephemeral keys and verifies identity-bound proofs over every transport.
     async fn handshake(&self, raw: Arc<dyn PeerConnection>, purpose: &str, sessionId: &str,
-        saved: Option<&[u8]>, token: Option<&str>,
+        saved: Option<&[u8]>,
     ) -> Result<(Arc<Channel>, String, LinkDeviceInfo, Vec<u8>, String), CoreLinkError> {
         let (private, public) = crypto::ephemeral()?;
         let hello = Hello { version: PAIRING_SERVICE_VERSION, nodeId: self.state.nodeId.clone(),
@@ -253,11 +285,8 @@ impl HostRuntimePeerService {
         let dh = crypto::agree(private, &t.serverPublic)?;
         let root = crypto::derive(&dh, &context, b"operit-pairing-root-v1")?;
         let key = match saved { Some(saved) => crypto::derive(&dh, saved, &context)?, None => root };
-        let tokenProof = if purpose == "start" && reply.tokenRequired {
-            crypto::proof(token.ok_or_else(|| error("Token required for non-LAN pairing"))?.as_bytes(), &context, b"token")
-        } else { vec![] };
         let accepted: Authorized = rawCall(&raw, "authorize", &Authorization {
-            tokenProof, keyProof: crypto::proof(&key, &context, b"client"),
+            keyProof: crypto::proof(&key, &context, b"client"),
         }).await?;
         crypto::verify(&key, &context, b"server", &accepted.proof)?;
         if accepted.pairingId != t.sessionId { return Err(error("Pairing correlation mismatch")); }
@@ -522,7 +551,7 @@ impl HostRuntimePeerService {
         }
         let root = BASE64.decode(&secret).map_err(|_| error("Invalid stored credential"))?;
         let raw = self.raw(target, transport).await?;
-        let result = self.handshake(raw.clone(), purpose, &sessionId, Some(&root), None).await;
+        let result = self.handshake(raw.clone(), purpose, &sessionId, Some(&root)).await;
         let (channel, _, _, _, _) = match result { Ok(result) => result, Err(e) => { raw.close().await; return Err(e); } };
         let reusable = if purpose == "session" && raw.requiresSessionReuse() {
             match self.supportsSessionReturn(&channel).await {
@@ -596,13 +625,6 @@ impl HostRuntimePeerService {
                 Some(BASE64.decode(&record.sessionSecret).map_err(|_| error("Invalid stored credential"))?)
             },
         };
-        let config = self.state.store.hostConfig().map_err(error)?.ok_or_else(|| error("Listener not configured"))?;
-        // 免 token 必须同时开启本地发现，且来源是 Host 实际接入地址；未知来源 fail closed。
-        let lan = config.discoveryEnabled && raw.remoteAddress().is_some_and(|a| isLocalAddress(a.ip()));
-        // USB serial is a physically attached, point-to-point pairing channel.
-        // It has no IP remote address, so treat it as local instead of forcing
-        // the user to provision a second network token before pairing.
-        let tokenRequired = pairingTokenRequired(&hello.purpose, raw.transport(), lan);
         let (private, public) = crypto::ephemeral()?;
         let id = if hello.purpose == "start" { uuid::Uuid::new_v4().to_string() } else { hello.sessionId.clone() };
         let transcript = crypto::Transcript { version: PAIRING_SERVICE_VERSION, sessionId: id.clone(),
@@ -613,14 +635,10 @@ impl HostRuntimePeerService {
         let root = crypto::derive(&dh, &context, b"operit-pairing-root-v1")?;
         let key = match &saved { Some(saved) => crypto::derive(&dh, saved, &context)?, None => root };
         sendValue(&raw, helloRequest.requestId, HelloReply { transcript, duplex: DUPLEX_CHANNELS,
-            info: self.state.store.announcedDeviceInfo(&self.state.info), tokenRequired }).await?;
+            info: self.state.store.announcedDeviceInfo(&self.state.info) }).await?;
         let request = self.readHandshake(&raw, "authorize").await?;
         let authorization: Authorization = fromCoreValue(request.args).map_err(|e| error(e.to_string()))?;
         let admission = (|| {
-            if tokenRequired {
-                if config.token.is_empty() { return Err(error("Non-LAN pairing token is not configured")); }
-                crypto::verify(config.token.as_bytes(), &context, b"token", &authorization.tokenProof)?;
-            }
             crypto::verify(&key, &context, b"client", &authorization.keyProof)?;
             if hello.purpose == "start" {
                 let _guard = self.state.mutation.lock().unwrap();
@@ -737,16 +755,6 @@ fn parseTransport(t: &str) -> Result<PeerTransport, CoreLinkError> { match t {
     "http" => Ok(PeerTransport::Http), "ws" => Ok(PeerTransport::WebSocket), "tcp" => Ok(PeerTransport::Tcp),
     "serial" => Ok(PeerTransport::Serial), "bluetooth" => Ok(PeerTransport::Bluetooth), _ => Err(error("Unknown transport")),
 } }
-fn pairingTokenRequired(purpose: &str, transport: PeerTransport, lan: bool) -> bool {
-    purpose == "start" && !lan && transport != PeerTransport::Serial
-}
-
-fn isLocalAddress(address: std::net::IpAddr) -> bool { match address {
-    std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-    std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
-        || ip.to_ipv4_mapped().is_some_and(|ip| isLocalAddress(ip.into())),
-} }
-
 #[async_trait(?Send)]
 impl RuntimePeerService for HostRuntimePeerService {
     fn spaceClient(&self) -> Option<Arc<dyn CoreLinkSharedClient + Send + Sync>> { duplex::spaceClient(self) }
@@ -765,11 +773,21 @@ impl RuntimePeerService for HostRuntimePeerService {
         Ok(discoveredPeers(records, &self.state.nodeId, &pairedNodeIds))
     }
     /// Checks the known identity and the handshake result before creating a pairing transaction.
-    async fn startPairing(&self, target: PeerEndpoint, transport: PeerTransport, token: Option<&str>) -> Result<PendingPairing, CoreLinkError> {
+    async fn startPairing(&self, target: PeerEndpoint, transport: Option<PeerTransport>) -> Result<PendingPairing, CoreLinkError> {
         if !target.nodeId.is_empty() {
             let _guard = self.state.mutation.lock().unwrap();
             self.ensureDeviceUnpaired(&target.nodeId)?;
         }
+        // A bare `ip:port` input pairs without a user-picked carrier: classify
+        // the endpoint once, then normalize the address for the winner so the
+        // pending record stores the same endpoint a later reconnect would dial.
+        let transport = match transport {
+            Some(transport) => transport,
+            None => resolvePairingTransport(&self.state.host, &target.address)
+                .await
+                .map_err(error)?,
+        };
+        let target = PeerEndpoint { address: pairingAddressFor(&target.address, transport), ..target };
         // Opening a USB-UART can reset an ESP32 through the carrier's modem
         // control lines. Retry the serial handshake after that boot window;
         // network transports keep the original single-attempt behavior.
@@ -780,7 +798,7 @@ impl RuntimePeerService for HostRuntimePeerService {
             let result = if transport == PeerTransport::Serial {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(20),
-                    self.handshake(raw.clone(), "start", "", None, token),
+                    self.handshake(raw.clone(), "start", "", None),
                 )
                 .await
                 {
@@ -788,7 +806,7 @@ impl RuntimePeerService for HostRuntimePeerService {
                     Err(_) => Err(error("Serial pairing handshake timed out")),
                 }
             } else {
-                self.handshake(raw.clone(), "start", "", None, token).await
+                self.handshake(raw.clone(), "start", "", None).await
             };
             raw.close().await;
             match result {
@@ -851,7 +869,7 @@ impl RuntimePeerService for HostRuntimePeerService {
         };
         let raw = self.raw(PeerEndpoint { nodeId: pending.peerNodeId.clone(), address: pending.endpoint.clone() }, pending.transport).await?;
         let confirmation = async {
-            let (channel, _, _, _, _) = self.handshake(raw.clone(), "finish", id, Some(&pending.root), None).await?;
+            let (channel, _, _, _, _) = self.handshake(raw.clone(), "finish", id, Some(&pending.root)).await?;
             let request = CoreCallRequest::new(uuid::Uuid::new_v4().to_string(), HANDSHAKE, "finish",
                 toCoreValue(crypto::proof(&pending.root, id.as_bytes(), code.as_bytes())).map_err(|e| error(e.to_string()))?);
             match channel.exchange(CoreLinkRequest::Call(request.clone())).await? {
@@ -905,7 +923,7 @@ impl RuntimePeerService for HostRuntimePeerService {
         }
         let _lifecycle = self.state.lifecycle.lock().await;
         use crate::PeerStateStore::PeerHostPortMode;
-        let mut config = self.state.store.hostConfig().map_err(error)?.ok_or_else(|| error("Configure bindAddress/token/transports before listening"))?;
+        let mut config = self.state.store.hostConfig().map_err(error)?.ok_or_else(|| error("Configure bindAddress/transports before listening"))?;
         let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone().ok_or_else(|| error("Host scheduler is not installed"))?;
         let mut listeners = self.state.listeners.lock().await;
         let requested: BTreeSet<_> = listeners.keys().copied().chain(transports.iter().copied()).collect();
@@ -1232,27 +1250,6 @@ mod port_fallback_tests {
         let link = Link { addresses: Mutex::new(vec![]), failures: 200, error: "os error 98" };
         assert!(bind(&link, "127.0.0.1:37195", true).await.is_err());
         assert_eq!(link.addresses.lock().unwrap().len(), 128);
-    }
-}
-
-#[cfg(test)]
-mod pairing_policy_tests {
-    use super::*;
-
-    #[test]
-    fn serial_pairing_is_local_without_network_token() {
-        assert!(!pairingTokenRequired("start", PeerTransport::Serial, false));
-    }
-
-    #[test]
-    fn network_pairing_still_requires_token_off_lan() {
-        assert!(pairingTokenRequired("start", PeerTransport::Tcp, false));
-        assert!(!pairingTokenRequired("start", PeerTransport::Tcp, true));
-    }
-
-    #[test]
-    fn established_serial_sessions_never_use_pairing_token() {
-        assert!(!pairingTokenRequired("session", PeerTransport::Serial, false));
     }
 }
 

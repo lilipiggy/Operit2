@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
@@ -424,6 +425,177 @@ void main() {
     },
   );
 
+  for (final pointerKind in [
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+  ]) {
+    testWidgets(
+      'identical in-row swipes delete valid and missing workspaces with $pointerKind',
+      (tester) async {
+        final bridge = _DrawerBridge();
+        final histories = [
+          _history('valid', 0),
+          for (final id in ['missing-a', 'missing-b'])
+            core.ChatHistoryListItem.fromJson({
+              ..._history(id, 0).toJson(),
+              'workspaceName': null,
+            }),
+        ];
+        await _pumpDrawer(
+          tester,
+          bridge,
+          histories,
+          currentChatId: histories.first.id,
+        );
+        final l10n = AppLocalizations.of(
+          tester.element(find.byType(DrawerContent)),
+        )!;
+        for (final history in histories) {
+          final swipe = find.byKey(
+            ValueKey<String>('conversation-${history.id}'),
+          );
+          final bounds = tester.getRect(swipe);
+          final gesture = await tester.startGesture(
+            bounds.center,
+            kind: pointerKind,
+          );
+          for (var step = 1; step <= 10; step++) {
+            await gesture.moveTo(
+              bounds.center - Offset(bounds.width * step / 20, 0),
+            );
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          await gesture.up();
+          await _pumpSidebar(tester);
+          expect(
+            find.text(l10n.deleteConversationTitle),
+            findsOneWidget,
+            reason: history.id,
+          );
+          final previous = bridge.calls
+              .where((call) => call.methodName == 'deleteChatHistory')
+              .length;
+          await tester.tap(find.widgetWithText(TextButton, l10n.cancel));
+          await _pumpSidebar(tester);
+          expect(
+            bridge.calls
+                .where((call) => call.methodName == 'deleteChatHistory')
+                .length,
+            previous,
+          );
+          final row = tester.widget<ConversationDrawerItem>(
+            find.byKey(ValueKey('workspace-chat:${history.id}')),
+          );
+          row.onSwipeDelete();
+          await _pumpSidebar(tester);
+          await tester.tap(find.widgetWithText(TextButton, l10n.delete));
+          await _pumpSidebar(tester);
+          final calls = bridge.calls
+              .where((call) => call.methodName == 'deleteChatHistory')
+              .toList();
+          expect(calls, hasLength(previous + 1));
+          expect((calls.last.args as Map)['chatId'], history.id);
+          expect(tester.takeException(), isNull);
+        }
+      },
+    );
+  }
+
+  testWidgets(
+    'a missing workspace record does not block direct menu deletion',
+    (tester) async {
+      final bridge = _DrawerBridge();
+      final history = core.ChatHistoryListItem.fromJson({
+        ..._history('missing', 0).toJson(),
+        'workspaceName': null,
+      });
+      await _pumpDrawer(tester, bridge, [history], currentChatId: history.id);
+      expect(find.text('工作区缺失'), findsOneWidget);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(DrawerContent)),
+      )!;
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ConversationDrawerItem),
+          matching: find.byTooltip('更多操作'),
+        ),
+      );
+      await _pumpSidebar(tester);
+      await tester.tap(find.text('删除'));
+      await _pumpSidebar(tester);
+      expect(find.text(l10n.deleteConversationTitle), findsNothing);
+      final calls = bridge.calls
+          .where((call) => call.methodName == 'deleteChatHistory')
+          .toList();
+      expect(calls, hasLength(1));
+      expect((calls.single.args as Map)['chatId'], history.id);
+      expect(
+        bridge.calls.where((call) => call.methodName == 'switchChat'),
+        isEmpty,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('long-press delete does not ask for a second confirmation', (
+    tester,
+  ) async {
+    final bridge = _DrawerBridge();
+    final history = _history('valid', 0);
+    await _pumpDrawer(tester, bridge, [history]);
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(DrawerContent)),
+    )!;
+    await tester.longPress(find.text(history.title));
+    await _pumpSidebar(tester);
+    await tester.tap(find.text(l10n.delete));
+    await _pumpSidebar(tester);
+    expect(find.text(l10n.deleteConversationTitle), findsNothing);
+    final calls = bridge.calls
+        .where((call) => call.methodName == 'deleteChatHistory')
+        .toList();
+    expect(calls, hasLength(1));
+    expect((calls.single.args as Map)['chatId'], history.id);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'swipe confirmation and direct deletion preserve Core lock refusal',
+    (tester) async {
+      final bridge = _DrawerBridge(deleteAllowed: false);
+      final history = core.ChatHistoryListItem.fromJson({
+        ..._history('locked', 0).toJson(),
+        'locked': true,
+      });
+      await _pumpDrawer(tester, bridge, [history]);
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(DrawerContent)),
+      )!;
+      final row = tester.widget<ConversationDrawerItem>(
+        find.byType(ConversationDrawerItem),
+      );
+      row.onSwipeDelete();
+      await _pumpSidebar(tester);
+      expect(find.text(l10n.deleteConversationTitle), findsOneWidget);
+      expect(
+        bridge.calls.where((call) => call.methodName == 'deleteChatHistory'),
+        isEmpty,
+      );
+      await tester.tap(find.widgetWithText(TextButton, l10n.delete));
+      await _pumpSidebar(tester);
+      expect(find.text(l10n.chatLockedCannotDelete), findsOneWidget);
+      row.onDelete();
+      await _pumpSidebar(tester);
+      expect(find.text(l10n.deleteConversationTitle), findsNothing);
+      expect(find.text(l10n.chatLockedCannotDelete), findsOneWidget);
+      expect(
+        bridge.calls.where((call) => call.methodName == 'deleteChatHistory'),
+        hasLength(2),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'a missing workspace record can be detached through the explicit chat',
     (tester) async {
@@ -577,7 +749,9 @@ core.ChatHistoryListItem _history(
 
 class _DrawerBridge extends OperitRuntimeBridge {
   /// Creates a workspace sidebar bridge without a selected plugin tab.
-  _DrawerBridge();
+  _DrawerBridge({this.deleteAllowed = true});
+
+  final bool deleteAllowed;
 
   /// Exposes the committed preference snapshot used by reads and watches.
   Map<String, String> get preferences => <String, String>{};
@@ -594,7 +768,7 @@ class _DrawerBridge extends OperitRuntimeBridge {
       'updateChatPinned' ||
       'switchChat' ||
       'unbindChatFromWorkspace' => null,
-      'deleteChatHistory' => true,
+      'deleteChatHistory' => deleteAllowed,
       _ => throw StateError('Unexpected Core call: ${request.methodName}'),
     };
     return encodeCoreLink(<Object?>[0, value]);

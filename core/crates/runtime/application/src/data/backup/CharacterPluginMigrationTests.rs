@@ -362,9 +362,14 @@ fn drops_chunks_whose_legacy_document_was_deleted() {
     let mut source = data();
     source.records.push(document(1));
     let chunk = |id: i64, uuid: &str| {
-        ownerRecord("chunks", "character:legacy", json!({
-            "id":id,"memoryUuid":uuid,"chunkIndex":0,"content":"chunk"
-        })).unwrap()
+        ownerRecord(
+            "chunks",
+            "character:legacy",
+            json!({
+                "id":id,"memoryUuid":uuid,"chunkIndex":0,"content":"chunk"
+            }),
+        )
+        .unwrap()
     };
     source.records.push(chunk(1, "uuid-1"));
     source.records.push(chunk(2, "uuid-99"));
@@ -895,7 +900,7 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
         saved
             .get(&stringPreferencesKey("active_theme_config_id"))
             .unwrap(),
-        &format!("\"{group_id}\"")
+        &json!(group_id)
     );
     assert_eq!(
         saved.get(&stringPreferencesKey("unrelated")).unwrap(),
@@ -975,6 +980,11 @@ fn invalid_legacy_theme_stops_before_publication_and_cleanup() {
         preferences
             .edit(|saved| saved.set(&stringPreferencesKey(key), value.to_string()))
             .unwrap();
+        crate::data::preferences::UserPreferencesManager::UserPreferencesManager::store(
+            fixture.host.clone(),
+        )
+        .data()
+        .unwrap();
         let bytes = fixture
             .host
             .readBytes(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH)
@@ -1028,7 +1038,7 @@ fn completed_migration_upgrade_preserves_explicit_custom_appearance() {
         saved
             .get(&stringPreferencesKey("active_theme_config_id"))
             .unwrap(),
-        "null"
+        &Value::Null
     );
     let manager =
         crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
@@ -1262,7 +1272,7 @@ fn cleanup_removes_retired_memory_policy_and_preserves_live_api_preferences() {
         saved
             .get(&stringPreferencesKey("disable_user_preference_description"))
             .unwrap(),
-        "false"
+        &json!(false)
     );
     assert_eq!(
         saved.get(&stringPreferencesKey("unrelated")).unwrap(),
@@ -1294,7 +1304,7 @@ fn cleanup_keeps_unverified_memory_policy_source() {
             .unwrap()
             .get(&stringPreferencesKey("enable_memory_auto_update"))
             .unwrap(),
-        "false"
+        &json!(false)
     );
     assert_eq!(
         fixture
@@ -1404,4 +1414,37 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
             .unwrap()["value"],
         json!({"complete":true})
     );
+}
+
+/// A mixed transaction keeps its live preferences while the individual retired keys remain identifiable.
+#[test]
+fn retired_character_keys_do_not_discard_a_mixed_native_transaction() {
+    let path = operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH;
+    let mut operation = operit_store::SyncOperationStore::SyncOperation {
+        opId: "test:1".into(),
+        originDeviceId: "test".into(),
+        sequence: 1,
+        domain: "preferences".into(),
+        entityType: "user".into(),
+        entityId: serde_json::to_string(&(
+            path,
+            vec!["character_card_theme_old_theme_mode", "theme_mode"],
+        ))
+        .unwrap(),
+        operation: "transaction".into(),
+        semantics: operit_store::SyncOperationStore::SyncOperationSemantics::Transaction,
+        payload: json!({"storagePath":path,"encrypted":false,"formatVersion":2,"entries":[
+            {"key":"character_card_theme_old_theme_mode","operation":"set","value":"dark"},
+            {"key":"theme_mode","operation":"set","value":"light"}]}),
+        createdAt: 1,
+        schemaVersion: 1,
+    };
+    assert!(!isRetiredCharacterOperation(&operation));
+    assert!(isRetiredCharacterPreferenceKey(
+        path,
+        "character_card_theme_old_theme_mode"
+    ));
+    assert!(!isRetiredCharacterPreferenceKey(path, "theme_mode"));
+    operation.payload["entries"][1]["key"] = json!("character_group_theme_old_theme_mode");
+    assert!(isRetiredCharacterOperation(&operation));
 }

@@ -334,7 +334,7 @@ pub fn readLegacyMemorySettings(
         if let Some(encoded) = preferences.get(&stringPreferencesKey(field)) {
             fields.insert(
                 field.to_string(),
-                serde_json::from_str(encoded).map_err(|error| error.to_string())?,
+                serde_json::from_str(&serde_json::from_value::<String>(encoded.clone()).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?,
             );
         }
     }

@@ -296,11 +296,7 @@ impl ChatHistoryManager {
                 }
                 error => Err(error),
             })
-            .map(|preferences| {
-                preferences
-                    .get(&PreferencesKeys::CURRENT_CHAT_ID())
-                    .cloned()
-            })
+            .mapResult(|preferences| preferences.getTyped::<String>(&PreferencesKeys::CURRENT_CHAT_ID()))
             .stateIn(CoroutineScope, SharingStarted::Lazily, None);
         Ok(Self {
             database,

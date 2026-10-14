@@ -6,7 +6,7 @@ import {mkdtemp, rm, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 
-test('editor starts real TCP device, serves firmware UI, persists token and stops listener', {timeout: 120000}, async t => {
+test('editor starts real TCP device, serves firmware UI, pairs by code and stops listener', {timeout: 120000}, async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'operit-sim-api-'));
   process.env.OPERIT_SIM_STATE_DIR = dir;
   process.env.OPERIT_SIM_BIND = '127.0.0.1:0';
@@ -45,7 +45,7 @@ test('editor starts real TCP device, serves firmware UI, persists token and stop
   assert.equal(first.device.memory.largest8BitBlock, undefined);
   const memory = await (await fetch(base + '/api/simulator/memory')).json();
   assert.deepEqual(memory, first.device.memory);
-  assert.match(first.token, /^[0-9a-f]{48}$/);
+  assert.equal(Object.hasOwn(first, 'token'), false);
   const runtimeData = path.join(dir, 'runtime');
   const runtimeExecutable = path.join(dir, 'operit-esp32-simulator' +
     (process.platform === 'win32' ? '.exe' : ''));
@@ -78,7 +78,7 @@ test('editor starts real TCP device, serves firmware UI, persists token and stop
   const leave = await fetch(base + '/api/simulator/action', {method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'edge_space_leave'})});
   assert.equal(leave.status,200);
-  assert.equal((await state()).token, first.token);
+  assert.equal(Object.hasOwn(await state(), 'token'), false);
   const retired = await fetch(base + '/api/simulator/action', {method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'edge_image:1:a'})});
   assert.equal(retired.status,400);
@@ -109,5 +109,5 @@ test('editor starts real TCP device, serves firmware UI, persists token and stop
   });
   await fetch(base + '/api/simulator/start', {method: 'POST'});
   await new Promise(resolve => setTimeout(resolve, 100));
-  assert.equal((await ready()).token, first.token);
+  assert.equal(Object.hasOwn(await ready(), 'token'), false);
 });

@@ -172,11 +172,7 @@ impl ToolPermissionSystem {
     #[allow(non_snake_case)]
     pub fn getAiPermissionMode(&self) -> Result<AiPermissionMode, PreferencesDataStoreError> {
         let preferences = self.dataStore.data()?;
-        AiPermissionMode::fromString(
-            preferences
-                .get(&Self::AI_PERMISSION_MODE())
-                .map(String::as_str),
-        )
+        AiPermissionMode::fromString(preferences.getTyped::<String>(&Self::AI_PERMISSION_MODE())?.as_deref())
     }
 
     /// Builds the description shown to the requester for a tool invocation.

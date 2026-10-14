@@ -18,9 +18,8 @@ use operit_util::RuntimeStorageLayout::{
     ANDROID_PERMISSION_PREFERENCES_PATH, API_PREFERENCES_PATH,
     CUSTOM_EMOJI_SETTINGS_PREFERENCES_PATH, DATABASE_BACKUP_SETTINGS_PREFERENCES_PATH,
     DISPLAY_PREFERENCES_PATH, GITHUB_AUTH_PREFERENCES_PATH,
-    OPERIT1_SNAPSHOT_SQLITE_INSPECTION_PATH,
-    OPERIT1_SNAPSHOT_SQLITE_INSPECTION_SHM_PATH, OPERIT1_SNAPSHOT_SQLITE_INSPECTION_WAL_PATH,
-    RUNTIME_IMPORTED_OPERIT1_EXTERNAL_FILES_DIR_PATH,
+    OPERIT1_SNAPSHOT_SQLITE_INSPECTION_PATH, OPERIT1_SNAPSHOT_SQLITE_INSPECTION_SHM_PATH,
+    OPERIT1_SNAPSHOT_SQLITE_INSPECTION_WAL_PATH, RUNTIME_IMPORTED_OPERIT1_EXTERNAL_FILES_DIR_PATH,
     RUNTIME_IMPORTED_OPERIT1_FILES_DIR_PATH, UI_PREFERENCES_PATH, USER_PREFERENCES_PATH,
     WAIFU_SETTINGS_PREFERENCES_PATH, WAKE_WORD_PREFERENCES_PATH, WORKSPACE_DIR_PATH,
 };
@@ -34,20 +33,21 @@ use crate::data::backup::Operit1RoomSchemaMigration::{
     prepareOperit1RoomImport, Operit1ToOperit2ChatArchiveBridge,
 };
 use crate::data::backup::Operit1SnapshotArchive::{
-    validateRelativePath, Operit1PreferenceValue,
-    Operit1SnapshotArchive, Operit1SnapshotEntry,
+    validateRelativePath, Operit1PreferenceValue, Operit1SnapshotArchive, Operit1SnapshotEntry,
 };
 use crate::data::backup::Operit1ThinkingMigration::convert_thinking_configurations;
 
-use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
-use crate::data::preferences::ModelConfigManager::ModelConfigManager;
-use crate::data::preferences::TtsConfigManager::TtsConfigManager;
-use operit_model::ApiKeyInfo::{ApiKeyAvailabilityStatus, ApiKeyInfo};
+use super::CharacterPluginLegacyData::sanitizeMemoryOwnerId;
 use super::CharacterPluginLegacyData::{
     CharacterCard, CharacterCardChatModelBindingMode, CharacterCardMemoryBindingMode,
     CharacterCardToolAccessConfig,
 };
 use super::CharacterPluginLegacyData::{CharacterGroupCard, GroupMemberConfig};
+use super::CharacterPluginLegacyData::{PromptTag, TagType};
+use crate::data::preferences::FunctionalConfigManager::FunctionalConfigManager;
+use crate::data::preferences::ModelConfigManager::ModelConfigManager;
+use crate::data::preferences::TtsConfigManager::TtsConfigManager;
+use operit_model::ApiKeyInfo::{ApiKeyAvailabilityStatus, ApiKeyInfo};
 use operit_model::ChatMessage::ChatMessage;
 use operit_model::ChatMessageDisplayMode::ChatMessageDisplayMode;
 use operit_model::FunctionType::FunctionType;
@@ -63,14 +63,12 @@ use operit_model::OperitChatArchive::{
     OperitArchivedChat, OperitArchivedMessage, OperitArchivedMessageVariant, OperitChatArchive,
     ARCHIVE_TYPE, CURRENT_FORMAT_VERSION,
 };
-use super::CharacterPluginLegacyData::{PromptTag, TagType};
 use operit_model::StandardModelParameters::StandardModelParameters;
 use operit_model::TtsConfig::{
     TtsConfig, TtsHttpHeader, TtsHttpResponsePipelineStep, TtsProviderType,
 };
 use operit_store::repository::ChatHistoryManager::ChatHistoryManager;
 use operit_store::repository::UsageStatisticsStore::{TokenStatsModel, UsageStatisticsStore};
-use super::CharacterPluginLegacyData::sanitizeMemoryOwnerId;
 
 const FORMAT_VERSION: i32 = 1;
 const ENTRY_MANIFEST: &str = "manifest.json";
@@ -614,8 +612,15 @@ impl Operit1SnapshotImportManager {
         let mappedFileCount = mappings
             .iter()
             .filter(|(entryName, _)| {
-                parsed.archive.datastorePreferences.get(*entryName)
-                    .is_some_and(|preferences| preferences.keys().any(|key| !isOperit1UnadoptedPreferenceKey(key)))
+                parsed
+                    .archive
+                    .datastorePreferences
+                    .get(*entryName)
+                    .is_some_and(|preferences| {
+                        preferences
+                            .keys()
+                            .any(|key| !isOperit1UnadoptedPreferenceKey(key))
+                    })
             })
             .count();
         let mut fileCount = 0;
@@ -628,10 +633,43 @@ impl Operit1SnapshotImportManager {
             if encodedPreferences.is_empty() {
                 continue;
             }
-            let store = PreferencesDataStore::new(filePath);
+            let mut adopted = operit_store::PreferencesDataStore::emptyPreferences();
+            for (key, value) in &encodedPreferences {
+                adopted.set(&stringPreferencesKey(key), value.clone());
+            }
+            let store = match entryName.as_str() {
+                "payload/files/datastore/user_preferences.preferences_pb" => {
+                    use crate::data::preferences::UserPreferencesManager::UserPreferencesManager;
+                    UserPreferencesManager::migratePreferences(1, &mut adopted)
+                        .map_err(|error| error.to_string())?;
+                    UserPreferencesManager::store(self.storageHost.clone())
+                }
+                "payload/files/datastore/api_settings.preferences_pb" => {
+                    use crate::data::preferences::ApiPreferences::ApiPreferences;
+                    ApiPreferences::migratePreferences(1, &mut adopted)
+                        .map_err(|error| error.to_string())?;
+                    ApiPreferences::store(self.storageHost.clone())
+                }
+                "payload/files/datastore/github_auth_preferences.preferences_pb" => {
+                    use crate::data::preferences::GitHubAuthPreferences::GitHubAuthPreferences;
+                    GitHubAuthPreferences::migratePreferences(1, &mut adopted)
+                        .map_err(|error| error.to_string())?;
+                    (*GitHubAuthPreferences::store(self.storageHost.clone())).clone()
+                }
+                _ => PreferencesDataStore::new(filePath),
+            };
+            for (key, value) in preferences
+                .iter()
+                .filter(|(key, _)| !isOperit1UnadoptedPreferenceKey(key))
+            {
+                if !matches!(value, Operit1PreferenceValue::String(_)) {
+                    let (key, value) = value.toTargetNativePreferenceEntry(key, fileImportPlan)?;
+                    adopted.set(&stringPreferencesKey(&key), value);
+                }
+            }
             store
                 .edit(|target| {
-                    for (key, value) in &encodedPreferences {
+                    for (key, value) in adopted.iterEntries() {
                         target.set(&stringPreferencesKey(key), value.clone());
                     }
                 })

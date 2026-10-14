@@ -529,7 +529,6 @@ pub(super) enum PairStage {
 pub(super) enum PairField {
     Address,
     Transport,
-    Token,
 }
 
 pub(super) struct PairWizardModal {
@@ -537,7 +536,6 @@ pub(super) struct PairWizardModal {
     pub(super) field: PairField,
     pub(super) address: String,
     pub(super) transportIndex: usize,
-    pub(super) token: String,
     /// Node id the handshake must match, when the wizard targets a known
     /// device; empty means "accept whatever node answers the address".
     pub(super) expectedNode: Option<String>,
@@ -2437,7 +2435,7 @@ impl OperitTui {
 
     /// Executes a Space control command through the runtime-owned authorization service.
     async fn handle_network_command(&mut self, args: &[String]) -> Result<(), String> {
-        const USAGE: &str = "network opens the hub panel; subcommands: <show|bootstrap|audit|doctor|devices|identities|identity|admit|remove|disconnect|policy|token|prompts|requests|approve|reject|discover|pair|pair-confirm|pair-cancel|peers|unpair|join|joins|join-cancel|leave>";
+        const USAGE: &str = "network opens the hub panel; subcommands: <show|bootstrap|audit|doctor|devices|identities|identity|admit|remove|disconnect|policy|prompts|requests|approve|reject|discover|pair|pair-confirm|pair-cancel|peers|unpair|join|joins|join-cancel|leave>";
         match args.first().map(String::as_str) {
             None if args.is_empty() => {
                 self.open_network_hub().await;
@@ -2532,9 +2530,6 @@ impl OperitTui {
                 self.networkControl
                     .updateDeviceSpacePolicy(args[2].clone(), args[3].clone())?;
                 self.status_message = format!("network policy updated: {}", args[2]);
-            }
-            Some("token") if args.len() == 1 => {
-                self.network_token_popup()?;
             }
             Some("prompts") if args.len() == 1 => {
                 let prompts = self.networkControl.pairingPrompts()?;
@@ -2679,14 +2674,14 @@ impl OperitTui {
     /// command keeps working for muscle memory, but its UX is the wizard's
     /// code-entry screen instead of an id to copy around.
     async fn network_pair(&mut self, args: &[String]) -> Result<(), String> {
-        let (address, transport, token) = parse_pair_arguments(args)?;
+        let (address, transport) = parse_pair_arguments(args)?;
         let transport_index = PAIR_WIZARD_TRANSPORTS
             .iter()
             .position(|candidate| {
                 peer_transport_label(candidate) == peer_transport_label(&transport)
             })
             .unwrap_or(2);
-        self.open_pair_wizard(address, transport_index, token.unwrap_or_default(), true, None);
+        self.open_pair_wizard(address, transport_index, true, None);
         self.pair_wizard_start().await;
         Ok(())
     }
@@ -2726,7 +2721,6 @@ impl OperitTui {
             field: PairField::Address,
             address: String::new(),
             transportIndex: 2,
-            token: String::new(),
             expectedNode: None,
             expectedLabel: None,
             pairing: None,
@@ -2829,14 +2823,6 @@ impl OperitTui {
             "network join request submitted: {label} must approve it; \
              this TUI refreshes the status automatically"
         ))
-    }
-
-    /// Shows the local pairing token in a popup; it must stay on screen for
-    /// transfer to the other device.
-    fn network_token_popup(&mut self) -> Result<(), String> {
-        let token = self.networkControl.localPairingToken()?;
-        self.open_list_popup(self.text().network_token_title().to_string(), vec![token]);
-        Ok(())
     }
 
     /// Lists this device's outgoing join requests with their live status.
@@ -3317,7 +3303,7 @@ impl OperitTui {
                 }
             }
             KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers.is_empty() => {
-                self.open_pair_wizard(String::new(), 0, String::new(), false, None);
+                self.open_pair_wizard(String::new(), 0, false, None);
             }
             KeyCode::Char('P') => {
                 if let Err(error) = self.network_policy_popup() {
@@ -3330,17 +3316,6 @@ impl OperitTui {
             KeyCode::Char('l') | KeyCode::Char('L') => {
                 if let Err(error) = self.network_leave().await {
                     self.status_message = status_error_line(&error);
-                }
-            }
-            KeyCode::Char('t') | KeyCode::Char('T') => {
-                match self.networkControl.localPairingToken() {
-                    Ok(token) => {
-                        self.open_list_popup(
-                            self.text().network_token_title().to_string(),
-                            vec![token],
-                        );
-                    }
-                    Err(error) => self.status_message = error,
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -3369,7 +3344,6 @@ impl OperitTui {
         &mut self,
         address: String,
         transport_index: usize,
-        token: String,
         autostart: bool,
         expected: Option<(String, String)>,
     ) {
@@ -3382,7 +3356,6 @@ impl OperitTui {
             field: PairField::Address,
             address,
             transportIndex: transport_index.min(PAIR_WIZARD_TRANSPORTS.len() - 1),
-            token,
             expectedNode,
             expectedLabel,
             pairing: None,
@@ -3408,15 +3381,10 @@ impl OperitTui {
         }
         let address = wizard.address.trim().to_string();
         let transport = PAIR_WIZARD_TRANSPORTS[wizard.transportIndex];
-        let token = if wizard.token.trim().is_empty() {
-            None
-        } else {
-            Some(wizard.token.trim().to_string())
-        };
         let expectedNode = wizard.expectedNode.clone().unwrap_or_default();
         match self
             .networkControl
-            .startPairing(expectedNode, address, transport, token)
+            .startPairing(expectedNode, address, Some(transport))
             .await
         {
             Ok(pending) => {
@@ -3521,8 +3489,7 @@ impl OperitTui {
                         if let Some(wizard) = self.pair_wizard.as_mut() {
                             wizard.field = match wizard.field {
                                 PairField::Address => PairField::Transport,
-                                PairField::Transport => PairField::Token,
-                                PairField::Token => PairField::Address,
+                                PairField::Transport => PairField::Address,
                             };
                             wizard.error = None;
                         }
@@ -3530,14 +3497,11 @@ impl OperitTui {
                     (KeyCode::Left, PairField::Transport) => self.cycle_pair_transport(false),
                     (KeyCode::Right, PairField::Transport) => self.cycle_pair_transport(true),
                     (KeyCode::Enter, _) => self.pair_wizard_start().await,
-                    (KeyCode::Backspace, PairField::Address | PairField::Token) => {
+                    (KeyCode::Backspace, PairField::Address) => {
                         if let Some(wizard) = self.pair_wizard.as_mut() {
                             match wizard.field {
                                 PairField::Address => {
                                     wizard.address.pop();
-                                }
-                                PairField::Token => {
-                                    wizard.token.pop();
                                 }
                                 PairField::Transport => {}
                             }
@@ -3545,12 +3509,11 @@ impl OperitTui {
                     }
                     (
                         KeyCode::Char(ch),
-                        PairField::Address | PairField::Token,
+                        PairField::Address,
                     ) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
                         if let Some(wizard) = self.pair_wizard.as_mut() {
                             match wizard.field {
                                 PairField::Address => wizard.address.push(ch),
-                                PairField::Token => wizard.token.push(ch),
                                 PairField::Transport => {}
                             }
                             wizard.error = None;
@@ -3631,7 +3594,6 @@ impl OperitTui {
         self.open_pair_wizard(
             candidate.address.clone(),
             transport_index,
-            String::new(),
             false,
             Some((candidate.nodeId.clone(), candidate.displayName.clone())),
         );
@@ -3727,7 +3689,6 @@ impl OperitTui {
         self.open_pair_wizard(
             String::new(),
             0,
-            String::new(),
             false,
             Some((device_id, device_label.clone())),
         );
@@ -5531,23 +5492,11 @@ pub(super) fn parse_peer_transport(value: &str) -> Result<PeerTransport, String>
     }
 }
 
-/// Parses `/network pair <address> <transport> [--token <token>]`; the token
-/// flag matches the headless CLI spelling. The node id is left empty like the
-/// Flutter manual pairing dialog: the handshake learns the real identity.
-fn parse_pair_arguments(
-    args: &[String],
-) -> Result<(String, PeerTransport, Option<String>), String> {
-    const USAGE: &str =
-        "usage: network pair <address> <http|ws|tcp|serial|bluetooth> [--token <token>]";
-    let [address, transport, tail @ ..] = args else {
-        return Err(USAGE.to_string());
-    };
-    let token = match tail {
-        [] => None,
-        [flag, token] if flag == "--token" => Some(token.clone()),
-        _ => return Err(USAGE.to_string()),
-    };
-    Ok((address.clone(), parse_peer_transport(transport)?, token))
+/// Parses the address and transport for code-confirmed manual pairing.
+fn parse_pair_arguments(args: &[String]) -> Result<(String, PeerTransport), String> {
+    const USAGE: &str = "usage: network pair <address> <http|ws|tcp|serial|bluetooth>";
+    let [address, transport] = args else { return Err(USAGE.to_string()); };
+    Ok((address.clone(), parse_peer_transport(transport)?))
 }
 
 /// Resolves the pairing a `/network pair-confirm|pair-cancel` refers to: an
@@ -6112,26 +6061,15 @@ mod tests {
         assert!(parse_peer_transport("quic").is_err());
     }
 
+    /// Verifies manual pairing accepts only its address and transport.
     #[test]
-    fn parse_pair_arguments_reads_address_transport_and_optional_token() {
-        let args = |values: &[&str]| values.iter().map(ToString::to_string).collect::<Vec<_>>();
-
-        let (address, transport, token) = parse_pair_arguments(&args(&["192.168.1.8:4835", "ws"]))
-            .expect("pair arguments must parse");
+    fn parse_pair_arguments_reads_address_and_transport() {
+        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        let (address, transport) = parse_pair_arguments(&args(&["192.168.1.8:4835", "ws"])).unwrap();
         assert_eq!(address, "192.168.1.8:4835");
-        assert!(matches!(transport, PeerTransport::WebSocket));
-        assert_eq!(token, None);
-
-        let (address, transport, token) =
-            parse_pair_arguments(&args(&["192.168.1.8:4835", "tcp", "--token", "secret"]))
-                .expect("pair arguments with token must parse");
-        assert_eq!(address, "192.168.1.8:4835");
-        assert!(matches!(transport, PeerTransport::Tcp));
-        assert_eq!(token.as_deref(), Some("secret"));
-
+        assert_eq!(transport, PeerTransport::WebSocket);
         assert!(parse_pair_arguments(&args(&["192.168.1.8:4835"])).is_err());
-        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "quic"])).is_err());
-        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "ws", "--token"])).is_err());
+        assert!(parse_pair_arguments(&args(&["192.168.1.8:4835", "ws", "--token", "secret"])).is_err());
     }
 
     #[test]

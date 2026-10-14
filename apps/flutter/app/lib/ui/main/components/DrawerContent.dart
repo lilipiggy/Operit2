@@ -204,14 +204,10 @@ class _DrawerContentState extends State<DrawerContent> {
     await _updateConversationTitle(history, title);
   }
 
-  /// Confirms canonical conversation deletion without managing plugin groups.
+  /// Confirms a swipe deletion before calling the canonical conversation API.
   Future<void> _showDeleteConversationDialog(
     core_proxy.ChatHistoryListItem history,
   ) async {
-    if (history.locked) {
-      await _deleteConversation(history);
-      return;
-    }
     final confirmed = await showDialog<bool>(
       context: context,
       useRootNavigator: true,
@@ -268,7 +264,7 @@ class _DrawerContentState extends State<DrawerContent> {
       case ConversationAction.unbindWorkspace:
         await _showUnbindConversationWorkspaceDialog(history);
       case ConversationAction.delete:
-        await _showDeleteConversationDialog(history);
+        await _deleteConversation(history);
     }
   }
 
@@ -534,7 +530,8 @@ class _DrawerContentState extends State<DrawerContent> {
         onRename: () => unawaited(_showRenameConversationDialog(history)),
         onTogglePinned: () => unawaited(_updateConversationPinned(history)),
         onToggleLocked: () => unawaited(_updateConversationLocked(history)),
-        onDelete: () => unawaited(_showDeleteConversationDialog(history)),
+        onDelete: () => unawaited(_deleteConversation(history)),
+        onSwipeDelete: () => unawaited(_showDeleteConversationDialog(history)),
         onLongPress: () => unawaited(_showConversationActionDialog(history)),
         canDetach: operitSupportsDesktopMultiWindow,
         onDetach: () => unawaited(

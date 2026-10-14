@@ -725,8 +725,6 @@ mod tests {
         let mut state = ChatState {
             currentChatId: "handoff-chat".to_string(),
             currentChatTitle: "title".to_string(),
-            currentCharacterCardName: None,
-            currentCharacterCardAvatarUri: None,
             currentWorkspacePath: None,
             isLoading: false,
             inputProcessingState: InputProcessingState::Completed,

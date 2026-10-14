@@ -271,7 +271,6 @@ fn runFirmware(
         let configChanged = match peers.hostConfig().map_err(HostError::new)? {
             Some(saved) => {
                 saved.bindAddress != peerBindAddress
-                    || saved.token != config.edgeToken
                     || saved.transports != peerTransports
                     || !saved.discoveryEnabled
                     || saved.portMode != PeerHostPortMode::Fixed
@@ -282,7 +281,6 @@ fn runFirmware(
             peers
                 .saveHostConfig(&PeerHostConfig {
                     bindAddress: peerBindAddress,
-                    token: config.edgeToken.clone(),
                     transports: peerTransports.clone(),
                     discoveryEnabled: true,
                     portMode: PeerHostPortMode::Fixed,

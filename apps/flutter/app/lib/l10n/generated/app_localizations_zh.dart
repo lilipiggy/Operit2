@@ -2205,9 +2205,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsRuntimeDiscoveredEdges => 'ESP32 设备';
 
   @override
-  String get settingsRuntimeEdgeEndpointTokenRequired => 'Edge 地址和 Token 不能为空';
-
-  @override
   String get settingsRuntimeEdgeEndpointRequired => 'Edge 地址不能为空';
 
   @override
@@ -2218,12 +2215,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsRuntimeConnectionInitiatedByOtherDevice => '连接由对方设备发起';
-
-  @override
-  String get settingsRuntimePairToken => '连接 Token';
-
-  @override
-  String get settingsRuntimePairTokenHint => '跨网配对时必填；同网段设备可留空';
 
   @override
   String get settingsRuntimePairCode => '配对码';
@@ -2239,6 +2230,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsRuntimeTcpAddressHint => 'host:端口，例如 192.168.1.10:37195';
+
+  @override
+  String get settingsRuntimeTransportAuto => '自动（推荐）';
+
+  @override
+  String get settingsRuntimeTransportAutoHint =>
+      '输入 IP:端口，自动识别 HTTP/WebSocket/TCP 协议';
 
   @override
   String settingsRuntimeConnectionFailed(String error) {
@@ -2313,7 +2311,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsRuntimeWebPairDescription =>
-      '输入其他设备的地址和配对令牌，让此浏览器作为主动配对方连接。';
+      '输入其他设备的地址并确认配对码，让此浏览器作为主动配对方连接。';
 
   @override
   String settingsRuntimeDiscoveredSpaceSummary(
@@ -3684,24 +3682,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String chatMessageCacheHitRate(String rate) {
     return '缓存命中率: $rate';
   }
-
-  @override
-  String get settingsPeerToken => '连接 token';
-
-  @override
-  String get settingsPeerTokenHelp => '远程连接必须使用这个 token。';
-
-  @override
-  String get settingsPeerCopyToken => '复制 token';
-
-  @override
-  String get settingsPeerRefreshToken => '刷新 token';
-
-  @override
-  String get settingsPeerTokenCopied => '连接 token 已复制。';
-
-  @override
-  String get settingsPeerTokenRequired => '请输入或刷新连接 token。';
 
   @override
   String get settingsPeerPortModeHelp =>

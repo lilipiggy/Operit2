@@ -30,16 +30,13 @@ space show
 control show
 peers
 prompts
-token show
 pair-start <对方-node-id> <地址> tcp
 pair-finish <pairing-id> <对方显示的六位验证码>
 space join <对方-node-id>
 space requests outgoing
 ```
 
-- 局域网免 token 配对要求接收端开启发现，且来源通过实际连接地址校验。
-- 使用 `--no-discovery`、回环地址或其他不满足局域网条件的连接时，需要显式 token：
-  `pair-start <node-id> <地址> tcp --token <接收端-token>`。
+- 所有传输都通过接收端显示的 6 位配对码确认；发现开关和连接来源不改变配对流程。
 - HTTP 地址形如 `http://host:port/link`，WS 地址形如 `ws://host:port/link`。
 - 单纯配对不授予空间权限。申请获批并加入同一 Space 后，双方通过原已认证连接交换空间专用回连凭证，**不需要再反向配对一次**。双方需运行新版本并启用 TCP/HTTP/WS 监听；回连地址使用实际接入来源 IP 与已绑定监听端口，不依赖发现开关。
 - 空间回连凭证不改变配对方向或设备角色；每次使用重新检查当前空间、成员资格、原配对和撤销状态。离开空间或撤销后旧凭证不可用。

@@ -249,7 +249,7 @@ class _ComposeDslRendererState extends State<_ComposeDslRenderer> {
         final startId = _actionId(node.props['onStartAction']);
         final endId = _actionId(node.props['onEndAction']);
         return SwipeActions(
-          actionThreshold: (_number(node.props['actionThreshold']) ?? 0.4)
+          actionThreshold: (_number(node.props['actionThreshold']) ?? 0.5)
               .clamp(0.05, 1),
           enabled: _enabled(),
           onStartAction: startId == null

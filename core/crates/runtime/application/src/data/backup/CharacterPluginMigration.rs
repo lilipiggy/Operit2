@@ -792,6 +792,13 @@ fn validateMigrationData(data: &CharacterMigrationData) -> Result<(), String> {
     Ok(())
 }
 
+/// Identifies individual keys whose business owner has moved into character plugin storage.
+pub fn isRetiredCharacterPreferenceKey(path: &str, key: &str) -> bool {
+    (path == operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH
+        && (key.starts_with("character_card_theme_") || key.starts_with("character_group_theme_")))
+        || (path == API_PREFERENCES_PATH && key == "enable_memory_auto_update")
+}
+
 /// Identifies retired source operations so synchronization cannot recreate migrated owner directories.
 pub fn isRetiredCharacterOperation(
     operation: &operit_store::SyncOperationStore::SyncOperation,
@@ -801,26 +808,30 @@ pub fn isRetiredCharacterOperation(
         DATA_MEMORY_CHARACTERS_DIR_PATH, DATA_MEMORY_SHARED_DIR_PATH, PROMPT_TAGS_PREFERENCES_PATH,
         SHARED_MEMORY_STORES_PREFERENCES_PATH,
     };
-    if operation.domain == "preferences"
-        && operation.payload.get("storagePath").and_then(Value::as_str)
-            == Some(operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH)
-        && operation
-            .payload
-            .get("key")
-            .and_then(Value::as_str)
-            .is_some_and(|key| {
-                key.starts_with("character_card_theme_")
-                    || key.starts_with("character_group_theme_")
-            })
-    {
-        return true;
-    }
-    if operation.domain == "preferences"
-        && operation.payload.get("storagePath").and_then(Value::as_str)
-            == Some(API_PREFERENCES_PATH)
-        && operation.payload.get("key").and_then(Value::as_str) == Some("enable_memory_auto_update")
-    {
-        return true;
+    if operation.domain == "preferences" {
+        if let Some(path) = operation.payload.get("storagePath").and_then(Value::as_str) {
+            if operation.operation == "transaction" {
+                if let Some(entries) = operation.payload.get("entries").and_then(Value::as_array) {
+                    if !entries.is_empty()
+                        && entries.iter().all(|entry| {
+                            entry
+                                .get("key")
+                                .and_then(Value::as_str)
+                                .is_some_and(|key| isRetiredCharacterPreferenceKey(path, key))
+                        })
+                    {
+                        return true;
+                    }
+                }
+            } else if operation
+                .payload
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| isRetiredCharacterPreferenceKey(path, key))
+            {
+                return true;
+            }
+        }
     }
     let path = match operation.domain.as_str() {
         "objectbox" => return true,
@@ -1024,7 +1035,7 @@ fn preferences(path: std::path::PathBuf) -> Result<Preferences, String> {
 fn preference<'a>(source: &'a Preferences, key: &str) -> Result<&'a str, String> {
     source
         .get(&stringPreferencesKey(key))
-        .map(String::as_str)
+        .and_then(Value::as_str)
         .ok_or_else(|| format!("Legacy preference is missing: {key}"))
 }
 
@@ -1032,7 +1043,13 @@ fn preference<'a>(source: &'a Preferences, key: &str) -> Result<&'a str, String>
 fn identityList(source: &Preferences, key: &str) -> Result<Vec<String>, String> {
     let values = source
         .get(&stringPreferencesKey(key))
-        .map(|raw| serde_json::from_str::<Vec<String>>(raw).map_err(|error| error.to_string()))
+        .map(|raw| {
+            serde_json::from_str::<Vec<String>>(
+                raw.as_str()
+                    .ok_or("Legacy identity list must be encoded text")?,
+            )
+            .map_err(|error| error.to_string())
+        })
         .transpose()?;
     Ok(values.into_iter().flatten().collect())
 }
@@ -1070,11 +1087,15 @@ fn preferenceRecord(
 
 /// Transfers the original global policy once; subsequent reads/writes belong to the plugin.
 fn legacyGlobalMemoryPreferences(paths: &RuntimeStorePaths) -> Result<Value, String> {
-    let api = preferences(paths.runtime_storage_path(API_PREFERENCES_PATH))?;
+    let api = crate::data::preferences::ApiPreferences::ApiPreferences::new(
+        paths.runtime_dir().to_path_buf(),
+    )
+    .snapshot()
+    .map_err(|error| error.to_string())?;
     let boolean = |key: &str, default: bool| -> Result<bool, String> {
         api.get(&stringPreferencesKey(key))
             .map(|raw| {
-                raw.parse::<bool>()
+                serde_json::from_value::<bool>(raw.clone())
                     .map_err(|_| format!("Invalid legacy boolean: {key}"))
             })
             .transpose()
@@ -1136,8 +1157,11 @@ fn legacyPreferences(paths: &RuntimeStorePaths) -> Result<CharacterMigrationData
         let tool_key =
             stringPreferencesKey(&format!("character_card_{id}_tool_access_config_json"));
         let tool_access = match cards.get(&tool_key) {
-            Some(raw) => serde_json::from_str::<CharacterCardToolAccessConfig>(raw)
-                .map_err(|error| error.to_string())?,
+            Some(raw) => serde_json::from_str::<CharacterCardToolAccessConfig>(
+                raw.as_str()
+                    .ok_or("Legacy tool access config must be encoded text")?,
+            )
+            .map_err(|error| error.to_string())?,
             None => CharacterCardToolAccessConfig::default(),
         };
         value["toolAccessConfig"] =
@@ -1189,7 +1213,7 @@ fn legacyPreferences(paths: &RuntimeStorePaths) -> Result<CharacterMigrationData
     }
     let group = groups
         .get(&stringPreferencesKey("active_character_group_id"))
-        .filter(|id| !id.is_empty());
+        .filter(|id| id.as_str() != Some(""));
     data.active = Some(match group {
         Some(id) => json!({"CharacterGroup":{"id":id}}),
         None => json!({"CharacterCard":{"id":preference(&cards,"active_character_card_id")?}}),
@@ -1585,7 +1609,7 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
         validated_paths.push((path, memory_owner));
     }
     let api_preferences =
-        PreferencesDataStore::newWithStorage(writer.storage.clone(), API_PREFERENCES_PATH);
+        crate::data::preferences::ApiPreferences::ApiPreferences::store(writer.storage.clone());
     api_preferences
         .try_edit_result(
             |saved| -> Result<(), operit_store::PreferencesDataStore::PreferencesDataStoreError> {
@@ -1606,11 +1630,11 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
                             operit_store::PreferencesDataStore::PreferencesDataStoreError::Message,
                         )?;
                     let source =
-                        serde_json::from_str::<bool>(saved.get(&key).ok_or_else(|| {
+                        serde_json::from_value::<bool>(saved.get(&key).ok_or_else(|| {
                             operit_store::PreferencesDataStore::PreferencesDataStoreError::Message(
                                 "Legacy memory policy disappeared during cleanup".into(),
                             )
-                        })?)
+                        })?.clone())
                         .map_err(|error| {
                             operit_store::PreferencesDataStore::PreferencesDataStoreError::Message(
                                 error.to_string(),
@@ -1776,7 +1800,9 @@ impl CharacterPluginWriter {
         }
         if clean_preferences {
             let preferences =
-                PreferencesDataStore::newWithStorage(self.storage.clone(), USER_PREFERENCES_PATH);
+                crate::data::preferences::UserPreferencesManager::UserPreferencesManager::store(
+                    self.storage.clone(),
+                );
             preferences.try_edit_result(|saved| -> Result<(), operit_store::PreferencesDataStore::PreferencesDataStoreError> {
                 let source_keys = plan.sourceEntries.iter().map(|(key, _)| key.as_str()).collect::<BTreeSet<_>>();
                 for (key, _) in saved.iterEntries() {
@@ -1927,9 +1953,11 @@ impl CharacterPluginWriter {
             }
         }
         let preferences =
-            PreferencesDataStore::newWithStorage(self.storage.clone(), USER_PREFERENCES_PATH)
-                .data()
-                .map_err(|error| error.to_string())?;
+            crate::data::preferences::UserPreferencesManager::UserPreferencesManager::store(
+                self.storage.clone(),
+            )
+            .data()
+            .map_err(|error| error.to_string())?;
         self.migrateThemes("operit2-v27", &preferences, &targets, true)
     }
 }

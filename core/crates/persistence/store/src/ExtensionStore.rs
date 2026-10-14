@@ -181,7 +181,7 @@ impl ExtensionStore {
             ] {
                 if let Some(value) = prefs.get(&stringPreferencesKey(old)) {
                     let values: Vec<String> =
-                        serde_json::from_str(value).map_err(|e| e.to_string())?;
+                        serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
                     settings[new] = serde_json::json!(values
                         .into_iter()
                         .filter(|name| members.contains(name))
@@ -189,14 +189,14 @@ impl ExtensionStore {
                 }
             }
             if let Some(value) = prefs.get(&stringPreferencesKey("toolpkg_order")) {
-                let order: Vec<String> = serde_json::from_str(value).map_err(|e| e.to_string())?;
+                let order: Vec<String> = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
                 if let Some(index) = order.iter().position(|name| name == id) {
                     settings["order"] = serde_json::json!(index);
                 }
             }
             if let Some(value) = prefs.get(&stringPreferencesKey("toolpkg_subpackage_states")) {
                 let states: BTreeMap<String, bool> =
-                    serde_json::from_str(value).map_err(|e| e.to_string())?;
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
                 settings["subpackageStates"] = serde_json::json!(states
                     .into_iter()
                     .filter(|(name, _)| members.contains(name))
@@ -262,7 +262,7 @@ impl ExtensionStore {
                         .map_err(|e| e.to_string())?
                         .get(&stringPreferencesKey("settings"))
                     {
-                        record.settings = serde_json::from_str(value).map_err(|e| e.to_string())?;
+                        record.settings = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
                     }
                     self.validate(&record)?;
                     records.push(record);
@@ -502,21 +502,33 @@ impl ExtensionStore {
         self.configRoot(&self.record("package", id)?)
     }
 
-    /// Settings use the existing field-wise preference synchronization; installation bytes do not.
+    /// Synchronizes one complete settings value independently from installation bytes.
     fn settingsStore(&self, record: &ExtensionRecord) -> Result<PreferencesDataStore, String> {
         let path = recordPath(&record.kind, &record.id, &record.scope)?
             .replace("/records/", "/settings/")
             .replace(".json", ".preferences.json");
-        Ok(if record.scope == "space" {
+        let store = if record.scope == "space" {
             PreferencesDataStore::newWithStorage(self.storage.clone(), path)
         } else {
             (*CoreNodeStateStore::newWithStorage(self.storage.clone(), path)).clone()
-        }
-        .withStructuredJsonSync())
+        };
+        Ok(store.withSchema(2, |version, preferences| match version {
+            0 => Ok(()),
+            1 => {
+                let key = stringPreferencesKey("settings");
+                if let Some(encoded) = preferences.getTyped::<String>(&key)? {
+                    let settings: Value = serde_json::from_str(&encoded)?;
+                    preferences.set(&key, settings);
+                }
+                Ok(())
+            }
+            from => Err(crate::PreferencesDataStore::PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
+        }))
     }
 
+    /// Writes complete plugin or MCP settings as one synchronization entity.
     fn writeSettings(&self, record: &ExtensionRecord) -> Result<(), String> {
-        let value = serde_json::to_string(&record.settings).map_err(|e| e.to_string())?;
+        let value = serde_json::to_value(&record.settings).map_err(|e| e.to_string())?;
         self.settingsStore(record)?
             .edit(|preferences| {
                 preferences.set(&stringPreferencesKey("settings"), value);

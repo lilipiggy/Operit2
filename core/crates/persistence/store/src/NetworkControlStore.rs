@@ -146,12 +146,30 @@ impl NetworkControlStore {
         Ok(Self {
             spaceStore: CoreSpaceStore::new(storage.clone()),
             syncOperationStore: SyncOperationStore::new(storage.clone(), RUNTIME_SYNC_DIR_PATH),
-            controlProjection: CoreNodeStateStore::newWithStorage(storage, "runtime/link_access/space_policy.preferences.json"),
+            controlProjection: Self::projectionStore(storage),
             nodeLocalOnly: false,
             localNodeId,
             stateCache: Arc::new(Mutex::new(None)),
             cacheCommands: true,
         })
+    }
+
+    /// Opens the versioned local projection of synchronized control operations.
+    pub fn projectionStore(storage: Arc<dyn RuntimeStorageHost>) -> CoreNodeStateStore {
+        CoreNodeStateStore::newWithStorage(storage, "runtime/link_access/space_policy.preferences.json")
+            .withSchema(2, |version, preferences| match version {
+                0 => Ok(()),
+                1 => {
+                    for (key, value) in preferences.entries() {
+                        if key == crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME { continue; }
+                        let encoded = serde_json::from_value::<String>(value)?;
+                        let operation: SyncOperation = serde_json::from_str(&encoded)?;
+                        preferences.set(&stringPreferencesKey(&key), serde_json::to_value(operation)?);
+                    }
+                    Ok(())
+                }
+                from => Err(crate::PreferencesDataStore::PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
+            })
     }
 
     /// Endpoint authority is durable node-local control state, not a business
@@ -427,8 +445,9 @@ impl NetworkControlStore {
             .controlProjection
             .data()
             .map_err(|error| error.to_string())?
-            .entries()
-            .len())
+            .iterEntries()
+            .filter(|(key, _)| *key != crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME)
+            .count())
     }
 
     /// Reads an archived local policy without transmitting unrelated Spaces.
@@ -538,9 +557,9 @@ impl NetworkControlStore {
                         validateControlOperation(&operation)?;
                         let key = stringPreferencesKey(&operation.opId);
                         if let Some(old) = preferences.get(&key) {
-                            let old: SyncOperation = serde_json::from_str(old).map_err(|error| error.to_string())?;
+                            let old: SyncOperation = serde_json::from_value(old.clone()).map_err(|error| error.to_string())?;
                             if old != operation { return Err("Conflicting legacy authority command".into()); }
-                        } else { preferences.set(&key, serde_json::to_string(&operation).map_err(|error| error.to_string())?); }
+                        } else { preferences.set(&key, serde_json::to_value(&operation).map_err(|error| error.to_string())?); }
                     } else {
                         let record = crate::PreferencesDataStore::PreferencesSyncedEntry::fromOperation(&operation)
                             .map_err(|_| "Endpoint journal contains business operations; refusing automatic retirement")?;
@@ -575,7 +594,8 @@ impl NetworkControlStore {
         let mut preferences = self.controlProjection.data().map_err(|e| e.to_string())?;
         let mut retired = Vec::new();
         for (id, encoded) in preferences.iterEntries() {
-            let operation: SyncOperation = serde_json::from_str(encoded).map_err(|e| e.to_string())?;
+            if id == crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME { continue; }
+            let operation: SyncOperation = serde_json::from_value(encoded.clone()).map_err(|e| e.to_string())?;
             if decodeControlOperation(&operation)?.spaceId != spaceId { retired.push(id.to_owned()); }
         }
         if !retired.is_empty() {
@@ -600,9 +620,9 @@ impl NetworkControlStore {
             let record = decodeControlOperation(operation)?;
             if record.spaceId != spaceId { return Err("Control projection belongs to another Space".into()); }
             let key = stringPreferencesKey(&operation.opId);
-            let encoded = serde_json::to_string(operation).map_err(|error| error.to_string())?;
+            let encoded = serde_json::to_value(operation).map_err(|error| error.to_string())?;
             if let Some(old) = preferences.get(&key) {
-                let old: SyncOperation = serde_json::from_str(old).map_err(|error| error.to_string())?;
+                let old: SyncOperation = serde_json::from_value(old.clone()).map_err(|error| error.to_string())?;
                 if old != *operation { return Err("Conflicting immutable Space control operation".into()); }
             } else { preferences.set(&key, encoded); }
         }
@@ -729,8 +749,9 @@ impl NetworkControlStore {
             .map_err(|error| error.to_string())?;
         let mut unique: BTreeMap<String, SyncOperation> = commands.into_iter()
             .map(|operation| (operation.opId.clone(), operation)).collect();
-        for (_, encoded) in self.controlProjection.data().map_err(|error| error.to_string())?.entries() {
-            let operation: SyncOperation = serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+        for (key, encoded) in self.controlProjection.data().map_err(|error| error.to_string())?.entries() {
+            if key == crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME { continue; }
+            let operation: SyncOperation = serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
             validateControlOperation(&operation)?;
             if let Some(old) = unique.get(&operation.opId) {
                 if old != &operation { return Err("Conflicting immutable Space control operation".into()); }

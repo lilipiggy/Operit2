@@ -280,7 +280,7 @@ fn opening_version27_atomically_upgrades_records_and_reopens_version28() {
             .first()
             .unwrap()
             .get(&key)
-            .map(String::as_str),
+            .and_then(serde_json::Value::as_str),
         Some("kept-preference")
     );
     let schema = schemaDefinitions(&database.store);

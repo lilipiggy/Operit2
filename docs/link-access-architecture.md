@@ -151,6 +151,21 @@ HTTP 在同一连接标识下用持续 GET 响应体接收字节、用 POST 发�
 `listen`。三个基础操作是这些 I/O 接口承载的协议，不是五种 transport 各自实现
 三套业务方法。
 
+### 载体自动识别（配对拨号）
+
+用户只输入 `ip:port` 时，`startPairing` 以 `transport = null` 表示"由地址自行判定"：
+
+* 地址带 URL scheme 时直接映射载体（`http://`/`ws://`/`tcp://`），不做网络探测。
+* 裸 `ip:port` 用一次一次性 TCP 探测连接分类（`operit_peer_link::detectTransport`）：
+  发送一个 WebSocket 升级请求，按首个响应判定——`HTTP/… 101` 为 WebSocket、
+  任何其他 `HTTP/…` 状态为 HTTP、无字节即断开（长度帧接收方丢弃了不可读的帧头）
+  为 TCP。探测连接随即关闭，正式连接用判定出的载体重新建立。
+* 判定后地址按载体规范化（HTTP/WS 补全 `scheme://…/link`），pending 配对记录保存
+  规范化后的端点，后续重拨与观测地址刷新使用同一路径。
+* 探测对目标无持久副作用：帧接收方会计一次被丢弃的坏帧；HTTP 服务方只看到一次
+  未完成的升级请求。
+
+
 ## 6. 双向通道和流生命周期
 
 握手双方声明 `duplex` 能力，Peer runtime 为具备能力的通道建立请求分发和响应关联。

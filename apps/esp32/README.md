@@ -12,18 +12,8 @@ rendered on this display unless it has an explicit Edge adaptation.
 
 ## Local configuration
 
-The ESP32 uses the same Edge token as the Core/CLI main link. Put that token in
-the local `.edge-token` file under `apps/esp32`; the firmware build reads it
-automatically. The file is ignored by Git and must never be committed or
-included in logs. `OPERIT_EDGE_TOKEN` can still override it for CI or a
-deliberate one-off build:
-
-```powershell
-cargo build --release
-```
-
-Leave the setup page's token field empty to keep using this same token. Enter a
-different value only when the Core/CLI token is intentionally being rotated.
+Pairing uses only the six-digit code shown on the device screen. No deployment
+token or setup-page token is required.
 
 Use the ESP32 toolchain and partition table documented in the repository's
 `BUILDING.md`. Select the actual serial port for your device rather than assuming

@@ -69,3 +69,8 @@ pub use TtsConfigManager::*;
 pub use UserPreferencesManager::*;
 pub use WaifuPreferences::*;
 pub use WakeWordPreferences::*;
+
+#[path = "SidebarDockPreferences.rs"]
+pub(crate) mod SidebarDockPreferences;
+#[path = "OnboardingPreferences.rs"]
+pub(crate) mod OnboardingPreferences;

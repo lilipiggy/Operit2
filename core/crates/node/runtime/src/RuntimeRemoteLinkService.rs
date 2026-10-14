@@ -164,11 +164,12 @@ impl RuntimeRemoteLinkService {
     pub async fn discoverPeers(&self, timeoutMs: u64) -> Result<Vec<crate::NodeServices::DiscoveredPeer>, String> {
         self.nodeServices()?.peers().discoverPeers(timeoutMs).await.map_err(|error| error.to_string())
     }
+    /// Creates pending pairing for subsequent code confirmation.
     pub async fn startPairing(&self, nodeId: String, address: String,
-        transport: operit_peer_link::PeerTransport, token: Option<String>,
+        transport: Option<operit_peer_link::PeerTransport>,
     ) -> Result<crate::NodeServices::PendingPairing, String> {
         self.nodeServices()?.peers().startPairing(crate::NodeServices::PeerEndpoint { nodeId, address },
-            transport, token.as_deref()).await.map_err(|error| error.to_string())
+            transport).await.map_err(|error| error.to_string())
     }
     pub async fn finishPairing(&self, pairingId: String, confirmationCode: String)
         -> Result<crate::NodeServices::PairedPeer, String> {
@@ -196,21 +197,12 @@ impl RuntimeRemoteLinkService {
     pub async fn stopListening(&self) -> Result<(), String> {
         self.nodeServices()?.peers().stop().await.map_err(|error| error.to_string())
     }
-    /// 本机配置继续读取原路径；不生成另一份 token 或监听配置。
+    /// Reads node-local listener preferences from their existing storage path.
     pub fn localHostConfig(&self) -> Result<Option<crate::PeerStateStore::PeerHostConfig>, String> {
         crate::PeerStateStore::PeerStateStore::new(self.localRuntime.runtimeStorageHost()).hostConfig()
     }
     pub fn saveLocalHostConfig(&self, config: crate::PeerStateStore::PeerHostConfig) -> Result<(), String> {
         crate::PeerStateStore::PeerStateStore::new(self.localRuntime.runtimeStorageHost()).saveHostConfig(&config)
-    }
-    /// 仅本机用户显式查看/复制，远端路由不允许调用。
-    pub fn localPairingToken(&self) -> Result<String, String> {
-        crate::PeerStateStore::PeerStateStore::new(self.localRuntime.runtimeStorageHost()).localPairingToken()
-    }
-    /// Rotates the node-local listener credential through its preference transaction.
-    pub fn refreshLocalPairingToken(&self) -> Result<String, String> {
-        crate::PeerStateStore::PeerStateStore::new(self.localRuntime.runtimeStorageHost())
-            .refreshLocalPairingToken()
     }
     /// 复用原身份文件并刷新 Space 资料；通信会话不参与设备资料初始化。
     pub fn initializeDeviceInfo(&self, supplied: LinkDeviceInfo) -> Result<LinkDeviceInfo, String> {

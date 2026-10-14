@@ -7,15 +7,15 @@ use serde_json::Value;
 
 /// Defines the complete wire value and ordinary preference encoding for one theme field.
 #[derive(Clone, Copy)]
-struct SnapshotField {
+pub(crate) struct SnapshotField {
     json_key: &'static str,
-    preference_key: &'static str,
-    kind: FieldKind,
+    pub(crate) preference_key: &'static str,
+    pub(crate) kind: FieldKind,
 }
 
 /// Describes a strict JSON field type and its allowed values.
 #[derive(Clone, Copy)]
-enum FieldKind {
+pub(crate) enum FieldKind {
     Boolean,
     OptionalColor,
     OptionalString,
@@ -26,7 +26,7 @@ enum FieldKind {
 
 // Keep this table exactly aligned with Flutter ThemePreferenceSnapshot.toJson.
 // Pixel padding and avatar radius have no finite UI maximum, but must be finite and nonnegative.
-const SNAPSHOT_FIELDS: &[SnapshotField] = &[
+pub(crate) const SNAPSHOT_FIELDS: &[SnapshotField] = &[
     SnapshotField {
         json_key: "themeMode",
         preference_key: "theme_mode",
@@ -530,18 +530,13 @@ pub(crate) fn readThemePreferenceSnapshot(
     let mut snapshot = initialSnapshot.clone();
     for field in SNAPSHOT_FIELDS {
         if let Some(text) = preferences.get(&stringPreferencesKey(field.preference_key)) {
-            let value = match field.kind {
-                FieldKind::OptionalString | FieldKind::Enum(_) | FieldKind::OptionalEnum(_) => {
-                    Value::String(text.clone())
-                }
-                _ => serde_json::from_str::<Value>(text)?,
-            };
+            let value = text.clone();
             validateField(field, &value)?;
             snapshot.insert(field.json_key.to_string(), value);
         }
     }
     if let Some(text) = preferences.get(&stringPreferencesKey("use_system_theme")) {
-        let enabled = serde_json::from_str::<bool>(text)?;
+        let enabled = serde_json::from_value::<bool>(text.clone())?;
         if enabled {
             snapshot.insert("themeMode".to_string(), Value::String("system".to_string()));
         }
@@ -564,10 +559,17 @@ pub(crate) fn readLegacyCharacterThemeSnapshot(
             {
                 return Err(invalidSnapshot(key, "unknown legacy role appearance preference"));
             }
-            source_entries.push((key.to_string(), value.to_string()));
+            let encoded = serde_json::from_value::<String>(value.clone())?;
+            source_entries.push((key.to_string(), encoded.clone()));
             // The released resolver always reads the user avatar globally, even when a scoped key exists.
             if field != "custom_user_avatar_uri" && field != "custom_ai_avatar_uri" {
-                scoped.set(&stringPreferencesKey(field), value.to_string());
+                let descriptor = SNAPSHOT_FIELDS.iter().find(|entry| entry.preference_key == field);
+                let decoded = match descriptor.map(|entry| entry.kind) {
+                    Some(FieldKind::Boolean | FieldKind::OptionalColor | FieldKind::Number { .. }) => serde_json::from_str::<Value>(&encoded)?,
+                    _ if field == "use_system_theme" => serde_json::to_value(serde_json::from_str::<bool>(&encoded)?)?,
+                    _ => Value::String(encoded),
+                };
+                scoped.set(&stringPreferencesKey(field), decoded);
             }
         }
     }
@@ -687,7 +689,7 @@ pub(crate) fn writeThemePreferenceSnapshot(
         match value {
             Value::Null => preferences.remove(&key),
             Value::String(value) => preferences.set(&key, value.clone()),
-            Value::Bool(_) | Value::Number(_) => preferences.set(&key, value.to_string()),
+            Value::Bool(_) | Value::Number(_) => preferences.set(&key, value.clone()),
             _ => {
                 return Err(invalidSnapshot(
                     field.json_key,
@@ -720,8 +722,7 @@ pub(crate) fn assertThemePreferenceSnapshot(
                     "active ordinary preference must be absent for a null snapshot value",
                 ));
             }
-            (Value::String(_), Some(text)) => Value::String(text.clone()),
-            (_, Some(text)) => serde_json::from_str::<Value>(text)?,
+            (_, Some(value)) => value.clone(),
             (_, None) => {
                 return Err(invalidSnapshot(
                     field.json_key,

@@ -358,7 +358,7 @@ class HistoryRail extends StatelessWidget {
 enum _ConversationQuickAction { rename, togglePinned, toggleLocked, delete }
 
 class ConversationDrawerItem extends StatefulWidget {
-  /// Creates one conversation row for the navigation drawer.
+  /// Creates a conversation row with separate menu and confirmed swipe deletions.
   const ConversationDrawerItem({
     super.key,
     required this.history,
@@ -371,6 +371,7 @@ class ConversationDrawerItem extends StatefulWidget {
     required this.onTogglePinned,
     required this.onToggleLocked,
     required this.onDelete,
+    required this.onSwipeDelete,
     required this.onLongPress,
     required this.onMoveTo,
     required this.canAcceptDrop,
@@ -390,6 +391,9 @@ class ConversationDrawerItem extends StatefulWidget {
   final VoidCallback onTogglePinned;
   final VoidCallback onToggleLocked;
   final VoidCallback onDelete;
+
+  /// Requests confirmation for a conversation deletion initiated by a swipe.
+  final VoidCallback onSwipeDelete;
   final VoidCallback onLongPress;
   final ValueChanged<core_proxy.ChatHistoryListItem> onMoveTo;
   final bool Function(core_proxy.ChatHistoryListItem) canAcceptDrop;
@@ -521,7 +525,7 @@ class _ConversationDrawerItemState extends State<ConversationDrawerItem>
                         child: SwipeActions(
                           key: ValueKey<String>('conversation-${history.id}'),
                           onStartAction: widget.onRename,
-                          onEndAction: widget.onDelete,
+                          onEndAction: widget.onSwipeDelete,
                           background: _SwipeActionBackground(
                             alignment: AlignmentDirectional.centerStart,
                             color: Theme.of(context).colorScheme.primary,

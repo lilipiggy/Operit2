@@ -117,3 +117,71 @@ fn invalid_workspace_records_are_errors_for_both_catalog_and_id_reads() {
         assert!(store.allWorkspacesFlow().first().is_err());
     }
 }
+
+/// Migrates persisted version-one records without requiring the obsolete membership index.
+#[test]
+fn workspace_schema_one_migration_preserves_unindexed_records() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (paths, _, _) = openTestStore("workspace-schema-one-native-json");
+    let legacy = PreferencesDataStore::new(paths.workspaces_preferences_path());
+    let workspace = workspaceFixture("workspace-unindexed", "Preserved");
+    legacy
+        .edit(|preferences| {
+            preferences.set(
+                &stringPreferencesKey(
+                    crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME,
+                ),
+                "1",
+            );
+            preferences.set(&stringPreferencesKey("workspace_list"), "[]");
+            preferences.set(
+                &WorkspacePreferenceStore::workspaceDataKey(&workspace.id),
+                serde_json::to_string(&workspace).unwrap(),
+            );
+        })
+        .unwrap();
+    let store = WorkspacePreferenceStore::new(paths);
+    assert_eq!(store.getAll().unwrap(), vec![workspace.clone()]);
+    let migrated = store.dataStore.data().unwrap();
+    assert_eq!(
+        migrated.get(&WorkspacePreferenceStore::workspaceDataKey(&workspace.id)),
+        Some(&serde_json::to_value(&workspace).unwrap())
+    );
+    assert!(!migrated.contains(&stringPreferencesKey("workspace_list")));
+    assert_eq!(store.dataStore.schemaVersion().unwrap(), 2);
+    assert_eq!(store.getAll().unwrap(), vec![workspace]);
+}
+
+/// Rejects a malformed legacy record without publishing a partial schema migration.
+#[test]
+fn workspace_schema_one_failure_preserves_the_entire_previous_snapshot() {
+    let _guard = DATABASE_MUTEX.lock().unwrap();
+    let (paths, _, _) = openTestStore("workspace-schema-one-invalid-json");
+    let legacy = PreferencesDataStore::new(paths.workspaces_preferences_path());
+    let workspace = workspaceFixture("workspace-valid", "Valid");
+    legacy
+        .edit(|preferences| {
+            preferences.set(
+                &stringPreferencesKey(
+                    crate::PreferencesDataStore::PREFERENCES_SCHEMA_VERSION_KEY_NAME,
+                ),
+                "1",
+            );
+            preferences.set(
+                &stringPreferencesKey("workspace_list"),
+                "[\"workspace-valid\"]",
+            );
+            preferences.set(
+                &WorkspacePreferenceStore::workspaceDataKey(&workspace.id),
+                serde_json::to_string(&workspace).unwrap(),
+            );
+            preferences.set(
+                &WorkspacePreferenceStore::workspaceDataKey("workspace-broken"),
+                "{",
+            );
+        })
+        .unwrap();
+    let before = legacy.data().unwrap();
+    assert!(WorkspacePreferenceStore::new(paths).getAll().is_err());
+    assert_eq!(legacy.data().unwrap(), before);
+}

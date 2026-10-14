@@ -2,8 +2,7 @@ import {requestUi, takeUiCommands, completeUiCommand} from './ui-debug.mts';
 import {spawn} from 'node:child_process';
 import type {ChildProcessWithoutNullStreams} from 'node:child_process';
 import {createInterface} from 'node:readline';
-import {mkdir, readFile, writeFile, copyFile} from 'node:fs/promises';
-import {randomBytes} from 'node:crypto';
+import {mkdir, copyFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
@@ -18,7 +17,6 @@ let child: ChildProcessWithoutNullStreams | null = null;
 let starting = false;
 let ready = false;
 let output = '';
-let token = '';
 let sequence = 0;
 let lifecycle = 0;
 // Each browser has its own self-drawn UI request counter. Only the page that opened
@@ -82,13 +80,6 @@ async function start(): Promise<void> {
   try {
     await previousExit;
     await mkdir(stateDir, {recursive: true});
-    const tokenPath = new URL('token', stateDir);
-    try { token = await readFile(tokenPath, 'utf8'); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      token = randomBytes(24).toString('hex');
-      await writeFile(tokenPath, token, {mode: 0o600, flag: 'wx'});
-    }
     if (generation !== lifecycle) return;
     output = '';
     ready = false;
@@ -115,7 +106,7 @@ async function start(): Promise<void> {
     await copySimulatorBinary(executable, runPath);
     if (generation !== lifecycle) return;
     const runtime = spawn(runPath, [], {cwd: root, windowsHide: true,
-      env: {...process.env, OPERIT_SIM_TOKEN: token,
+      env: {...process.env,
         OPERIT_SIM_STATE_DIR: fileURLToPath(stateDir),
         OPERIT_SIM_STATE: fileURLToPath(new URL('pairing.json', stateDir))},
     });
@@ -185,7 +176,7 @@ export async function simulatorRoute(req: IncomingMessage, res: ServerResponse, 
         const raw = device as {address?: unknown};
         if (typeof raw.address === 'string') raw.address = advertisedAddress(raw.address);
       }
-      reply(200, {running: !!child || starting, ready, output, token: ready ? token : '', device});
+      reply(200, {running: !!child || starting, ready, output, device});
     } else if (url.pathname === '/api/simulator/scene-view' && req.method === 'GET') {
       reply(200, ready ? await rpc('sceneView') : null);
     } else if (url.pathname === '/api/simulator/memory' && req.method === 'GET') {

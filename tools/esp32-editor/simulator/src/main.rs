@@ -135,8 +135,6 @@ async fn run(nodeServices: Option<NodeServices>) -> Result<(), Box<dyn std::erro
             };
             PeerStateStore::new(storage.clone()).saveHostConfig(&PeerHostConfig {
                 bindAddress: configuredAddress.clone(),
-                token: std::env::var("OPERIT_SIM_TOKEN")
-                    .unwrap_or_else(|_| "operit-simulator-token".into()),
                 transports: vec![PeerTransport::Tcp],
                 discoveryEnabled: false,
                 portMode,

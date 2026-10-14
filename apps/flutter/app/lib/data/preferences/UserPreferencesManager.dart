@@ -728,7 +728,7 @@ class UserPreferencesManager {
   ];
 
   /// Observes committed user preferences, including changes synchronized from peers.
-  Stream<Map<String, String>> preferencesFlow() {
+  Stream<Map<String, Object?>> preferencesFlow() {
     return _clients.preferencesPreferenceStorageManager
         .preferencesFlow(fileName: _fileName)
         .distinct(mapEquals);
@@ -738,12 +738,12 @@ class UserPreferencesManager {
   Stream<LongPastedTextInputSettings> longPastedTextInputSettingsFlow() {
     return preferencesFlow()
         .map(
-          (values) => <String, String>{
+          (values) => <String, Object?>{
             for (final key in <String>[
               _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
               _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
             ])
-              if (values[key] case final String value) key: value,
+              if (values.containsKey(key)) key: values[key],
           },
         )
         .distinct(mapEquals)
@@ -756,9 +756,12 @@ class UserPreferencesManager {
       .distinct();
 
   /// Defines workspace as the initial state of the new key and rejects corrupt values.
-  String _decodeChatSidebarTab(String? value) {
+  String _decodeChatSidebarTab(Object? value) {
     if (value == null) {
       return CHAT_SIDEBAR_WORKSPACE_TAB;
+    }
+    if (value is! String) {
+      throw const FormatException("chat sidebar tab must be a string");
     }
     if (value.trim().isEmpty) {
       throw const FormatException(
@@ -770,7 +773,7 @@ class UserPreferencesManager {
 
   /// Loads the opaque tab selection without translating legacy character preferences.
   Future<String> loadChatSidebarTab() async {
-    final values = await _getStrings(<String>[_KEY_CHAT_SIDEBAR_TAB]);
+    final values = await _getValues(<String>[_KEY_CHAT_SIDEBAR_TAB]);
     return _decodeChatSidebarTab(values[_KEY_CHAT_SIDEBAR_TAB]);
   }
 
@@ -779,12 +782,12 @@ class UserPreferencesManager {
     if (tabId.trim().isEmpty) {
       throw ArgumentError.value(tabId, 'tabId', 'must not be blank');
     }
-    await _setStrings(<String, String>{_KEY_CHAT_SIDEBAR_TAB: tabId});
+    await _setValues(<String, Object?>{_KEY_CHAT_SIDEBAR_TAB: tabId});
   }
 
   /// Loads the global settings for converting long pasted text to attachments.
   Future<void> loadLongPastedTextInputSettings() async {
-    final values = await _getStrings(<String>[
+    final values = await _getValues(<String>[
       _KEY_LONG_PASTED_TEXT_INPUT_ENABLED,
       _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD,
     ]);
@@ -795,7 +798,7 @@ class UserPreferencesManager {
 
   /// Decodes persisted long-paste settings without concealing malformed values.
   LongPastedTextInputSettings _decodeLongPastedTextInputSettings(
-    Map<String, String> values,
+    Map<String, Object?> values,
   ) {
     final enabledValue = values[_KEY_LONG_PASTED_TEXT_INPUT_ENABLED];
     final thresholdValue = values[_KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD];
@@ -803,7 +806,7 @@ class UserPreferencesManager {
       enabled: enabledValue == null ? true : _decodeBool(enabledValue),
       threshold: thresholdValue == null
           ? defaultLongPastedTextInputThreshold
-          : int.parse(thresholdValue),
+          : thresholdValue as int,
     );
     if (settings.threshold < longPastedTextInputMinimumThreshold ||
         settings.threshold > longPastedTextInputMaximumThreshold) {
@@ -832,9 +835,9 @@ class UserPreferencesManager {
       enabled: enabled,
       threshold: threshold,
     );
-    await _setStrings(<String, String>{
-      _KEY_LONG_PASTED_TEXT_INPUT_ENABLED: enabled.toString(),
-      _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD: threshold.toString(),
+    await _setValues(<String, Object?>{
+      _KEY_LONG_PASTED_TEXT_INPUT_ENABLED: enabled,
+      _KEY_LONG_PASTED_TEXT_INPUT_THRESHOLD: threshold,
     });
     longPastedTextInputSettings.value = settings;
   }
@@ -842,29 +845,29 @@ class UserPreferencesManager {
   /// Reads ordinary appearance values without querying plugin-owned references.
   Future<ThemePreferenceSnapshot> resolveThemePreferenceSnapshot() async {
     final keys = [..._appearanceKeys, _LEGACY_USE_SYSTEM_THEME];
-    final preferences = await _getStrings(keys);
+    final preferences = await _getValues(keys);
 
     /// Reads an ordinary key using its declared initial value when unset.
     String? stringValue(String key, {String? defaultValue}) {
-      return preferences[key] ?? defaultValue;
+      return preferences[key] as String? ?? defaultValue;
     }
 
     /// Decodes an ordinary boolean and rejects malformed stored values.
     bool booleanValue(String key, bool defaultValue) {
-      final value = stringValue(key);
+      final value = preferences[key];
       return value == null ? defaultValue : _decodeBool(value);
     }
 
     /// Decodes an optional ordinary integer without altering malformed data.
     int? intValue(String key) {
-      final value = stringValue(key);
-      return value == null ? null : int.parse(value);
+      final value = preferences[key];
+      return value == null ? null : value as int;
     }
 
     /// Decodes an ordinary number using only its declared unset-key value.
     double doubleValue(String key, double defaultValue) {
-      final value = stringValue(key);
-      return value == null ? defaultValue : double.parse(value);
+      final value = preferences[key];
+      return value == null ? defaultValue : (value as num).toDouble();
     }
 
     final storedThemeMode = _decodeThemeMode(
@@ -878,8 +881,8 @@ class UserPreferencesManager {
         ? ThemeMode.system
         : storedThemeMode;
     if (legacyUseSystemTheme != null) {
-      await _setStrings(<String, String>{_THEME_MODE: themeMode.name});
-      await _removeStrings(<String>[legacyUseSystemThemeKey]);
+      await _setValues(<String, Object?>{_THEME_MODE: themeMode.name});
+      await _removeValues(<String>[legacyUseSystemThemeKey]);
     }
 
     return ThemePreferenceSnapshot(
@@ -980,7 +983,7 @@ class UserPreferencesManager {
         _BUBBLE_AI_CONTENT_PADDING_RIGHT,
         12,
       ),
-      customUserAvatarUri: preferences[_KEY_CUSTOM_USER_AVATAR_URI],
+      customUserAvatarUri: stringValue(_KEY_CUSTOM_USER_AVATAR_URI),
       avatarShape: stringValue(_KEY_AVATAR_SHAPE) ?? AVATAR_SHAPE_CIRCLE,
       avatarCornerRadius: doubleValue(_KEY_AVATAR_CORNER_RADIUS, 8),
       useCustomFont: booleanValue(_USE_CUSTOM_FONT, false),
@@ -1100,14 +1103,14 @@ class UserPreferencesManager {
     String? bubbleAiSystemFontName,
     String? bubbleAiCustomFontPath,
   }) async {
-    final values = <String, String>{};
+    final values = <String, Object?>{};
 
     /// Encodes explicitly supplied fields for the ordinary preference transaction.
     void setIfPresent(String key, Object? value) {
       if (value == null) {
         return;
       }
-      values[key] = value.toString();
+      values[key] = value;
     }
 
     setIfPresent(_THEME_MODE, themeMode?.name);
@@ -1229,14 +1232,14 @@ class UserPreferencesManager {
   Future<void> saveGlobalUserAvatarSettings({
     required String customUserAvatarUri,
   }) async {
-    final values = <String, String>{};
+    final values = <String, Object?>{};
     values[_KEY_CUSTOM_USER_AVATAR_URI] = customUserAvatarUri;
     await _saveAppearanceValues(values);
   }
 
   /// Edits appearance through the theme owner so the active named configuration stays synchronized.
   Future<void> _saveAppearanceValues(
-    Map<String, String> values, {
+    Map<String, Object?> values, {
     List<String> removeKeys = const [],
   }) async {
     await _clients.application.themeConfigManager().patchAppearance(
@@ -1246,21 +1249,21 @@ class UserPreferencesManager {
     );
   }
 
-  Future<Map<String, String>> _getStrings(List<String> keys) {
+  Future<Map<String, Object?>> _getValues(List<String> keys) {
     return _clients.preferencesPreferenceStorageManager.getPreferences(
       fileName: _fileName,
       keys: keys,
     );
   }
 
-  Future<void> _setStrings(Map<String, String> values) {
+  Future<void> _setValues(Map<String, Object?> values) {
     return _clients.preferencesPreferenceStorageManager.setPreferences(
       fileName: _fileName,
       values: values,
     );
   }
 
-  Future<void> _removeStrings(List<String> keys) {
+  Future<void> _removeValues(List<String> keys) {
     return _clients.preferencesPreferenceStorageManager.removePreferences(
       fileName: _fileName,
       keys: keys,
@@ -1269,10 +1272,10 @@ class UserPreferencesManager {
 }
 
 /// Decodes one strict boolean preference value.
-bool _decodeBool(String value) {
+bool _decodeBool(Object value) {
   return switch (value) {
-    'true' => true,
-    'false' => false,
+    true => true,
+    false => false,
     _ => throw FormatException('invalid boolean preference: $value'),
   };
 }

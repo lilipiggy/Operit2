@@ -129,11 +129,11 @@ impl RuntimePeerService for Peers {
     async fn discoverPeers(&self, _: u64) -> Result<Vec<DiscoveredPeer>, CoreLinkError> {
         panic!("unused")
     }
+    /// Rejects pairing requests outside this chat-session fixture contract.
     async fn startPairing(
         &self,
         _: PeerEndpoint,
         _: PeerTransport,
-        _: Option<&str>,
     ) -> Result<PendingPairing, CoreLinkError> {
         panic!("unused")
     }

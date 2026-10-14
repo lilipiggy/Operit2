@@ -2294,10 +2294,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsRuntimeDiscoveredEdges => 'ESP32 devices';
 
   @override
-  String get settingsRuntimeEdgeEndpointTokenRequired =>
-      'Edge endpoint and token are required';
-
-  @override
   String get settingsRuntimeEdgeEndpointRequired => 'Edge endpoint is required';
 
   @override
@@ -2309,13 +2305,6 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get settingsRuntimeConnectionInitiatedByOtherDevice =>
       'Connection initiated by the other device';
-
-  @override
-  String get settingsRuntimePairToken => 'Connection token';
-
-  @override
-  String get settingsRuntimePairTokenHint =>
-      'Required off-LAN; leave empty for devices on the same network';
 
   @override
   String get settingsRuntimePairCode => 'Pairing code';
@@ -2332,6 +2321,13 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get settingsRuntimeTcpAddressHint =>
       'host:port, for example 192.168.1.10:37195';
+
+  @override
+  String get settingsRuntimeTransportAuto => 'Auto (recommended)';
+
+  @override
+  String get settingsRuntimeTransportAutoHint =>
+      'Enter host:port; the carrier (HTTP/WebSocket/TCP) is detected automatically';
 
   @override
   String settingsRuntimeConnectionFailed(String error) {
@@ -2412,7 +2408,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsRuntimeWebPairDescription =>
-      'Enter another device\'s address and pairing token to connect this browser as an active pairing client.';
+      'Enter another device\'s address and confirm the pairing code to connect this browser as an active pairing client.';
 
   @override
   String settingsRuntimeDiscoveredSpaceSummary(
@@ -3834,25 +3830,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String chatMessageCacheHitRate(String rate) {
     return 'Cache hit rate: $rate';
   }
-
-  @override
-  String get settingsPeerToken => 'Connection token';
-
-  @override
-  String get settingsPeerTokenHelp => 'Remote connections require this token.';
-
-  @override
-  String get settingsPeerCopyToken => 'Copy token';
-
-  @override
-  String get settingsPeerRefreshToken => 'Refresh token';
-
-  @override
-  String get settingsPeerTokenCopied => 'Connection token copied.';
-
-  @override
-  String get settingsPeerTokenRequired =>
-      'Enter or refresh a connection token.';
 
   @override
   String get settingsPeerPortModeHelp =>
